@@ -7,12 +7,14 @@ import argparse
 import importlib
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
 
 ROOT = Path(__file__).resolve().parent
 SKILL_SOURCE = ROOT / "skills" / "asx"
+PILLOW_REQUIREMENT = "Pillow>=10.2,<13"
 
 
 def _load_client_module() -> ModuleType:
@@ -64,7 +66,28 @@ def _target_path(target: str, home: Path) -> Path:
     raise ValueError(f"Unknown target: {target}")
 
 
-def _install_skill(destination: Path) -> None:
+def _install_dependencies(destination: Path) -> None:
+    vendor = destination / "scripts" / "vendor"
+    vendor.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--upgrade",
+            "--target",
+            str(vendor),
+            PILLOW_REQUIREMENT,
+        ],
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(f"无法将 Pillow 安装到 skill 的隔离依赖目录：{vendor}")
+
+
+def _install_skill(destination: Path, *, install_dependencies: bool = True) -> None:
     if destination.exists() and not destination.is_dir():
         raise RuntimeError(f"Installation target is not a directory: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -72,10 +95,12 @@ def _install_skill(destination: Path) -> None:
         SKILL_SOURCE,
         destination,
         dirs_exist_ok=True,
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "vendor"),
     )
     script = destination / "scripts" / "asynx.py"
     script.chmod(script.stat().st_mode | 0o111)
+    if install_dependencies:
+        _install_dependencies(destination)
 
 
 def _uninstall_skill(destination: Path) -> bool:
@@ -160,7 +185,12 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run(argv: list[str] | None = None, *, home: Path | None = None) -> int:
+def run(
+    argv: list[str] | None = None,
+    *,
+    home: Path | None = None,
+    install_dependencies: bool = True,
+) -> int:
     args = _parser().parse_args(argv)
     user_home = (home or Path.home()).resolve()
     if args.uninstall:
@@ -185,7 +215,7 @@ def run(argv: list[str] | None = None, *, home: Path | None = None) -> int:
     targets = _resolve_targets(args.target, user_home)
     for target in targets:
         destination = _target_path(target, user_home)
-        _install_skill(destination)
+        _install_skill(destination, install_dependencies=install_dependencies)
         label = "Codex" if target == "codex" else "Claude Code"
         print(f"Installed for {label}: {destination}")
 
@@ -211,7 +241,7 @@ def run(argv: list[str] | None = None, *, home: Path | None = None) -> int:
 def main() -> int:
     try:
         return run()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - installer failures share one CLI error path
         message = getattr(exc, "message", str(exc))
         print(f"Installation failed: {message}", file=sys.stderr)
         return 1

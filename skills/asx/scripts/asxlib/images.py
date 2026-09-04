@@ -1,17 +1,27 @@
 from __future__ import annotations
 
-import base64
-import binascii
+import json
+import os
 import re
-from pathlib import Path
+import stat
+import tempfile
+import time
 from typing import Any, Protocol, cast
-from urllib.parse import urlsplit
 
-from .constants import DEFAULT_MODEL, MAX_IMAGE_INPUTS
+from .config import cache_path
+from .constants import (
+    DEFAULT_MODEL,
+    MODEL_CACHE_TTL_SECONDS,
+    REFERENCE_NETWORK_WARNING_BYTES,
+)
 from .errors import AsxError
+from .reference_media import prepare_inputs, request_body_size, validate_request_body
 
+_CANONICAL_MODEL = re.compile(r"^(?=.*\d)[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)+$")
 
 class ModelCatalogClient(Protocol):
+    base_url: str
+
     def models(self) -> tuple[list[dict[str, Any]], str | None]: ...
 
 
@@ -54,6 +64,61 @@ def resolve_model(
     raise AsxError(message, code="model_unavailable", details={"available": available})
 
 
+def _cached_models(base_url: str) -> list[dict[str, Any]] | None:
+    path = cache_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("base_url") != base_url:
+        return None
+    fetched_at = payload.get("fetched_at")
+    items = payload.get("items")
+    if (
+        not isinstance(fetched_at, (int, float))
+        or time.time() - float(fetched_at) > MODEL_CACHE_TTL_SECONDS
+        or not isinstance(items, list)
+        or not all(isinstance(item, dict) for item in items)
+    ):
+        return None
+    return cast(list[dict[str, Any]], items)
+
+
+def cache_models(base_url: str, models: list[dict[str, Any]]) -> None:
+    path = cache_path()
+    temporary: str | None = None
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix="models-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = handle.name
+            json.dump(
+                {"base_url": base_url, "fetched_at": time.time(), "items": models},
+                handle,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            handle.write("\n")
+        os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR)
+        os.replace(temporary, path)
+    except OSError:
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def _looks_canonical(selector: str) -> bool:
+    return bool(_CANONICAL_MODEL.fullmatch(selector.strip()))
+
+
 def capabilities(model: dict[str, Any]) -> dict[str, Any]:
     value = model.get("capabilities")
     if not isinstance(value, dict):
@@ -87,30 +152,6 @@ def image_mime(data: bytes) -> str:
     raise AsxError("Local inputs must be PNG, JPEG, or WebP images", code="unsupported_image_format")
 
 
-def image_source(value: str) -> str:
-    if value.startswith("data:image/"):
-        try:
-            header, encoded = value.split(",", 1)
-            if not header.endswith(";base64"):
-                raise ValueError
-            image_mime(base64.b64decode(encoded, validate=True))
-        except (ValueError, binascii.Error) as exc:
-            raise AsxError("Image Data URL is invalid", code="invalid_base64_image") from exc
-        return value
-    parts = urlsplit(value)
-    if parts.scheme in {"http", "https"} and parts.hostname:
-        return value
-    path = Path(value).expanduser()
-    if not path.is_file():
-        raise AsxError(f"Image file does not exist: {path}", code="image_not_found")
-    try:
-        data = path.read_bytes()
-    except OSError as exc:
-        raise AsxError(f"Cannot read image file {path}: {exc}", code="image_read_failed") from exc
-    mime = image_mime(data)
-    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
-
-
 def validate_idempotency_key(value: str) -> str:
     try:
         raw = value.encode("ascii")
@@ -122,6 +163,46 @@ def validate_idempotency_key(value: str) -> str:
             code="invalid_idempotency_key",
         )
     return value
+
+
+def _data_url_size(value: str) -> int:
+    encoded = value.rsplit(",", 1)[1]
+    padding = len(encoded) - len(encoded.rstrip("="))
+    return len(encoded) * 3 // 4 - padding
+
+
+def task_input_warnings(body: dict[str, Any]) -> list[dict[str, Any]]:
+    task_input = body.get("input")
+    if not isinstance(task_input, dict):
+        return []
+    sources = task_input.get("reference_images", task_input.get("images", []))
+    local_sources = (
+        [source for source in sources if isinstance(source, str) and source.startswith("data:image/")]
+        if isinstance(sources, list)
+        else []
+    )
+    mask = task_input.get("mask")
+    if isinstance(mask, str) and mask.startswith("data:image/"):
+        local_sources.append(mask)
+    if not local_sources:
+        return []
+    body_bytes = request_body_size(body)
+    if body_bytes < REFERENCE_NETWORK_WARNING_BYTES:
+        return []
+    image_bytes = sum(_data_url_size(source) for source in local_sources)
+    return [
+        {
+            "code": "large_reference_payload",
+            "message": (
+                f"处理后的 {len(local_sources)} 张本地图片共 "
+                f"{image_bytes / 1024 / 1024:.2f} MiB，Base64 请求体为 "
+                f"{body_bytes / 1024 / 1024:.2f} MiB，弱网上传可能明显变慢"
+            ),
+            "image_bytes": image_bytes,
+            "request_body_bytes": body_bytes,
+            "local_image_count": len(local_sources),
+        }
+    ]
 
 
 def build_task(
@@ -137,6 +218,7 @@ def build_task(
     output_format: str,
     references: list[str],
     mask: str | None = None,
+    keep_reference_original: bool = False,
 ) -> tuple[dict[str, Any], str, str | None]:
     if not 1 <= len(prompt) <= 32_000:
         raise AsxError("Prompt must contain 1-32,000 characters", code="invalid_prompt")
@@ -144,51 +226,75 @@ def build_task(
         raise AsxError("Quality cannot be empty", code="invalid_quality")
     if not 1 <= count <= 4:
         raise AsxError("Count must be between 1 and 4", code="invalid_count")
-    if not 0 <= len(references) <= MAX_IMAGE_INPUTS:
-        raise AsxError(
-            f"At most {MAX_IMAGE_INPUTS} input images are supported",
-            code="too_many_images",
-        )
     if task_type == "image.edit" and not references:
         raise AsxError("Image editing requires at least one input image", code="missing_edit_image")
 
-    models, request_id = client.models()
-    model = resolve_model(models, model_selector, task_type)
-    model_capabilities = capabilities(model)
-    canonical_size = catalog_choice(
-        image_size, model_capabilities.get("image_sizes"), "image_size"
-    )
-    canonical_ratio = catalog_choice(
-        aspect_ratio, model_capabilities.get("aspect_ratios"), "aspect_ratio"
-    )
-    canonical_format = catalog_choice(
-        output_format, model_capabilities.get("output_formats"), "output_format"
-    )
-    max_images = model_capabilities.get("max_images")
-    if not isinstance(max_images, int) or count > max_images:
-        raise AsxError(
-            f"Selected model supports at most {max_images} output images",
-            code="unsupported_model_capability",
-        )
-    max_references = model_capabilities.get("max_reference_images")
-    if not isinstance(max_references, int) or len(references) > max_references:
-        raise AsxError(
-            f"Selected model supports at most {max_references} input images",
-            code="unsupported_model_capability",
-        )
-    if (
-        task_type == "image.generate"
-        and references
-        and not model_capabilities.get("supports_reference_images")
-    ):
-        raise AsxError(
-            "Selected model does not support reference images",
-            code="unsupported_model_capability",
-        )
-    if mask and not model_capabilities.get("supports_mask"):
-        raise AsxError("Selected model does not support masks", code="unsupported_model_capability")
+    requested_model = (model_selector or DEFAULT_MODEL).strip()
+    if not 1 <= len(requested_model) <= 160:
+        raise AsxError("Model name must contain 1-160 characters", code="invalid_model")
+    request_id: str | None = None
+    models = _cached_models(client.base_url)
+    model: dict[str, Any] | None = None
+    if models is not None:
+        exact = [
+            item
+            for item in models
+            if task_type in item.get("task_types", [])
+            and str(item.get("name", "")).casefold() == requested_model.casefold()
+        ]
+        if len(exact) == 1:
+            model = exact[0]
+    if model is None and model_selector is not None and not _looks_canonical(model_selector):
+        if models is None:
+            models, request_id = client.models()
+            cache_models(client.base_url, models)
+        model = resolve_model(models, model_selector, task_type)
 
-    prepared = [image_source(source) for source in references]
+    canonical_size = image_size.strip().upper()
+    canonical_ratio = aspect_ratio.strip()
+    canonical_format = output_format.strip().lower()
+    if model is not None:
+        model_capabilities = capabilities(model)
+        canonical_size = catalog_choice(
+            image_size, model_capabilities.get("image_sizes"), "image_size"
+        )
+        canonical_ratio = catalog_choice(
+            aspect_ratio, model_capabilities.get("aspect_ratios"), "aspect_ratio"
+        )
+        canonical_format = catalog_choice(
+            output_format, model_capabilities.get("output_formats"), "output_format"
+        )
+        max_images = model_capabilities.get("max_images")
+        if not isinstance(max_images, int) or count > max_images:
+            raise AsxError(
+                f"Selected model supports at most {max_images} output images",
+                code="unsupported_model_capability",
+            )
+        max_references = model_capabilities.get("max_reference_images")
+        if not isinstance(max_references, int) or len(references) > max_references:
+            raise AsxError(
+                f"Selected model supports at most {max_references} input images",
+                code="unsupported_model_capability",
+            )
+        if (
+            task_type == "image.generate"
+            and references
+            and not model_capabilities.get("supports_reference_images")
+        ):
+            raise AsxError(
+                "Selected model does not support reference images",
+                code="unsupported_model_capability",
+            )
+        if mask and not model_capabilities.get("supports_mask"):
+            raise AsxError(
+                "Selected model does not support masks", code="unsupported_model_capability"
+            )
+
+    prepared, prepared_mask = prepare_inputs(
+        references,
+        mask=mask,
+        keep_original=keep_reference_original,
+    )
     task_input: dict[str, Any] = {
         "prompt": prompt,
         "count": count,
@@ -202,11 +308,12 @@ def build_task(
         task_input["reference_images"] = prepared
     else:
         task_input["images"] = prepared
-        task_input["mask"] = image_source(mask) if mask else None
+        task_input["mask"] = prepared_mask
     body = {
         "task_type": task_type,
-        "model": model["name"],
+        "model": model["name"] if model is not None else requested_model,
         "input": task_input,
         "asset_delivery": "asynx",
     }
-    return body, str(model["name"]), request_id
+    validate_request_body(body)
+    return body, str(body["model"]), request_id

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """用于 asx skill 端到端测试的本地 Mock Asynx 服务。"""
 
 from __future__ import annotations
@@ -46,6 +45,7 @@ class MockState:
         self.dropped: set[str] = set()
         self.submissions = 0
         self.replays = 0
+        self.model_requests = 0
 
     def submit(self, body: dict[str, Any], idempotency_key: str) -> tuple[dict[str, Any], bool, bool]:
         with self.lock:
@@ -163,7 +163,7 @@ def _public_task(task: dict[str, Any], base_url: str) -> dict[str, Any]:
 
 
 class MockHandler(BaseHTTPRequestHandler):
-    server: "MockServer"
+    server: MockServer
 
     def log_message(self, format: str, *args: Any) -> None:
         return
@@ -230,12 +230,15 @@ class MockHandler(BaseHTTPRequestHandler):
                         "tasks": len(state.tasks),
                         "submissions": state.submissions,
                         "idempotent_replays": state.replays,
+                        "model_requests": state.model_requests,
                     }
                 )
             return
         if not self._authorized():
             return
         if path == "/v1/tasks/models":
+            with self.server.state.lock:
+                self.server.state.model_requests += 1
             self._ok({"items": [_model("gpt-image-2", mask=True), _model("gemini-3.1-flash-image", mask=False)]})
             return
         if path == "/v1/tasks":

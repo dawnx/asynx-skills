@@ -1,7 +1,7 @@
 interface:
   display_name: "Asynx Image"
   short_description: "通过 Asynx 异步生成、编辑和批量处理图片"
-  default_prompt: "使用 $asx 通过已配置的 Asynx 账户生成或编辑图片。"
+  default_prompt: "直接描述想生成或修改的图片，我会使用 $asx 完成并返回最终图片。"
 
 policy:
   allow_implicit_invocation: true

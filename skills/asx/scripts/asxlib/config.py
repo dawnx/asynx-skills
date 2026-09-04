@@ -35,6 +35,16 @@ def state_path() -> Path:
     return state_home / "asx" / "state.db"
 
 
+def cache_path() -> Path:
+    override = os.environ.get("ASYNX_CACHE_PATH")
+    if override:
+        return Path(override).expanduser()
+    if os.name == "nt" and os.environ.get("LOCALAPPDATA"):
+        return Path(os.environ["LOCALAPPDATA"]) / "Asynx" / "cache" / "models.json"
+    cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    return cache_home / "asx" / "models.json"
+
+
 def read_config() -> dict[str, Any]:
     path = config_path()
     if not path.exists():

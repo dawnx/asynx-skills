@@ -4,14 +4,12 @@ import argparse
 import json
 import secrets
 import sqlite3
-import stat
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
 from .client import AsynxClient
-from .config import state_path
 from .constants import (
     DEFAULT_BATCH_SUBMISSIONS_PER_POLL,
     DEFAULT_OUTPUT_DIR,
@@ -21,9 +19,22 @@ from .constants import (
     UTC,
 )
 from .errors import AsxError
-from .images import build_task
+from .images import build_task, task_input_warnings
 from .output import log
-from .tasks import download_assets
+from .state import (
+    append_event,
+    bind_remote_task,
+    create_task_intent,
+    ensure_batch_schema,
+)
+from .state import connect_db as connect_state_db
+from .state import (
+    get_task as get_state_task,
+)
+from .state import (
+    update_task as update_state_task,
+)
+from .tasks import download_assets, index_downloaded_artifacts
 
 
 def utc_now() -> str:
@@ -31,49 +42,13 @@ def utc_now() -> str:
 
 
 def connect_db() -> sqlite3.Connection:
-    path = state_path()
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    connection = sqlite3.connect(path, timeout=30)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA busy_timeout = 30000")
-    connection.execute("PRAGMA journal_mode = WAL")
-    connection.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS batches (
-            id TEXT PRIMARY KEY,
-            operation TEXT NOT NULL CHECK (operation IN ('generate', 'edit')),
-            name TEXT NOT NULL,
-            status TEXT NOT NULL CHECK (status IN ('active', 'paused', 'completed', 'canceled')),
-            model TEXT NOT NULL,
-            output_dir TEXT NOT NULL,
-            template_json TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS batch_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            batch_id TEXT NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
-            sequence INTEGER NOT NULL,
-            body_json TEXT NOT NULL,
-            idempotency_key TEXT NOT NULL UNIQUE,
-            task_id TEXT,
-            status TEXT NOT NULL,
-            request_id TEXT,
-            files_json TEXT,
-            error_json TEXT,
-            updated_at TEXT NOT NULL,
-            UNIQUE(batch_id, sequence)
-        );
-        CREATE INDEX IF NOT EXISTS ix_batch_items_batch_status
-            ON batch_items(batch_id, status, sequence);
-        """
-    )
+    connection = connect_state_db()
+    ensure_batch_schema(connection)
     connection.execute("PRAGMA foreign_keys = ON")
     try:
         connection.execute("PRAGMA synchronous = NORMAL")
     except sqlite3.DatabaseError:
         pass
-    path.chmod(stat.S_IRUSR | stat.S_IWUSR)
     return connection
 
 
@@ -108,10 +83,11 @@ def batch_summary(connection: sqlite3.Connection, batch: sqlite3.Row) -> dict[st
         ).fetchone()[0]
     )
     finished = (
-        sum(counts.get(status, 0) for status in {"succeeded", "failed", "timeout", "canceled"})
+        sum(counts.get(status, 0) for status in ("succeeded", "failed", "timeout", "canceled"))
         - pending_download
     )
     return {
+        "schema_version": 1,
         "id": batch["id"],
         "name": batch["name"],
         "operation": batch["operation"],
@@ -124,6 +100,7 @@ def batch_summary(connection: sqlite3.Connection, batch: sqlite3.Row) -> dict[st
         "finished": finished,
         "pending_download": pending_download,
         "counts": counts,
+        "cancel_requested": bool(batch["cancel_requested"]),
     }
 
 
@@ -167,9 +144,10 @@ def _insert_items(
     first_sequence: int,
     total: int,
     now: str,
+    inherit_template: bool = False,
 ) -> None:
     for sequence in range(first_sequence, first_sequence + total):
-        item_body = json.loads(_json(body))
+        item_body = {"_asx_inherit_template": True} if inherit_template else json.loads(_json(body))
         item_body["metadata"] = {
             "asx_batch_id": batch_id,
             "asx_item_id": _item_id(batch_id, sequence),
@@ -198,6 +176,7 @@ def create_batch(
     total: int,
     name: str | None,
     output_dir: str | None,
+    keep_reference_original: bool = False,
 ) -> dict[str, Any]:
     if not 1 <= total <= MAX_BATCH_ITEMS:
         raise AsxError(
@@ -215,6 +194,7 @@ def create_batch(
         output_format=output_format,
         references=references,
         mask=mask,
+        keep_reference_original=keep_reference_original,
     )
     batch_id = _new_batch_id()
     now = utc_now()
@@ -239,7 +219,15 @@ def create_batch(
                 now,
             ),
         )
-        _insert_items(connection, batch_id, body, first_sequence=1, total=total, now=now)
+        _insert_items(
+            connection,
+            batch_id,
+            body,
+            first_sequence=1,
+            total=total,
+            now=now,
+            inherit_template=True,
+        )
         connection.commit()
         summary = batch_summary(connection, get_batch(connection, batch_id))
     except sqlite3.Error as exc:
@@ -251,6 +239,9 @@ def create_batch(
         connection.close()
     if catalog_request_id:
         summary["catalog_request_id"] = catalog_request_id
+    input_warnings = task_input_warnings(body)
+    if input_warnings:
+        summary["warnings"] = input_warnings
     return summary
 
 
@@ -267,6 +258,7 @@ def add_to_batch(
     aspect_ratio: str | None,
     quality: str | None,
     output_format: str | None,
+    keep_reference_original: bool = False,
 ) -> dict[str, Any]:
     if not 1 <= total <= MAX_BATCH_ITEMS:
         raise AsxError(
@@ -327,7 +319,11 @@ def add_to_batch(
                     if batch["operation"] == "edit" and input_value.get("mask")
                     else None
                 ),
+                keep_reference_original=(
+                    keep_reference_original if references is not None else True
+                ),
             )
+        connection.execute("BEGIN IMMEDIATE")
         max_sequence = int(
             connection.execute(
                 "SELECT COALESCE(MAX(sequence), 0) FROM batch_items WHERE batch_id = ?",
@@ -342,12 +338,17 @@ def add_to_batch(
             first_sequence=max_sequence + 1,
             total=total,
             now=now,
+            inherit_template=not has_overrides,
         )
         connection.execute(
             "UPDATE batches SET updated_at = ? WHERE id = ?", (now, batch["id"])
         )
         connection.commit()
-        return batch_summary(connection, get_batch(connection, batch["id"]))
+        summary = batch_summary(connection, get_batch(connection, batch["id"]))
+        input_warnings = task_input_warnings(body)
+        if input_warnings:
+            summary["warnings"] = input_warnings
+        return summary
     except sqlite3.Error as exc:
         connection.rollback()
         raise AsxError(
@@ -437,7 +438,7 @@ def _refresh_batch_status(connection: sqlite3.Connection, batch_id: str) -> None
     )
     if total and unfinished == 0:
         connection.execute(
-            "UPDATE batches SET status = CASE WHEN status = 'canceled' "
+            "UPDATE batches SET status = CASE WHEN cancel_requested = 1 "
             "THEN 'canceled' ELSE 'completed' END, updated_at = ? WHERE id = ?",
             (utc_now(), batch_id),
         )
@@ -458,7 +459,9 @@ def poll_batch(
         batch = get_batch(connection, batch_id)
         if batch["status"] == "paused":
             return {"ok": True, "batch": batch_summary(connection, batch), "paused": True}
-        if batch["status"] in {"completed", "canceled"}:
+        if batch["status"] == "completed" or (
+            batch["status"] == "canceled" and not batch["cancel_requested"]
+        ):
             return {"ok": True, "batch": batch_summary(connection, batch), "finished": True}
         stale_before = datetime.now(UTC) - timedelta(minutes=5)
         connection.execute(
@@ -469,30 +472,90 @@ def poll_batch(
         connection.commit()
 
         submitted = 0
+        artifact_warnings: list[dict[str, Any]] = []
+        asset_downloads: list[dict[str, Any]] = []
         pending = connection.execute(
             "SELECT * FROM batch_items WHERE batch_id = ? AND status = 'pending' "
             "ORDER BY sequence LIMIT ?",
             (batch["id"], submissions_limit),
         ).fetchall()
         for item in pending:
-            connection.execute(
+            claim = connection.execute(
                 "UPDATE batch_items SET status = 'submitting', error_json = NULL, updated_at = ? "
                 "WHERE id = ? AND status = 'pending'",
                 (utc_now(), item["id"]),
             )
+            if claim.rowcount != 1:
+                continue
             connection.commit()
             try:
                 body = json.loads(item["body_json"])
-                task, request_id = client.submit(body, item["idempotency_key"])
-                task_id = task.get("id")
+                if body.pop("_asx_inherit_template", False):
+                    template = _template(batch)
+                    template["metadata"] = body.get("metadata", {})
+                    body = template
+                local_task_id = f"batchitem_{int(item['id'])}"
+                intent = create_task_intent(
+                    connection,
+                    operation=str(batch["operation"]),
+                    model=str(batch["model"]),
+                    idempotency_key=str(item["idempotency_key"]),
+                    request=body,
+                    output_dir=str(batch["output_dir"]),
+                    base_url=client.base_url,
+                    local_id=local_task_id,
+                    status="submitting",
+                )
+                connection.commit()
+                if intent.get("remote_task_id"):
+                    task, request_id = client.task(str(intent["remote_task_id"]))
+                else:
+                    task, request_id = client.submit(body, item["idempotency_key"])
+                    bind_remote_task(
+                        connection,
+                        local_task_id,
+                        str(task.get("id")),
+                        remote=task,
+                        status=(
+                            task.get("status")
+                            if isinstance(task.get("status"), str)
+                            else "queued"
+                        ),
+                        last_polled=utc_now(),
+                    )
+                    append_event(
+                        connection,
+                        local_task_id,
+                        "submitted",
+                        {"request_id": request_id},
+                    )
+                submitted_task_id = task.get("id")
                 status = task.get("status") if isinstance(task.get("status"), str) else "queued"
-                if not isinstance(task_id, str):
+                if not isinstance(submitted_task_id, str):
                     raise AsxError("Task response is missing an ID", code="invalid_task_response")
+                state_task = get_state_task(connection, local_task_id=local_task_id)
+                if state_task is not None:
+                    previous_state = str(state_task.get("status"))
+                    update_state_task(
+                        connection,
+                        local_task_id,
+                        status=status,
+                        remote=task,
+                        billing=task.get("billing"),
+                        last_polled=utc_now(),
+                    )
+                    if previous_state != status:
+                        append_event(
+                            connection,
+                            local_task_id,
+                            "status_changed",
+                            {"from": previous_state, "to": status, "request_id": request_id},
+                        )
                 _update_item(
                     connection,
                     int(item["id"]),
                     status=status if status in LOCAL_ITEM_STATUSES else "submitted",
-                    task_id=task_id,
+                    task_id=submitted_task_id,
                     request_id=request_id,
                 )
                 connection.commit()
@@ -501,7 +564,11 @@ def poll_batch(
                 _update_item(
                     connection,
                     int(item["id"]),
-                    status="pending",
+                    status=(
+                        "failed"
+                        if exc.http_status in {400, 404, 410, 422}
+                        else "pending"
+                    ),
                     error=exc.payload().get("error"),
                 )
                 connection.commit()
@@ -510,21 +577,47 @@ def poll_batch(
         remote_items = connection.execute(
             "SELECT * FROM batch_items WHERE batch_id = ? AND status IN "
             "('submitted', 'queued', 'running', 'delayed', 'canceling', 'succeeded') "
-            "AND (status != 'succeeded' OR files_json IS NULL) ORDER BY sequence",
+            "ORDER BY sequence",
             (batch["id"],),
         ).fetchall()
         downloaded = 0
         for item in remote_items:
-            task_id = item["task_id"]
-            if not isinstance(task_id, str):
+            if item["status"] == "succeeded" and item["files_json"]:
+                try:
+                    cached_files = json.loads(item["files_json"])
+                except json.JSONDecodeError:
+                    cached_files = []
+                if isinstance(cached_files, list) and cached_files and all(
+                    isinstance(path, str) and Path(path).is_file() for path in cached_files
+                ):
+                    continue
+            remote_task_id: str | None = item["task_id"]
+            if not isinstance(remote_task_id, str):
                 continue
+            state_task_row = get_state_task(connection, remote_task_id=remote_task_id)
+            batch_local_task_id = str(state_task_row["local_id"]) if state_task_row else None
             try:
-                task, request_id = client.task(task_id)
+                task, request_id = client.task(remote_task_id)
             except AsxError as exc:
+                permanent = exc.http_status in {400, 404, 410, 422}
+                if state_task_row is not None and permanent:
+                    update_state_task(
+                        connection,
+                        str(state_task_row["local_id"]),
+                        status="failed",
+                        error=exc.payload().get("error"),
+                        last_polled=utc_now(),
+                    )
+                    append_event(
+                        connection,
+                        str(state_task_row["local_id"]),
+                        "task_error",
+                        exc.payload().get("error"),
+                    )
                 _update_item(
                     connection,
                     int(item["id"]),
-                    status=item["status"],
+                    status="failed" if permanent else item["status"],
                     error=exc.payload().get("error"),
                 )
                 connection.commit()
@@ -543,6 +636,25 @@ def poll_batch(
                 )
                 connection.commit()
                 continue
+            if state_task_row is not None:
+                previous_state = str(state_task_row.get("status"))
+                update_state_task(
+                    connection,
+                    str(state_task_row["local_id"]),
+                    status=status,
+                    remote=task,
+                    billing=task.get("billing"),
+                    error=task.get("error") if status in {"failed", "timeout", "canceled"} else None,
+                    last_polled=utc_now(),
+                )
+                if previous_state != status:
+                    append_event(
+                        connection,
+                        str(state_task_row["local_id"]),
+                        "status_changed",
+                        {"from": previous_state, "to": status, "request_id": request_id},
+                    )
+                connection.commit()
             files: list[str] | None = None
             if status == "succeeded":
                 files = json.loads(item["files_json"]) if item["files_json"] else None
@@ -553,6 +665,8 @@ def poll_batch(
                             task,
                             batch["output_dir"],
                             prefix=f"{batch['id']}-{int(item['sequence']):06d}",
+                            metrics=asset_downloads,
+                            local_task_id=batch_local_task_id,
                         )
                         downloaded += len(files)
                     except AsxError as exc:
@@ -565,6 +679,13 @@ def poll_batch(
                         )
                         connection.commit()
                         continue
+                if files and not batch_local_task_id:
+                    artifact_warning = index_downloaded_artifacts(
+                        task, files, operation=batch["operation"]
+                    )
+                    if artifact_warning:
+                        artifact_warnings.append(artifact_warning)
+                        log(f"提示：{artifact_warning['message']}")
             _update_item(
                 connection,
                 int(item["id"]),
@@ -583,7 +704,14 @@ def poll_batch(
         result = batch_summary(connection, get_batch(connection, batch["id"]))
         result["submitted_now"] = submitted
         result["downloaded_now"] = downloaded
-        return {"ok": True, "batch": result}
+        if asset_downloads:
+            result["asset_downloads_now"] = asset_downloads
+        if artifact_warnings:
+            result["warnings"] = artifact_warnings
+        if result["counts"].get("failed", 0):
+            result["partial"] = True
+            result["action_required"] = "查看 batch status --items，处理失败项"
+        return {"ok": not bool(result.get("partial")), "batch": result}
     finally:
         connection.close()
 
@@ -641,11 +769,19 @@ def cancel_batch(client: AsynxClient, batch_id: str | None) -> dict[str, Any]:
                 )
             connection.commit()
         connection.execute(
-            "UPDATE batches SET status = 'canceled', updated_at = ? WHERE id = ?",
+            "UPDATE batches SET cancel_requested = 1, updated_at = ? WHERE id = ?",
             (utc_now(), batch["id"]),
         )
+        _refresh_batch_status(connection, batch["id"])
         connection.commit()
-        return {"ok": True, "batch": batch_summary(connection, get_batch(connection, batch["id"]))}
+        summary = batch_summary(connection, get_batch(connection, batch["id"]))
+        payload: dict[str, Any] = {"ok": True, "batch": summary}
+        if summary["status"] != "canceled":
+            payload["cancel_requested"] = True
+            payload["warning"] = "上游取消可能仍在处理，已开始的任务可能继续执行并计费"
+        else:
+            payload["finished"] = True
+        return payload
     finally:
         connection.close()
 
@@ -700,6 +836,7 @@ def execute_batch(
     if action == "cancel":
         return cancel_batch(client, args.batch_id), 0
     if action == "create":
+        log("正在创建并提交图片批次")
         references = args.reference if args.operation == "generate" else args.image
         if args.operation == "edit" and not references:
             raise AsxError("编辑批次至少需要一张输入图片", code="missing_edit_image")
@@ -718,9 +855,14 @@ def execute_batch(
             total=args.total,
             name=args.name,
             output_dir=args.output_dir,
+            keep_reference_original=args.keep_reference_original,
         )
+        for warning in created.get("warnings", []):
+            log(f"提示：{warning['message']}")
         progressed = poll_batch(client, created["id"], submissions_limit=args.limit)
         progressed["created"] = True
+        if created.get("warnings"):
+            progressed["warnings"] = created["warnings"]
         return progressed, 0
     if action == "add":
         references = args.reference if args.reference else args.image if args.image else None
@@ -736,8 +878,13 @@ def execute_batch(
             aspect_ratio=args.aspect_ratio,
             quality=args.quality,
             output_format=args.output_format,
+            keep_reference_original=args.keep_reference_original,
         )
+        for warning in result.get("warnings", []):
+            log(f"提示：{warning['message']}")
         progressed = poll_batch(client, result["id"], submissions_limit=args.limit)
         progressed["added"] = args.total
+        if result.get("warnings"):
+            progressed["warnings"] = result["warnings"]
         return progressed, 0
     raise AssertionError("unreachable")

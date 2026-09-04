@@ -3,6 +3,7 @@ __pycache__/
 .DS_Store
 .pytest_cache/
 generated-images/
+skills/asx/scripts/vendor/
 *.db
 *.db-shm
 *.db-wal

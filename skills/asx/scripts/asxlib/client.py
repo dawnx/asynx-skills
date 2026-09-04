@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import random
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urljoin, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .config import validate_base_url
 from .constants import (
     DOWNLOAD_TIMEOUT_SECONDS,
+    MAX_API_RESPONSE_BYTES,
+    MAX_ASSET_RESPONSE_BYTES,
     MAX_HTTP_ATTEMPTS,
     MAX_REDIRECTS,
     REQUEST_TIMEOUT_SECONDS,
@@ -41,6 +44,34 @@ def _decode_json(raw: bytes, *, context: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise AsxError(f"{context} returned a non-object JSON response", code="invalid_api_response")
     return payload
+
+
+def _read_limited(response: Any, *, limit: int, context: str) -> bytes:
+    """Read a response without allowing an untrusted peer to exhaust memory."""
+    content_length = response.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except (TypeError, ValueError):
+            declared_length = None
+        if declared_length is not None and declared_length > limit:
+            raise AsxError(
+                f"{context} response exceeds the {limit} byte limit",
+                code="response_too_large",
+            )
+
+    chunks = bytearray()
+    while len(chunks) <= limit:
+        chunk = response.read(min(64 * 1024, limit + 1 - len(chunks)))
+        if not chunk:
+            return bytes(chunks)
+        chunks.extend(chunk)
+        if len(chunks) > limit:
+            raise AsxError(
+                f"{context} response exceeds the {limit} byte limit",
+                code="response_too_large",
+            )
+    raise AssertionError("unreachable")
 
 
 def _api_error(status: int, raw: bytes, headers: Any) -> AsxError:
@@ -88,6 +119,63 @@ def _origin(value: str) -> tuple[str, str, int | None]:
     return parts.scheme.lower(), (parts.hostname or "").lower(), parts.port
 
 
+def _validate_asset_url(
+    value: str, *, redirect: bool = False, allow_local: bool = False
+) -> str:
+    code = "invalid_asset_redirect" if redirect else "invalid_asset_url"
+    message = "Asset redirect URL is invalid" if redirect else "Asset download URL is invalid"
+    if value != value.strip() or any(char.isspace() for char in value):
+        raise AsxError(message, code=code)
+    try:
+        parts = urlsplit(value)
+        _ = parts.port
+    except ValueError as exc:
+        raise AsxError(message, code=code) from exc
+    if (
+        parts.scheme.lower() not in {"http", "https"}
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or parts.fragment
+    ):
+        raise AsxError(message, code=code)
+    try:
+        address = ipaddress.ip_address(parts.hostname)
+    except ValueError:
+        address = None
+    if address is not None and (
+        address.is_private or address.is_loopback or address.is_link_local
+    ) and not allow_local:
+        raise AsxError("Asset download URL points to a private network", code=code)
+    return value
+
+
+def _validate_api_redirect(value: str, *, base_url: str) -> str:
+    """Validate and constrain API redirects to the configured origin."""
+    message = "Asynx API redirect is invalid"
+    if value != value.strip() or any(char.isspace() for char in value):
+        raise AsxError(message, code="invalid_api_redirect")
+    try:
+        parts = urlsplit(value)
+        _ = parts.port
+    except ValueError as exc:
+        raise AsxError(message, code="invalid_api_redirect") from exc
+    if (
+        parts.scheme.lower() not in {"http", "https"}
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or parts.fragment
+    ):
+        raise AsxError(message, code="invalid_api_redirect")
+    if _origin(value) != _origin(base_url):
+        raise AsxError(
+            "Asynx API redirects must remain on the configured origin",
+            code="invalid_api_redirect",
+        )
+    return value
+
+
 class AsynxClient:
     def __init__(self, base_url: str, api_key: str) -> None:
         self.base_url = validate_base_url(base_url)
@@ -120,42 +208,65 @@ class AsynxClient:
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
 
-        for attempt in range(MAX_HTTP_ATTEMPTS):
-            request = Request(self._url(path), data=encoded, headers=headers, method=method)
-            try:
-                with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-                    raw = response.read()
-                    response_headers = response.headers
-                    status = response.status
-            except HTTPError as exc:
-                raw = exc.read()
-                if (
-                    retry_safe
-                    and exc.code in TRANSIENT_HTTP_STATUSES
-                    and attempt + 1 < MAX_HTTP_ATTEMPTS
-                ):
-                    time.sleep(_retry_after(exc.headers, attempt))
-                    continue
-                raise _api_error(exc.code, raw, exc.headers) from exc
-            except (URLError, TimeoutError, OSError) as exc:
-                if retry_safe and attempt + 1 < MAX_HTTP_ATTEMPTS:
-                    time.sleep(_retry_after(None, attempt))
-                    continue
-                raise AsxError(
-                    f"Cannot reach the Asynx API: {exc}",
-                    code="network_error",
-                    exit_code=3,
-                ) from exc
+        url = self._url(path)
+        opener = build_opener(_NoRedirect())
+        for _redirect in range(MAX_REDIRECTS + 1):
+            redirected = False
+            for attempt in range(MAX_HTTP_ATTEMPTS):
+                request = Request(url, data=encoded, headers=headers, method=method)
+                try:
+                    with opener.open(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                        raw = _read_limited(
+                            response, limit=MAX_API_RESPONSE_BYTES, context="Asynx API"
+                        )
+                        response_headers = response.headers
+                        status = response.status
+                except HTTPError as exc:
+                    if exc.code in {301, 302, 303, 307, 308}:
+                        location = exc.headers.get("Location")
+                        if not location:
+                            raise AsxError(
+                                "Asynx API redirect is missing Location",
+                                code="invalid_api_redirect",
+                            ) from exc
+                        url = _validate_api_redirect(
+                            urljoin(url, location), base_url=self.base_url
+                        )
+                        redirected = True
+                        break
+                    raw = _read_limited(
+                        exc, limit=MAX_API_RESPONSE_BYTES, context="Asynx API error"
+                    )
+                    if (
+                        retry_safe
+                        and exc.code in TRANSIENT_HTTP_STATUSES
+                        and attempt + 1 < MAX_HTTP_ATTEMPTS
+                    ):
+                        time.sleep(_retry_after(exc.headers, attempt))
+                        continue
+                    raise _api_error(exc.code, raw, exc.headers) from exc
+                except (URLError, TimeoutError, OSError) as exc:
+                    if retry_safe and attempt + 1 < MAX_HTTP_ATTEMPTS:
+                        time.sleep(_retry_after(None, attempt))
+                        continue
+                    raise AsxError(
+                        f"Cannot reach the Asynx API: {exc}",
+                        code="network_error",
+                        exit_code=3,
+                    ) from exc
 
-            payload = _decode_json(raw, context="Asynx API")
-            request_id = payload.get("request_id") or response_headers.get("X-Request-ID")
-            if payload.get("code") != "ok":
-                raise _api_error(status, raw, response_headers)
-            data = payload.get("data")
-            if not isinstance(data, dict):
-                raise AsxError("Asynx API response is missing data", code="invalid_api_response")
-            return data, request_id if isinstance(request_id, str) else None
-        raise AssertionError("unreachable")
+                payload = _decode_json(raw, context="Asynx API")
+                request_id = payload.get("request_id") or response_headers.get("X-Request-ID")
+                if payload.get("code") != "ok":
+                    raise _api_error(status, raw, response_headers)
+                data = payload.get("data")
+                if not isinstance(data, dict):
+                    raise AsxError("Asynx API response is missing data", code="invalid_api_response")
+                return data, request_id if isinstance(request_id, str) else None
+            if redirected:
+                continue
+            raise AssertionError("unreachable")
+        raise AsxError("Asynx API redirect limit exceeded", code="invalid_api_redirect")
 
     def models(self) -> tuple[list[dict[str, Any]], str | None]:
         data, request_id = self.request_json("GET", "/v1/tasks/models", retry_safe=True)
@@ -196,19 +307,52 @@ class AsynxClient:
             query.append(f"model={quote(model, safe='')}")
         return self.request_json("GET", "/v1/tasks?" + "&".join(query), retry_safe=True)
 
-    def asset(self, task_id: str, index: int) -> tuple[bytes, str | None]:
-        url = self._url(f"/v1/tasks/{quote(task_id, safe='')}/assets/{index}")
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "User-Agent": f"asx-skill/{VERSION}",
-        }
+    def asset(
+        self,
+        task_id: str,
+        index: int,
+        download_url: str | None = None,
+        *,
+        metrics: dict[str, Any] | None = None,
+    ) -> tuple[bytes, str | None]:
+        url = (
+            self._url(f"/v1/tasks/{quote(task_id, safe='')}/assets/{index}")
+            if download_url is None
+            else _validate_asset_url(
+                download_url,
+                allow_local=urlsplit(self.base_url).hostname in {"localhost", "127.0.0.1", "::1"},
+            )
+        )
+        if metrics is not None:
+            metrics.update(
+                {
+                    "source": "download_url" if download_url is not None else "asset_endpoint",
+                    "download_url": download_url,
+                }
+            )
+        headers = {"User-Agent": f"asx-skill/{VERSION}"}
+        if _origin(url) == _origin(self.base_url):
+            headers["Authorization"] = f"Bearer {self.api_key}"
         opener = build_opener(_NoRedirect())
         for _redirect in range(MAX_REDIRECTS + 1):
             for attempt in range(MAX_HTTP_ATTEMPTS):
                 request = Request(url, headers=headers, method="GET")
+                request_started = time.perf_counter()
                 try:
                     with opener.open(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
-                        return response.read(), response.headers.get("Content-Type")
+                        response_started = time.perf_counter()
+                        raw = _read_limited(
+                            response, limit=MAX_ASSET_RESPONSE_BYTES, context="Asset"
+                        )
+                        if metrics is not None:
+                            metrics.update(
+                                {
+                                    "ttfb_seconds": response_started - request_started,
+                                    "transfer_seconds": time.perf_counter() - response_started,
+                                    "bytes": len(raw),
+                                }
+                            )
+                        return raw, response.headers.get("Content-Type")
                 except HTTPError as exc:
                     if exc.code in {301, 302, 303, 307, 308}:
                         location = exc.headers.get("Location")
@@ -218,6 +362,12 @@ class AsynxClient:
                                 code="invalid_asset_redirect",
                             ) from exc
                         next_url = urljoin(url, location)
+                        next_url = _validate_asset_url(
+                            next_url,
+                            redirect=True,
+                            allow_local=urlsplit(self.base_url).hostname
+                            in {"localhost", "127.0.0.1", "::1"},
+                        )
                         headers = {"User-Agent": f"asx-skill/{VERSION}"}
                         if _origin(next_url) == _origin(self.base_url):
                             headers["Authorization"] = f"Bearer {self.api_key}"

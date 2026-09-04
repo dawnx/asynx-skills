@@ -1,7 +1,7 @@
 # Asynx Agent Skills
 
 一个面向 Codex 和 Claude Code 的开源 Agent Skill。它通过 Asynx 异步 Task API 生成、编辑和批量处理图片。
-客户端只使用 Python 标准库，并在运行时读取当前部署的图片模型目录。
+客户端使用 Python 实现；安装器会隔离管理参考图处理所需的 Pillow，并只在需要解析模型名称时读取当前部署的图片模型目录。
 
 ## 要求
 
@@ -28,8 +28,9 @@ cd asynx-skills
 py install.py
 ```
 
-安装器会自动检测 Codex 和 Claude Code，把同一个 `asx` skill 安装到对应目录。首次安装时只隐藏询问一次 API Key，
-并用只读模型目录请求检查配置。重复运行安装器会复用已有 Key。
+安装器会自动检测 Codex 和 Claude Code，把同一个 `asx` skill 安装到对应目录，并把 Pillow 安装到 skill 自身的
+`scripts/vendor/`，不会修改用户的全局 Python 环境。首次安装时只隐藏询问一次 API Key，并用只读模型目录请求检查配置。
+重复运行安装器会复用已有 Key。
 
 也可以显式指定目标：
 
@@ -40,6 +41,8 @@ python3 install.py --target both
 ```
 
 Codex 可以对普通图片请求自动调用 skill，也可以显式使用 `$asx`。Claude Code 可以隐式调用，也可以使用 `/asx`。
+
+在 Codex 中不需要输入命令。直接说“生成一张机械键盘”“把刚才那张换成蓝色”“再来 5 张”即可；Agent 会自动选择生成、编辑、最近结果或批次操作，默认等待完成并展示最终图片。只有结果存在多个合理候选时才会询问你选择哪一张。
 
 运行安装器可以更新已有安装，已保存的 API Key 会被复用。
 
@@ -85,7 +88,7 @@ export ASYNX_API_KEY="asx-your-api-key"
 export ASYNX_BASE_URL="https://asynx.llmapi.site/api"
 ```
 
-## 单个任务
+## 单任务与本地账本
 
 ```bash
 python3 skills/asx/scripts/asynx.py models
@@ -101,12 +104,90 @@ python3 skills/asx/scripts/asynx.py edit \
   --image /absolute/path/source.png
 ```
 
-默认命令会等待 Task 完成并下载 Asset。`--detach` 只提交任务；之后用 `wait TASK_ID` 继续等待和下载。
+参考图生成必须把图片与 Prompt 分开传入：
+
+```powershell
+py skills/asx/scripts/asynx.py generate `
+  --prompt "参考该图片的风格和色调，生成一张卡牌立绘" `
+  --reference "E:\ARPG\sanguo\heroCard\006linchong.png"
+```
+
+Prompt 中不要放图片路径。客户端不会替 Agent 猜测或上传 Prompt 中的本地文件；请始终使用 `--reference` 或 `--image`。
+
+### 参考图处理
+
+本地路径和 Data URL 输入默认都会被完整解码、校正 EXIF 方向并检查尺寸；必要时只按尺寸上限缩放一次，随后只进行一次
+WebP Q82 编码。客户端不会因为文件较大或网络较慢而反复降低质量、缩小尺寸，避免不可控的画质损失。支持格式和限制固定为：
+
+- 原图只支持 PNG、JPEG 和 WebP，每张源数据最大 25 MB。
+- 处理后每张图最大 5 MB、最长边 1600 px、总像素不超过 2,560,000。
+- 每个任务最多 5 张输入图，本地路径和 Data URL 的二进制数据合计最大 20 MB。
+- 整个 JSON 请求体最大 32 MB。
+
+5 MB 是处理后单图的硬上限：一次 Q82 编码后仍超限会直接拒绝请求，不会继续降质重试。较大的本地参考图请求会在 CLI
+结果的 `warnings` 中提示上传开销；弱网环境下提交可能变慢，但不会改变图片处理策略。
+
+只有用户明确要求保留原始格式或原始字节时才添加 `--keep-reference-original`。该选项只跳过 WebP 重编码；图片仍会被完整解码，
+且必须满足格式、5 MB、1600 px、2,560,000 像素、总量和请求体限制，不能用来绕过校验。HTTP(S) 图片 URL 不由客户端下载，
+而是保留 URL 交给 Asynx 服务端拉取和校验；图片数量和请求体限制仍然适用。
+
+```bash
+python3 skills/asx/scripts/asynx.py generate \
+  --prompt "保留参考图的纹理细节，生成产品海报" \
+  --reference /absolute/path/source.png \
+  --keep-reference-original
+```
+
+默认命令会等待 Task 完成并下载 Asset；用户要求立即受理、后台运行或稍后查询时添加 `--detach`。`--detach` 返回 Task ID，
+但不代表任务已经完成。每次提交都会写入本地 `state.db`，成功下载的 Asset 会自动建立索引。
+
+中断、会话切换或需要稍后推进时使用本地任务接口：
+
+```bash
+python3 skills/asx/scripts/asynx.py task list
+python3 skills/asx/scripts/asynx.py task status TASK_ID
+python3 skills/asx/scripts/asynx.py task poll [TASK_ID]
+python3 skills/asx/scripts/asynx.py task recover
+python3 skills/asx/scripts/asynx.py task cancel TASK_ID
+python3 skills/asx/scripts/asynx.py asset list TASK_ID
+```
+
+`task list` 查询本地任务；`task status` 查看本地快照；`task poll` 刷新一个或全部未完成任务并下载已完成 Asset；`task recover`
+修复上次中断的提交状态并复用原幂等键；`task cancel` 请求上游取消，若返回 `cancel_requested`，上游可能继续执行并计费。不要为同一请求重新生成幂等键。
+
+### 查找和继续编辑结果
+
+可以按 Prompt、模型、Task ID 或文件信息查找最近结果：
+
+```bash
+python3 skills/asx/scripts/asynx.py recent --latest
+python3 skills/asx/scripts/asynx.py recent --query "红色椅子"
+```
+
+编辑已经下载的结果时，无需手动定位文件路径，直接引用原 Task：
+
+```bash
+python3 skills/asx/scripts/asynx.py edit \
+  --from-task TASK_ID \
+  --prompt "把背景替换成白色摄影棚"
+```
+
+当用户说“刚才那张”“上一张”时，Agent 使用 `recent --latest`；有文字描述时再加 `--query`。不要扫描整个磁盘或请求远程 `history`。
+
+`asset list` 或 `recent` 返回的本地文件不存在时，先报告缺失，再让用户选择重新下载或提供新图片。
+
+默认模型和完整规范模型名会直接提交，不增加模型目录前置请求。`Gemini 3.1`、`seedream` 这类模糊名称
+需要查询模型目录，结果会按 Base URL 缓存 5 分钟。模型缓存不包含 API Key：macOS/Linux 默认位于
+`~/.cache/asx/models.json`，Windows 默认位于 `%LOCALAPPDATA%\Asynx\cache\models.json`。
+
+单图片 Task 的首次轮询从 2 秒开始，后续退避最大为 4 秒。命令结果中的 `timings` 会分别记录本地准备、提交、等待和下载耗时；
+下载阶段还会细分首字节、传输和本地保存耗时，方便定位性能问题。
 
 ## 批量任务与追加
 
-批次状态保存在本机 SQLite：macOS/Linux 默认是 `~/.local/state/asx/state.db`，Windows 默认是
+任务和批次状态保存在统一的本机 SQLite v1 账本：macOS/Linux 默认是 `~/.local/state/asx/state.db`，Windows 默认是
 `%LOCALAPPDATA%\Asynx\state.db`。Asynx 仍然为每张图片创建独立 Task，因此批次可以追加、暂停、恢复和单项失败。
+首次使用新版本时会对旧的无版本核心账本执行一次破坏式重建；旧批次表和图片文件不会被删除，但旧单任务账本不会迁移。
 
 创建一个 12 项批次：
 
@@ -142,8 +223,11 @@ python3 skills/asx/scripts/asynx.py batch resume BATCH_ID
 python3 skills/asx/scripts/asynx.py batch cancel BATCH_ID
 ```
 
+取消只向上游发出请求；已经开始的 Task 可能继续运行并计费。若返回 `cancel_requested`，继续用 `batch poll` 观察最终状态。
+
 `batch poll` 可以由 Agent 定时调用；进程中断后再次调用会从本地状态继续，已提交 Task 使用原幂等键，不会重复创建。
-如果需要前台持续等待，可以使用 `batch wait BATCH_ID`。查看 Asynx 历史任务：
+批次级追加、暂停、恢复、取消和统计只使用 `batch` 命令；单 Task 使用上面的 `task` 命令，不要交叉操作。
+如果需要前台持续等待，可以使用 `batch wait BATCH_ID`。查看 Asynx 远端历史任务（仅用于显式诊断）：
 
 ```bash
 python3 skills/asx/scripts/asynx.py history --limit 20
@@ -158,7 +242,10 @@ python3 skills/asx/scripts/asynx.py history --limit 20
 ```text
 asxlib/config.py    配置、API Key 和本地路径
 asxlib/client.py    HTTP、重试和 Asynx API
-asxlib/images.py    模型能力与图片输入
+asxlib/images.py    模型能力与任务输入
+asxlib/reference_media.py  参考图解码、归一化与限制校验
+asxlib/artifacts.py  本地生成结果索引与历史引用
+asxlib/state.py      版本化 Task、Asset 和 Event 账本
 asxlib/tasks.py     单 Task 生命周期和 Asset 下载
 asxlib/batches.py   SQLite 批次、追加和恢复
 asxlib/cli.py       命令解析与分发

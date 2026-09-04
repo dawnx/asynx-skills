@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import sqlite3
 from typing import Any, NoReturn
 
+from .artifacts import recent_payload
 from .batches import execute_batch
 from .client import AsynxClient
 from .config import configure, load_credentials
@@ -14,7 +16,19 @@ from .constants import (
 )
 from .errors import AsxError
 from .output import emit
-from .tasks import history_payload, models_payload, run_submission, task_payload, wait_and_download
+from .tasks import (
+    cancel_local_task,
+    history_payload,
+    local_asset_payload,
+    local_task_status,
+    local_tasks_payload,
+    models_payload,
+    poll_local_tasks,
+    recover_tasks,
+    run_submission,
+    task_payload,
+    wait_and_download,
+)
 
 
 def _add_image_options(parser: argparse.ArgumentParser) -> None:
@@ -28,6 +42,11 @@ def _add_image_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--idempotency-key")
     parser.add_argument("--detach", action="store_true")
+    parser.add_argument(
+        "--keep-reference-original",
+        action="store_true",
+        help="保留符合限制的参考图原始编码，不进行 WebP 归一化",
+    )
 
 
 def _add_batch_creation_options(parser: argparse.ArgumentParser) -> None:
@@ -58,6 +77,11 @@ def _add_batch_creation_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--reference", action="append", default=[], help="生成参考图，可重复")
     parser.add_argument("--image", action="append", default=[], help="编辑输入图，可重复")
     parser.add_argument("--mask", help="编辑 Mask 图片")
+    parser.add_argument(
+        "--keep-reference-original",
+        action="store_true",
+        help="保留符合限制的参考图原始编码，不进行 WebP 归一化",
+    )
 
 
 def _add_batch_add_options(parser: argparse.ArgumentParser) -> None:
@@ -75,6 +99,11 @@ def _add_batch_add_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--reference", action="append", help="生成参考图，可重复")
     parser.add_argument("--image", action="append", help="编辑输入图，可重复")
     parser.add_argument("--mask", help="覆盖编辑 Mask 图片")
+    parser.add_argument(
+        "--keep-reference-original",
+        action="store_true",
+        help="保留新传入且符合限制的参考图原始编码",
+    )
     parser.add_argument(
         "--limit",
         type=int,
@@ -102,7 +131,8 @@ def parser() -> argparse.ArgumentParser:
 
     edit = commands.add_parser("edit", help="编辑已有图片")
     _add_image_options(edit)
-    edit.add_argument("--image", action="append", required=True)
+    edit.add_argument("--image", action="append", default=[])
+    edit.add_argument("--from-task", help="使用本机索引中指定 Task 的已下载图片")
     edit.add_argument("--mask")
 
     status = commands.add_parser("status", help="查询一个 Task")
@@ -116,6 +146,32 @@ def parser() -> argparse.ArgumentParser:
     history.add_argument("--status", choices=tuple(sorted(KNOWN_STATUSES)), help="按状态筛选")
     history.add_argument("--model", help="按模型筛选")
     history.add_argument("--limit", type=int, default=20, help="返回数量")
+
+    recent = commands.add_parser("recent", help="查询本机已下载的生成结果")
+    recent.add_argument("--query", help="按 Task ID、Prompt、模型或文件名筛选")
+    recent.add_argument("--limit", type=int, default=20, help="返回数量")
+    recent.add_argument("--latest", action="store_true", help="只返回最近一个结果")
+
+    task = commands.add_parser("task", help="管理本地任务账本")
+    task_commands = task.add_subparsers(dest="task_command", required=True)
+    task_list = task_commands.add_parser("list", help="列出本地任务")
+    task_list.add_argument("--status", help="按本地状态筛选")
+    task_list.add_argument("--limit", type=int, default=50, help="返回数量")
+    task_status = task_commands.add_parser("status", help="查看本地任务快照")
+    task_status.add_argument("task_id")
+    task_poll = task_commands.add_parser("poll", help="刷新一个或全部本地任务")
+    task_poll.add_argument("task_id", nargs="?")
+    task_poll.add_argument("--limit", type=int, default=50, help="最多刷新任务数")
+    task_commands.add_parser("recover", help="恢复未完成或提交窗口中断的任务").add_argument(
+        "--limit", type=int, default=50, help="最多恢复任务数"
+    )
+    task_cancel = task_commands.add_parser("cancel", help="请求取消远端任务")
+    task_cancel.add_argument("task_id")
+
+    asset = commands.add_parser("asset", help="查看本地 Asset")
+    asset_commands = asset.add_subparsers(dest="asset_command", required=True)
+    asset_list = asset_commands.add_parser("list", help="列出任务输出 Asset")
+    asset_list.add_argument("task_id")
 
     batch = commands.add_parser("batch", help="管理可恢复的本地批次")
     batch_commands = batch.add_subparsers(dest="batch_command", required=True)
@@ -161,6 +217,22 @@ def _client() -> AsynxClient:
 def execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if args.command == "configure":
         return configure(args.base_url), 0
+    if args.command == "recent":
+        return recent_payload(args.query, args.limit, latest=args.latest), 0
+    if args.command == "task":
+        if args.task_command == "list":
+            return local_tasks_payload(status=args.status, limit=args.limit), 0
+        if args.task_command == "status":
+            return local_task_status(args.task_id), 0
+        client = _client()
+        if args.task_command == "poll":
+            return poll_local_tasks(client, args.task_id, limit=args.limit), 0
+        if args.task_command == "recover":
+            return recover_tasks(client, limit=args.limit), 0
+        if args.task_command == "cancel":
+            return cancel_local_task(client, args.task_id)
+    if args.command == "asset" and args.asset_command == "list":
+        return local_asset_payload(args.task_id), 0
     if (
         args.command == "batch"
         and args.batch_command in {"list", "status"}
@@ -196,5 +268,15 @@ def main() -> NoReturn:
             "ok": False,
             "error": {"code": "interrupted", "message": "Operation interrupted"},
         }, 130
+    except (OSError, sqlite3.Error) as exc:
+        payload, exit_code = AsxError(
+            f"本地状态读写失败：{exc}",
+            code="state_io_error",
+            exit_code=2,
+        ).payload(), 2
+    except Exception as exc:  # noqa: BLE001 - CLI must always emit one JSON object
+        payload, exit_code = AsxError(
+            f"操作失败：{exc}", code="unexpected_error", exit_code=2
+        ).payload(), 2
     emit(payload)
     raise SystemExit(exit_code)

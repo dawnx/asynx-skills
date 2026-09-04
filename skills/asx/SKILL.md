@@ -1,21 +1,41 @@
 ---
 name: asx
-description: 通过已配置的 Asynx API 生成、编辑和批量处理图片。用于生图、画图、参考图生成、图片编辑、局部重绘、批量生图、追加任务、查询进度、恢复中断任务，以及 GPT Image、Gemini Image、Seedream 请求。不要用于视频或非图片任务。
+description: 通过已配置的 Asynx API 生成、编辑和批量处理图片。用于生图、参考图、图片编辑、批量任务、进度查询和中断恢复；不要用于视频或非图片任务。
 ---
 
 # Asynx 图片
 
-使用本 skill 目录中的 `scripts/asynx.py` 完成所有 Asynx API 操作，不要自己拼接 curl。脚本只需要 Python 3.10 或更高版本，
+使用本 skill 目录中的 `scripts/asynx.py` 完成 Asynx API 操作，不要自行拼接 curl。脚本需要 Python 3.10 或更高版本。
 API Key 不得出现在命令参数、Prompt、日志或项目文件中。
 
-## 选择操作
+## 对话式使用
 
-- 用户要生成新图时使用 `generate`。
-- 用户要修改、替换、删除或局部重绘已有图片时使用 `edit`，原图通过 `--image` 传入。
-- 用户要批量生成或编辑时使用 `batch create`；用户说“再追加”“继续生成”“加入这个批次”时使用 `batch add`。
-- 用户指定模型时保留其意图；未指定时让脚本使用默认模型。脚本会读取实时模型目录并拒绝不可用或含糊的模型选择。
+用户只需要用自然语言描述目标，不需要知道 CLI 参数、Task ID 或本地数据库。Agent 在后台选择并执行对应操作，默认等待完成并直接展示最终图片；不要把 shell 命令或中间 JSON 当作回复主体。
 
-本地输入图必须使用绝对路径，也支持 HTTP(S) URL。Mask 只能在模型能力声明支持时传入。
+- “生成/画一张……”：执行 `generate`，原样提交用户描述，完成后展示图片。
+- “换个颜色/改背景/把刚才那张……”：先用 `recent --latest` 找最近结果，再执行 `edit --from-task`；只有结果有多个且无法判断时才追问。
+- “再来 5 张/批量生成……”：执行 `batch create` 或 `batch add`，返回批次进度和可继续操作的状态。
+- “继续上次/现在到哪了……”：执行 `task recover` 或 `task poll`，汇总状态、失败项和已下载图片。
+- 用户没有明确要求后台运行时，即使内部先使用 `--detach` 快速受理，也必须在同一轮继续等待、下载和展示最终结果。
+- 用户没有要求解释实现时，不要要求用户手动复制 Task ID、运行 `history` 或扫描磁盘。
+
+## 路由规则
+
+- 新图使用 `generate`；换色、替换背景、修改或局部重绘使用 `edit`。
+- 参考/模仿图片必须作为独立的 `--reference`（生成）或 `--image`（编辑）参数，Prompt 只保留文字指令。
+- Prompt 原样提交；未指定模型、尺寸、比例或质量时使用脚本默认值，不先调用 `models` 探测。
+- 普通请求直接执行 `generate`/`edit` 并等待下载；用户要求立即返回、后台运行或稍后查询时加 `--detach`。
+- 用户要求批量或追加时使用 `batch create`/`batch add`，不要用批次命令替代单 Task 操作。
+
+完整规范的模型名直接提交；只有模糊模型选择才读取并缓存模型目录。输入图片使用绝对路径，也支持 HTTP(S) URL；Windows 路径作为完整参数引用，例如
+`--reference "E:\\images\\source.png"`。Mask 只能在模型能力声明支持时传入。
+
+## 输入图片
+
+- 本地路径和 Data URL 原样交给脚本。脚本会完整解码、校正 EXIF，并只做一次必要的尺寸归一化和一次 WebP Q82 编码。
+- 只有用户明确要求保留原始格式或字节时才传 `--keep-reference-original`；该选项不能绕过限制。
+- 固定限制：PNG/JPEG/WebP；源文件每张不超过 25 MB；处理后每张不超过 5 MB、最长边 1600 px、总像素不超过 2,560,000；每个任务最多 5 张；本地图片合计不超过 20 MB；JSON 请求体不超过 32 MB。一次编码后仍超过 5 MB 会直接拒绝。
+- HTTP(S) URL 不在本地下载或转换，交给 Asynx 服务端校验。CLI 返回 `warnings` 时，简短提醒用户弱网上传可能变慢，不要再次压缩。
 
 ## 首次配置
 
@@ -28,19 +48,42 @@ python3 "<skill-dir>/scripts/asynx.py" configure
 正常配置只询问 API Key，并使用公共 Asynx 服务。只有用户明确说明是自托管部署时，才使用
 `configure --base-url URL`。
 
-## 单个任务
+## 单任务与本地账本
 
 ```bash
 python3 "<skill-dir>/scripts/asynx.py" generate --prompt "<提示词>"
 python3 "<skill-dir>/scripts/asynx.py" edit --prompt "<编辑指令>" --image "/absolute/path/input.png"
+python3 "<skill-dir>/scripts/asynx.py" edit --prompt "<编辑指令>" --from-task "<task-id>"
 ```
 
-根据需要添加 `--model`、`--image-size`、`--aspect-ratio`、`--quality`、`--count`、`--output-format`、`--reference`、
-`--mask` 和 `--output-dir`。脚本会创建异步 Task、轮询终态并下载所有输出 Asset。只有用户明确要求不等待时才使用 `--detach`。
+根据需要添加 `--model`、`--image-size`、`--aspect-ratio`、`--quality`、`--count`、`--output-format`、`--reference`、`--mask`、
+`--output-dir`、`--keep-reference-original` 或 `--detach`。提交前会写入本地 `state.db`，成功下载的 Asset 会自动建立索引。
+
+`--detach` 只快速受理并返回 Task ID，不代表任务已完成。中断、会话切换或需要稍后处理时使用本地任务接口：
+
+```bash
+python3 "<skill-dir>/scripts/asynx.py" task list
+python3 "<skill-dir>/scripts/asynx.py" task status "<task-id>"
+python3 "<skill-dir>/scripts/asynx.py" task poll [TASK_ID]
+python3 "<skill-dir>/scripts/asynx.py" task recover
+python3 "<skill-dir>/scripts/asynx.py" task cancel "<task-id>"
+python3 "<skill-dir>/scripts/asynx.py" asset list "<task-id>"
+```
+
+`task list` 查询本地任务；`task status` 查看本地快照；`task poll` 刷新一个或全部未完成任务并下载已完成 Asset；`task recover` 修复上次中断的提交状态，不要重新提交已有幂等键的任务；`task cancel` 请求上游取消，返回 `cancel_requested` 时必须告知用户上游可能继续执行并计费。
+
+用户说“刚才那张”“上一张”时，只查本地索引，不扫描磁盘或调用远程历史：
+
+```bash
+python3 "<skill-dir>/scripts/asynx.py" recent --latest
+python3 "<skill-dir>/scripts/asynx.py" recent --query "<描述或 Task ID>"
+```
+
+确定 Task ID 后使用 `edit --from-task <task-id>`。`asset list` 或 `recent` 返回的本地文件不存在时，先报告缺失，再让用户选择重新下载或提供新图片。
 
 ## 批量任务
 
-批量任务保存在本机 SQLite 中，Asynx 端每张图仍是独立 Task。创建批次后立即返回批次 ID，不要因为异步任务尚未完成而阻塞用户对话：
+批量任务与单任务共用本机 SQLite v1 账本，Asynx 端每张图仍是独立 Task。创建批次后立即返回批次 ID，不要因为异步任务尚未完成而阻塞用户对话：
 
 ```bash
 python3 "<skill-dir>/scripts/asynx.py" batch create \
@@ -56,19 +99,13 @@ python3 "<skill-dir>/scripts/asynx.py" batch add "<batch-id>" --total 5
 
 省略批次 ID 时使用最近的活动批次。没有新参数时继承原批次模型、尺寸、比例、质量、格式和输入图；用户明确修改的参数才覆盖原设置。
 
-每个批次项都有稳定幂等键。进程中断、网络错误或 Agent 会话切换后，先调用：
-
-```bash
-python3 "<skill-dir>/scripts/asynx.py" batch poll "<batch-id>"
-```
-
-不要重新提交已经存在的 Task。`batch poll` 会继续提交待处理项、查询已提交项并下载已完成 Asset。需要查看完整明细时添加 `--items`：
+`batch poll` 会继续提交待处理项、查询已提交项并下载已完成 Asset；不要重新提交已经存在的 Task。需要查看完整明细时添加 `--items`：
 
 ```bash
 python3 "<skill-dir>/scripts/asynx.py" batch status "<batch-id>" --items
 ```
 
-用户询问“现在到哪了”“有哪些历史任务”时，先轮询活动批次，再根据需要运行 `batch status`、`batch list` 或 `history`。只有一个活动批次时可以省略批次 ID；有多个活动批次时先让用户选择。
+用户询问批次进度时运行 `batch poll` 或 `batch status`；多个活动批次时必须明确批次 ID。批次之外的单 Task 使用 `task` 命令，不调用 `batch poll`。
 
 支持暂停、恢复和取消：
 
@@ -78,9 +115,11 @@ python3 "<skill-dir>/scripts/asynx.py" batch resume "<batch-id>"
 python3 "<skill-dir>/scripts/asynx.py" batch cancel "<batch-id>"
 ```
 
+取消只向上游发出请求；已开始执行的 Task 可能继续运行并计费。若批次返回 `cancel_requested`，后续仍需用 `batch poll` 观察终态。
+
 批次单项失败不应使其他项失败。报告成功文件、失败项、Task ID 和结构化错误；不要无条件重试 `failed`、`timeout` 或 `canceled` 项。
 
 ## 结果与安全
 
-脚本把状态日志写到 stderr，把一个 JSON 对象写到 stdout。成功后报告批次或 Task ID、实际模型、结果质量、计费金额和绝对文件路径；
-Codex 桌面端用绝对路径展示生成的图片。生成文件默认在 `generated-images/<批次 ID>/`，不要把它们加入 Git，除非用户明确要求。
+脚本将进度日志写到 stderr，将一个 JSON 对象写到 stdout。成功后报告 Task/批次 ID、实际模型、结果质量、计费金额和绝对文件路径；
+Codex 桌面端使用绝对路径展示图片。`timings` 仅用于性能诊断，除非用户询问耗时，否则无需逐项解释。
