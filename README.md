@@ -63,30 +63,60 @@ python3 install.py --uninstall
 
 ## 配置
 
-安装器会自动配置公共 Asynx 服务。之后需要轮换 Key 时，在自己的终端运行：
+安装器会自动配置公共 Asynx 服务。配置必须在用户自己的交互式终端中完成，不要让 Agent 代为输入 Key，也不要把 Key
+粘贴到对话中。之后需要轮换 Key 时，运行对应的已安装脚本，而不是依赖当前工作目录中的仓库相对路径。
+
+macOS/Linux：
 
 ```bash
-python3 skills/asx/scripts/asynx.py configure
+# Codex
+python3 ~/.agents/skills/asx/scripts/asynx.py configure
+
+# Claude Code
+python3 ~/.claude/skills/asx/scripts/asynx.py configure
 ```
 
-Windows 将 `python3` 替换为 `py`。配置过程只询问 API Key，不要把 Key 粘贴到 Agent 对话中。
+Windows PowerShell：
+
+```powershell
+# Codex
+py "$env:USERPROFILE\.agents\skills\asx\scripts\asynx.py" configure
+
+# Claude Code
+py "$env:USERPROFILE\.claude\skills\asx\scripts\asynx.py" configure
+```
 
 配置文件位于 macOS/Linux 的 `~/.config/asynx/config.json`，Windows 位于 `%APPDATA%\Asynx\config.json`，
-并尽量设置为仅当前用户可读写。
+并尽量设置为仅当前用户可读写。Codex、Claude Code 和同一用户安装的多份 `asx` 默认共用这个配置；更新或卸载 skill
+不会删除它。只有切换 OS 用户、HOME 或显式设置不同的 `ASYNX_CONFIG_PATH` 时才会使用另一份配置。旧版本曾按
+`XDG_CONFIG_HOME` 保存配置，新版安装器会在能发现旧文件时迁移到上述固定位置，并保留旧文件。
 
 自托管部署可以显式指定 Base URL：
 
 ```bash
-python3 skills/asx/scripts/asynx.py configure \
+python3 ~/.agents/skills/asx/scripts/asynx.py configure \
   --base-url "https://asynx.example.com/api"
 ```
 
-环境变量优先级高于配置文件：
+环境变量优先级高于配置文件，但普通 `export` 只对当前终端及其子进程有效，电脑重启或从桌面启动 Codex 后通常不会保留。
+需要长期使用时优先运行 `configure` 写入用户配置文件：
 
 ```bash
 export ASYNX_API_KEY="asx-your-api-key"
 export ASYNX_BASE_URL="https://asynx.llmapi.site/api"
 ```
+
+配置异常时先运行本地诊断。输出只显示 Key 的脱敏前缀，不会打印完整 Key；`doctor` 默认不联网，只有 `--verify` 会请求
+Asynx 的只读模型目录：
+
+```bash
+python3 ~/.agents/skills/asx/scripts/asynx.py config status
+python3 ~/.agents/skills/asx/scripts/asynx.py doctor
+python3 ~/.agents/skills/asx/scripts/asynx.py doctor --verify
+```
+
+Claude Code 或 Windows 用户把命令中的脚本路径替换为上面对应的已安装路径。诊断会报告实际配置文件、凭据来源、环境变量覆盖、
+已安装副本和版本差异；若仍提示缺少 Key，请按诊断输出的绝对命令在交互式终端重新运行 `configure`。
 
 ## 单任务与本地账本
 
@@ -116,8 +146,8 @@ Prompt 中不要放图片路径。客户端不会替 Agent 猜测或上传 Promp
 
 ### 参考图处理
 
-本地路径和 Data URL 输入默认都会被完整解码、校正 EXIF 方向并检查尺寸；必要时只按尺寸上限缩放一次，随后只进行一次
-WebP Q82 编码。客户端不会因为文件较大或网络较慢而反复降低质量、缩小尺寸，避免不可控的画质损失。支持格式和限制固定为：
+本地路径和 Data URL 输入默认都会被完整解码、校正 EXIF 方向并检查尺寸；必要时只按尺寸上限缩放一次，再以 WebP Q82
+编码一次。客户端不会因为文件较大或网络较慢而反复降低质量或尺寸，避免不可控的画质损失。固定限制如下：
 
 - 原图只支持 PNG、JPEG 和 WebP，每张源数据最大 25 MB。
 - 处理后每张图最大 5 MB、最长边 1600 px、总像素不超过 2,560,000。

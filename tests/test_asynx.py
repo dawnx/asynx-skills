@@ -304,16 +304,23 @@ class UnitTestCase(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(installed.returncode, 0, installed.stderr)
-            self.assertEqual(installed.stdout.strip(), "0.3.0")
+            self.assertEqual(installed.stdout.strip(), "0.3.1")
 
     def test_installer_can_install_both_agents_noninteractively(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
-            result = installer.run(
-                ["--target", "both", "--skip-config", "--no-verify"],
-                home=home,
-                install_dependencies=False,
-            )
+            environment = {
+                name: value
+                for name, value in os.environ.items()
+                if not name.startswith("ASYNX_") and name != "XDG_CONFIG_HOME"
+            }
+            environment["HOME"] = str(home)
+            with patch.dict(os.environ, environment, clear=True):
+                result = installer.run(
+                    ["--target", "both", "--skip-config", "--no-verify"],
+                    home=home,
+                    install_dependencies=False,
+                )
             self.assertEqual(result, 0)
             self.assertTrue((home / ".agents" / "skills" / "asx" / "SKILL.md").is_file())
             self.assertTrue((home / ".claude" / "skills" / "asx" / "SKILL.md").is_file())

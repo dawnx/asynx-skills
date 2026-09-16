@@ -111,6 +111,12 @@ class CLIE2ETestCase(unittest.TestCase):
         self.assertTrue(reference.startswith("data:image/png;base64,"))
         self.assertEqual(base64.b64decode(reference.split(",", 1)[1]), VALID_PNG)
 
+    def test_doctor_verify_uses_configured_mock_api(self) -> None:
+        result = self.run_cli("doctor", "--verify")
+
+        self.assertTrue(result["verification"]["ok"])
+        self.assertGreaterEqual(result["verification"]["image_model_count"], 1)
+
     def test_local_task_commands_resume_detached_submission(self) -> None:
         submitted = self.run_cli("generate", "--prompt", "本地账本任务", "--detach")
         local_id = submitted["local_id"]

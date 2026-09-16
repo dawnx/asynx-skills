@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-import importlib
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -17,11 +17,32 @@ SKILL_SOURCE = ROOT / "skills" / "asx"
 PILLOW_REQUIREMENT = "Pillow>=10.2,<13"
 
 
-def _load_client_module() -> ModuleType:
-    scripts = SKILL_SOURCE / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
-    return importlib.import_module("asxlib")
+def _load_client_module(skill_root: Path) -> ModuleType:
+    package = (skill_root / "scripts" / "asxlib").resolve()
+    module_name = "_asynx_installed"
+    for name in tuple(sys.modules):
+        if name == module_name or name.startswith(f"{module_name}."):
+            del sys.modules[name]
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        package / "__init__.py",
+        submodule_search_locations=[str(package)],
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load the installed Asynx client from: {package}")
+    client = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = client
+    try:
+        spec.loader.exec_module(client)
+    except Exception:
+        for name in tuple(sys.modules):
+            if name == module_name or name.startswith(f"{module_name}."):
+                del sys.modules[name]
+        raise
+    module_path = Path(client.__file__ or "").resolve()
+    if not module_path.is_relative_to(package):
+        raise RuntimeError(f"Loaded Asynx client from an unexpected path: {module_path}")
+    return client
 
 
 def _detected_targets(home: Path) -> list[str]:
@@ -219,7 +240,13 @@ def run(
         label = "Codex" if target == "codex" else "Claude Code"
         print(f"Installed for {label}: {destination}")
 
-    client = _load_client_module()
+    client = _load_client_module(_target_path(targets[0], user_home))
+    migrate = getattr(client, "migrate_legacy_config", None)
+    if callable(migrate):
+        migrated_path = migrate()
+        if migrated_path is not None:
+            print(f"Migrated legacy configuration: {migrated_path}")
+    print(f"Configuration file: {client.config_path().resolve()}")
     if not args.skip_config:
         if _configured(client):
             print("Using the existing Asynx API key configuration.")

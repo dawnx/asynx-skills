@@ -7,7 +7,7 @@ from typing import Any, NoReturn
 from .artifacts import recent_payload
 from .batches import execute_batch
 from .client import AsynxClient
-from .config import configure, load_credentials
+from .config import config_status, configure, doctor, load_credentials
 from .constants import (
     DEFAULT_BATCH_SUBMISSIONS_PER_POLL,
     DEFAULT_OUTPUT_DIR,
@@ -122,6 +122,16 @@ def parser() -> argparse.ArgumentParser:
         "--base-url",
         help="use a self-hosted Asynx API instead of the default service",
     )
+    config = commands.add_parser("config", help="查看本机 Asynx 配置")
+    config_commands = config.add_subparsers(dest="config_command", required=True)
+    config_commands.add_parser("status", help="安全查看配置状态，不显示完整 API Key")
+
+    doctor_command = commands.add_parser("doctor", help="诊断配置和 Skill 安装状态")
+    doctor_command.add_argument(
+        "--verify",
+        action="store_true",
+        help="连接 Asynx 验证凭据；默认诊断不会联网",
+    )
     models = commands.add_parser("models", help="列出可用图片模型")
     models.add_argument("--operation", choices=("all", "generate", "edit"), default="all")
 
@@ -217,6 +227,11 @@ def _client() -> AsynxClient:
 def execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if args.command == "configure":
         return configure(args.base_url), 0
+    if args.command == "config" and args.config_command == "status":
+        return config_status(), 0
+    if args.command == "doctor":
+        payload = doctor(verify=args.verify)
+        return payload, 0 if payload["ok"] else 2
     if args.command == "recent":
         return recent_payload(args.query, args.limit, latest=args.latest), 0
     if args.command == "task":

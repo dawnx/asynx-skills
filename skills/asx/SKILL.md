@@ -45,8 +45,20 @@ API Key 不得出现在命令参数、Prompt、日志或项目文件中。
 python3 "<skill-dir>/scripts/asynx.py" configure
 ```
 
-正常配置只询问 API Key，并使用公共 Asynx 服务。只有用户明确说明是自托管部署时，才使用
-`configure --base-url URL`。
+`<skill-dir>` 必须替换为当前已安装 skill 的绝对路径，不要使用依赖仓库工作目录的相对路径。正常配置只询问 API Key，并使用
+公共 Asynx 服务；只有用户明确说明是自托管部署时，才使用 `configure --base-url URL`。
+
+配置保存在当前 OS 用户的固定位置：macOS/Linux 为 `~/.config/asynx/config.json`，Windows 为
+`%APPDATA%\Asynx\config.json`；同一用户的 Codex、Claude Code 和多份 `asx` 默认共用它。`ASYNX_API_KEY` 环境变量优先，
+但普通 shell `export` 重启后通常失效。遇到缺少 Key 或重启后失效时，先执行以下安全诊断，不要读取或输出完整 Key：
+
+```bash
+python3 "<skill-dir>/scripts/asynx.py" config status
+python3 "<skill-dir>/scripts/asynx.py" doctor
+```
+
+只有用户要求验证网络和 Key 时才执行 `doctor --verify`。随后根据诊断给出的配置路径和绝对 `configure` 命令指导用户；交互式
+配置必须由用户在自己的终端执行，Agent 的非交互子进程不能代跑。
 
 ## 单任务与本地账本
 
