@@ -15,6 +15,7 @@ from .constants import (
     VERSION,
 )
 from .errors import AsxError
+from .local_images import execute_local_image
 from .output import emit
 from .tasks import (
     cancel_local_task,
@@ -112,10 +113,66 @@ def _add_batch_add_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_local_output_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--output", required=True, help="输出文件路径")
+    parser.add_argument("--format", choices=("png", "jpeg", "jpg", "webp"))
+
+
+def _add_local_image_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    image = commands.add_parser("image", help="本地确定性图片处理，不调用 Asynx")
+    image_commands = image.add_subparsers(dest="image_command", required=True)
+
+    info = image_commands.add_parser("info", help="查看本地图片信息")
+    info.add_argument("input")
+
+    convert = image_commands.add_parser("convert", help="转换图片格式")
+    convert.add_argument("input")
+    _add_local_output_options(convert)
+
+    resize = image_commands.add_parser("resize", help="调整图片尺寸")
+    resize.add_argument("input")
+    _add_local_output_options(resize)
+    resize.add_argument("--width", type=int)
+    resize.add_argument("--height", type=int)
+
+    crop = image_commands.add_parser("crop", help="裁剪图片")
+    crop.add_argument("input")
+    _add_local_output_options(crop)
+    crop.add_argument("--box", required=True, help="left,top,right,bottom")
+
+    slice_command = image_commands.add_parser("slice", help="按网格切图")
+    slice_command.add_argument("input")
+    slice_command.add_argument("--output-dir", required=True)
+    slice_command.add_argument("--rows", type=int, required=True)
+    slice_command.add_argument("--columns", type=int, required=True)
+    slice_command.add_argument("--prefix", default="tile")
+    slice_command.add_argument("--format", choices=("png", "jpeg", "jpg", "webp"))
+
+    sheet = image_commands.add_parser("contact-sheet", help="生成联系表")
+    sheet.add_argument("inputs", nargs="+")
+    _add_local_output_options(sheet)
+    sheet.add_argument("--columns", type=int, default=4)
+    sheet.add_argument("--cell-width", type=int, default=320)
+    sheet.add_argument("--cell-height", type=int, default=320)
+    sheet.add_argument("--background", default="#ffffff")
+
+    mask = image_commands.add_parser("apply-mask", help="将 Mask 应用为透明度")
+    mask.add_argument("input")
+    mask.add_argument("--mask", required=True)
+    _add_local_output_options(mask)
+
+    batch_convert = image_commands.add_parser("batch-convert", help="批量转换目录图片")
+    batch_convert.add_argument("--input-dir", required=True)
+    batch_convert.add_argument("--output-dir", required=True)
+    batch_convert.add_argument("--format", choices=("png", "jpeg", "jpg", "webp"), required=True)
+    batch_convert.add_argument("--recursive", action="store_true")
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="通过 Asynx 生成和编辑图片")
     result.add_argument("--version", action="version", version=VERSION)
     commands = result.add_subparsers(dest="command", required=True)
+    _add_local_image_commands(commands)
 
     configure_command = commands.add_parser("configure", help="安全保存 Asynx API Key")
     configure_command.add_argument(
@@ -225,6 +282,8 @@ def _client() -> AsynxClient:
 
 
 def execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    if args.command == "image":
+        return execute_local_image(args)
     if args.command == "configure":
         return configure(args.base_url), 0
     if args.command == "config" and args.config_command == "status":

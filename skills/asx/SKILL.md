@@ -42,6 +42,24 @@ API Key 不得出现在命令参数、Prompt、日志或项目文件中。
 - API Key 不得暴露到浏览器代码、URL、前端构建产物或日志；浏览器直连时必须由用户自行提供安全的服务端或本地桥接方案。
 - 不要因为用户要自定义页面，就替用户创建额外网关、服务或固定工作流；只实现用户明确要求的集成部分。
 
+## 本地图片处理
+
+用户只要求处理已有图片时，优先使用本地确定性工具；这些命令不调用 Asynx、不需要 API Key，也不读写 skill 的 `state.db`：
+
+```bash
+python3 "<skill-dir>/scripts/asynx.py" image info input.png
+python3 "<skill-dir>/scripts/asynx.py" image convert input.png --output output.webp --format webp
+python3 "<skill-dir>/scripts/asynx.py" image resize input.png --output small.png --width 1200
+python3 "<skill-dir>/scripts/asynx.py" image crop input.png --output crop.png --box 0,0,800,800
+python3 "<skill-dir>/scripts/asynx.py" image slice input.png --output-dir tiles --rows 3 --columns 3
+python3 "<skill-dir>/scripts/asynx.py" image contact-sheet images/*.png --output sheet.jpg
+python3 "<skill-dir>/scripts/asynx.py" image apply-mask input.png --mask mask.png --output cutout.png
+python3 "<skill-dir>/scripts/asynx.py" image batch-convert \
+  --input-dir source --output-dir converted --format webp --recursive
+```
+
+支持图片信息、格式转换、按单边等比缩放或指定宽高缩放、裁剪、网格切图、联系表、Alpha/灰度 Mask 透明化和目录批量转换。自动识别主体的 AI 抠图、OCR、视频处理和语义编辑仍属于远程模型能力，不由这些本地命令实现。
+
 ## 输入图片
 
 - 本地路径和 Data URL 原样交给脚本。脚本会完整解码、校正 EXIF，并只做一次必要的尺寸归一化和一次 WebP Q82 编码。

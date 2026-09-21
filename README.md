@@ -136,6 +136,24 @@ python3 skills/asx/scripts/asynx.py edit \
   --image /absolute/path/source.png
 ```
 
+### 本地图片工具
+
+只处理已有图片时，可以使用不调用 Asynx、也不写入本地任务账本的确定性工具：
+
+```bash
+python3 skills/asx/scripts/asynx.py image info input.png
+python3 skills/asx/scripts/asynx.py image convert input.png --output output.webp --format webp
+python3 skills/asx/scripts/asynx.py image resize input.png --output small.png --width 1200
+python3 skills/asx/scripts/asynx.py image crop input.png --output crop.png --box 0,0,800,800
+python3 skills/asx/scripts/asynx.py image slice input.png --output-dir tiles --rows 3 --columns 3
+python3 skills/asx/scripts/asynx.py image contact-sheet images/*.png --output sheet.jpg
+python3 skills/asx/scripts/asynx.py image apply-mask input.png --mask mask.png --output cutout.png
+python3 skills/asx/scripts/asynx.py image batch-convert \
+  --input-dir source --output-dir converted --format webp --recursive
+```
+
+这些命令适合图片信息读取、格式转换、缩放、裁剪、网格切图、联系表、Mask 透明化和批量转换。自动识别主体的 AI 抠图、OCR、视频处理和语义编辑仍需使用远程模型能力。
+
 参考图生成必须把图片与 Prompt 分开传入：
 
 ```powershell
@@ -276,6 +294,7 @@ asxlib/config.py    配置、API Key 和本地路径
 asxlib/client.py    HTTP、重试和 Asynx API
 asxlib/images.py    模型能力与任务输入
 asxlib/reference_media.py  参考图解码、归一化与限制校验
+asxlib/local_images.py  本地确定性图片处理
 asxlib/artifacts.py  本地生成结果索引与历史引用
 asxlib/state.py      版本化 Task、Asset 和 Event 账本
 asxlib/tasks.py     单 Task 生命周期和 Asset 下载

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import timezone
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 UTC = timezone.utc
 DEFAULT_BASE_URL = "https://asynx.llmapi.site/api"
 DEFAULT_MODEL = "gpt-image-2"
