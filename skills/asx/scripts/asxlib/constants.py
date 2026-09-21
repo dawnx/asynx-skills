@@ -5,7 +5,8 @@ from datetime import timezone
 VERSION = "0.4.0"
 UTC = timezone.utc
 DEFAULT_BASE_URL = "https://asynx.llmapi.site/api"
-DEFAULT_MODEL = "gpt-image-2"
+DEFAULT_MODEL = "gpt-image-2.5-sunburst"
+MODEL_DEFAULT_IMAGE_SIZES = {"doubao-seedream-5-0-260128": "2K"}
 DEFAULT_OUTPUT_DIR = "generated-images"
 DEFAULT_BATCH_SUBMISSIONS_PER_POLL = 4
 MODEL_CACHE_TTL_SECONDS = 300

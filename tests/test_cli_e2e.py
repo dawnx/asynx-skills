@@ -138,6 +138,14 @@ class CLIE2ETestCase(unittest.TestCase):
         listed = self.run_cli("task", "list", "--status", "succeeded", with_credentials=False)
         self.assertTrue(any(item["local_id"] == local_id for item in listed["tasks"]))
 
+    def test_wait_completes_detached_local_task(self) -> None:
+        submitted = self.run_cli("generate", "--prompt", "等待本地任务完成", "--detach")
+
+        waited = self.run_cli("wait", submitted["task_id"])
+
+        self.assertEqual(waited["status"], "succeeded")
+        self.assertEqual(len(waited["files"]), 1)
+
     def test_wait_reuses_deterministic_asset_path(self) -> None:
         generated = self.run_cli("generate", "--prompt", "重复等待测试")
         first = generated["files"]
@@ -194,7 +202,7 @@ class CLIE2ETestCase(unittest.TestCase):
         source.write_bytes(VALID_PNG)
 
         fast = self.run_cli("generate", "--prompt", "快速路径", "--detach")
-        self.assertEqual(fast["model"], "gpt-image-2")
+        self.assertEqual(fast["model"], "gpt-image-2.5-sunburst")
         self.assertIn("prepare_seconds", fast["timings"])
         self.assertIn("submit_seconds", fast["timings"])
 

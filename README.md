@@ -1,7 +1,7 @@
 # Asynx Agent Skills
 
 一个面向 Codex 和 Claude Code 的开源 Agent Skill。它通过 Asynx 异步 Task API 生成、编辑和批量处理图片。
-客户端使用 Python 实现；安装器会隔离管理参考图处理所需的 Pillow，并只在需要解析模型名称时读取当前部署的图片模型目录。
+客户端使用 Python 实现，并在需要时读取当前可用的图片模型。
 
 ## 要求
 
@@ -28,8 +28,7 @@ cd asynx-skills
 py install.py
 ```
 
-安装器会自动检测 Codex 和 Claude Code，把同一个 `asx` skill 安装到对应目录，并把 Pillow 安装到 skill 自身的
-`scripts/vendor/`，不会修改用户的全局 Python 环境。首次安装时只隐藏询问一次 API Key，并用只读模型目录请求检查配置。
+安装器会自动检测 Codex 和 Claude Code，把同一个 `asx` skill 安装到对应目录，不会修改用户的全局 Python 环境。首次安装时只隐藏询问一次 API Key，并检查配置是否可用。
 重复运行安装器会复用已有 Key。
 
 也可以显式指定目标：
@@ -44,7 +43,7 @@ Codex 可以对普通图片请求自动调用 skill，也可以显式使用 `$as
 
 在 Codex 中不需要输入命令。直接说“生成一张机械键盘”“把刚才那张换成蓝色”“再来 5 张”即可；Agent 会自动选择生成、编辑、最近结果或批次操作，默认等待完成并展示最终图片。只有结果存在多个合理候选时才会询问你选择哪一张。
 
-如果需要自定义工作台、网页、脚本或业务工作流，可以直接调用 Asynx 公开 API，也可以在自己的后端封装已安装的 `asynx.py`。实现方式、技术栈、页面结构和业务数据库由用户自行决定；不要直接读取或修改 skill 的本地 `state.db`，也不要把 API Key 暴露到浏览器、前端构建产物、URL 或日志中。
+如果需要自定义工作台、网页、脚本或业务工作流，可以直接调用 Asynx 公开 API，也可以在自己的后端封装已安装的 `asynx.py`。实现方式、技术栈、页面结构和业务数据库由用户自行决定；不要直接读取或修改 Skill 管理的本地状态文件，也不要把 API Key 暴露到浏览器、前端构建产物、URL 或日志中。
 
 运行安装器可以更新已有安装，已保存的 API Key 会被复用。
 
@@ -120,14 +119,14 @@ python3 ~/.agents/skills/asx/scripts/asynx.py doctor --verify
 Claude Code 或 Windows 用户把命令中的脚本路径替换为上面对应的已安装路径。诊断会报告实际配置文件、凭据来源、环境变量覆盖、
 已安装副本和版本差异；若仍提示缺少 Key，请按诊断输出的绝对命令在交互式终端重新运行 `configure`。
 
-## 单任务与本地账本
+## 生成、编辑与任务管理
 
 ```bash
 python3 skills/asx/scripts/asynx.py models
 
 python3 skills/asx/scripts/asynx.py generate \
   --prompt "混凝土展厅中的红色椅子" \
-  --model "gpt-image-2" \
+  --model "gpt-image-2.5-sunburst" \
   --image-size 2K \
   --aspect-ratio 16:9
 
@@ -138,7 +137,7 @@ python3 skills/asx/scripts/asynx.py edit \
 
 ### 本地图片工具
 
-只处理已有图片时，可以使用不调用 Asynx、也不写入本地任务账本的确定性工具：
+只处理已有图片时，可以使用不调用 Asynx、也不写入任务记录的确定性工具：
 
 ```bash
 python3 skills/asx/scripts/asynx.py image info input.png
@@ -188,8 +187,8 @@ python3 skills/asx/scripts/asynx.py generate \
   --keep-reference-original
 ```
 
-默认命令会等待 Task 完成并下载 Asset；用户要求立即受理、后台运行或稍后查询时添加 `--detach`。`--detach` 返回 Task ID，
-但不代表任务已经完成。每次提交都会写入本地 `state.db`，成功下载的 Asset 会自动建立索引。
+默认命令会等待 Task 完成并下载结果；用户要求立即受理、后台运行或稍后查询时添加 `--detach`。`--detach` 返回 Task ID，
+但不代表任务已经完成。Skill 会保存必要的本地任务记录，以便查询、恢复和继续编辑。
 
 中断、会话切换或需要稍后推进时使用本地任务接口：
 
@@ -226,25 +225,23 @@ python3 skills/asx/scripts/asynx.py edit \
 
 `asset list` 或 `recent` 返回的本地文件不存在时，先报告缺失，再让用户选择重新下载或提供新图片。
 
-默认模型和完整规范模型名会直接提交，不增加模型目录前置请求。`Gemini 3.1`、`seedream` 这类模糊名称
-需要查询模型目录，结果会按 Base URL 缓存 5 分钟。模型缓存不包含 API Key：macOS/Linux 默认位于
-`~/.cache/asx/models.json`，Windows 默认位于 `%LOCALAPPDATA%\Asynx\cache\models.json`。
+未指定模型时使用当前固定默认模型 `gpt-image-2.5-sunburst`，不会随机切换模型。指定完整模型名时直接提交；`Gemini 3.1`、`seedream` 这类模糊名称会先匹配当前可用模型。
+
+用户明确要求模型推荐、Prompt 优化或复杂创作时，Skill 会按需读取 `references/model-prompting.md`，提供基于官方资料和实践经验的模型路由建议；普通请求不会因此增加前置查询或改写 Prompt。
 
 单图片 Task 的首次轮询从 2 秒开始，后续退避最大为 4 秒。命令结果中的 `timings` 会分别记录本地准备、提交、等待和下载耗时；
 下载阶段还会细分首字节、传输和本地保存耗时，方便定位性能问题。
 
 ## 批量任务与追加
 
-任务和批次状态保存在统一的本机 SQLite v1 账本：macOS/Linux 默认是 `~/.local/state/asx/state.db`，Windows 默认是
-`%LOCALAPPDATA%\Asynx\state.db`。Asynx 仍然为每张图片创建独立 Task，因此批次可以追加、暂停、恢复和单项失败。
-首次使用新版本时会对旧的无版本核心账本执行一次破坏式重建；旧批次表和图片文件不会被删除，但旧单任务账本不会迁移。
+Skill 会在本机保存任务和批次状态。Asynx 仍然为每张图片创建独立 Task，因此批次可以追加、暂停、恢复，也允许单项失败而不影响其他任务。
 
 创建一个 12 项批次：
 
 ```bash
 python3 skills/asx/scripts/asynx.py batch create \
   --prompt "赛博朋克城市夜景" \
-  --model "gpt-image-2" \
+  --model "gpt-image-2.5-sunburst" \
   --total 12
 ```
 
@@ -283,41 +280,4 @@ python3 skills/asx/scripts/asynx.py batch cancel BATCH_ID
 python3 skills/asx/scripts/asynx.py history --limit 20
 ```
 
-批次图片默认保存到 `generated-images/<批次 ID>/`。输出文件、API Key、本地状态数据库都不应提交到 Git。
-
-## 测试
-
-客户端内部按职责拆分，`skills/asx/scripts/asynx.py` 只是稳定入口：
-
-```text
-asxlib/config.py    配置、API Key 和本地路径
-asxlib/client.py    HTTP、重试和 Asynx API
-asxlib/images.py    模型能力与任务输入
-asxlib/reference_media.py  参考图解码、归一化与限制校验
-asxlib/local_images.py  本地确定性图片处理
-asxlib/artifacts.py  本地生成结果索引与历史引用
-asxlib/state.py      版本化 Task、Asset 和 Event 账本
-asxlib/tasks.py     单 Task 生命周期和 Asset 下载
-asxlib/batches.py   SQLite 批次、追加和恢复
-asxlib/cli.py       命令解析与分发
-```
-
-测试只使用本地假 HTTP 服务，不会调用真实供应商：
-
-```bash
-python3 -m unittest discover -s tests -v
-```
-
-也可以单独启动 Mock Asynx 服务进行手动联调。服务启动后会打印随机本地地址：
-
-```bash
-python3 tests/mock_asynx_server.py
-```
-
-另一个终端使用打印出的地址：
-
-```bash
-export ASYNX_API_KEY="asx-mock-test"
-export ASYNX_BASE_URL="http://127.0.0.1:打印出的端口"
-python3 skills/asx/scripts/asynx.py batch create --prompt "本地测试" --total 3
-```
+批次图片默认保存到 `generated-images/<批次 ID>/`。输出文件、API Key 和本地状态文件都不应提交到 Git。

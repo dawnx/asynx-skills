@@ -377,7 +377,7 @@ class UnitTestCase(unittest.TestCase):
                 output_format="png",
                 references=[],
             )
-        self.assertEqual(selected, "gpt-image-2")
+        self.assertEqual(selected, "gpt-image-2.5-sunburst")
         self.assertIsNone(request_id)
         self.assertEqual(body["input"]["image_size"], "2K")
 
@@ -431,6 +431,38 @@ class UnitTestCase(unittest.TestCase):
         self.assertEqual(first.calls, 1)
         self.assertEqual(first_result[1], "gemini-3.1-flash-image")
         self.assertEqual(cached_result[1], "gemini-3.1-flash-image")
+
+    def test_explicit_seedream_uses_known_defaults_without_catalog_request(self) -> None:
+        class NoCatalogClient:
+            base_url = "https://model-defaults.test"
+
+            def models(self) -> tuple[list[dict[str, Any]], str]:
+                raise AssertionError("canonical model defaults must not request the catalog")
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"ASYNX_CACHE_PATH": str(Path(directory) / "models.json")},
+            clear=False,
+        ):
+            body, selected, request_id = images.build_task(
+                NoCatalogClient(),
+                task_type="image.generate",
+                model_selector="doubao-seedream-5-0-260128",
+                prompt="城市夜景海报",
+                image_size=None,
+                aspect_ratio=None,
+                quality=None,
+                count=1,
+                output_format=None,
+                references=[],
+            )
+
+        self.assertEqual(selected, "doubao-seedream-5-0-260128")
+        self.assertIsNone(request_id)
+        self.assertEqual(body["input"]["image_size"], "2K")
+        self.assertEqual(body["input"]["aspect_ratio"], "1:1")
+        self.assertEqual(body["input"]["quality"], "standard")
+        self.assertEqual(body["input"]["output_format"], "png")
 
     def test_task_polling_starts_at_two_seconds_and_caps_at_four(self) -> None:
         class StatusClient:

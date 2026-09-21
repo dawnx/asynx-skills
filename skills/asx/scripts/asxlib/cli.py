@@ -35,11 +35,11 @@ from .tasks import (
 def _add_image_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--model")
-    parser.add_argument("--image-size", default="1K")
-    parser.add_argument("--aspect-ratio", default="1:1")
-    parser.add_argument("--quality", default="standard")
+    parser.add_argument("--image-size")
+    parser.add_argument("--aspect-ratio")
+    parser.add_argument("--quality")
     parser.add_argument("--count", type=int, default=1)
-    parser.add_argument("--output-format", choices=("png", "jpeg", "webp"), default="png")
+    parser.add_argument("--output-format", choices=("png", "jpeg", "webp"))
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--idempotency-key")
     parser.add_argument("--detach", action="store_true")
@@ -56,14 +56,13 @@ def _add_batch_creation_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--prompt", required=True, help="提示词或编辑指令")
     parser.add_argument("--model", help="模型名称或唯一片段")
-    parser.add_argument("--image-size", default="1K", help="图片尺寸档位")
-    parser.add_argument("--aspect-ratio", default="1:1", help="宽高比")
-    parser.add_argument("--quality", default="standard", help="质量参数")
+    parser.add_argument("--image-size", help="图片尺寸档位")
+    parser.add_argument("--aspect-ratio", help="宽高比")
+    parser.add_argument("--quality", help="质量参数")
     parser.add_argument("--count", type=int, default=1, help="每个 Task 的输出数量")
     parser.add_argument(
         "--output-format",
         choices=("png", "jpeg", "webp"),
-        default="png",
         help="输出格式",
     )
     parser.add_argument("--total", type=int, default=1, help="批次中的 Task 数量")
@@ -219,7 +218,7 @@ def parser() -> argparse.ArgumentParser:
     recent.add_argument("--limit", type=int, default=20, help="返回数量")
     recent.add_argument("--latest", action="store_true", help="只返回最近一个结果")
 
-    task = commands.add_parser("task", help="管理本地任务账本")
+    task = commands.add_parser("task", help="管理本地任务记录")
     task_commands = task.add_subparsers(dest="task_command", required=True)
     task_list = task_commands.add_parser("list", help="列出本地任务")
     task_list.add_argument("--status", help="按本地状态筛选")

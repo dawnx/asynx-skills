@@ -12,6 +12,7 @@ from .config import cache_path
 from .constants import (
     DEFAULT_MODEL,
     MODEL_CACHE_TTL_SECONDS,
+    MODEL_DEFAULT_IMAGE_SIZES,
     REFERENCE_NETWORK_WARNING_BYTES,
 )
 from .errors import AsxError
@@ -211,18 +212,19 @@ def build_task(
     task_type: str,
     model_selector: str | None,
     prompt: str,
-    image_size: str,
-    aspect_ratio: str,
-    quality: str,
+    image_size: str | None,
+    aspect_ratio: str | None,
+    quality: str | None,
     count: int,
-    output_format: str,
+    output_format: str | None,
     references: list[str],
     mask: str | None = None,
     keep_reference_original: bool = False,
 ) -> tuple[dict[str, Any], str, str | None]:
     if not 1 <= len(prompt) <= 32_000:
         raise AsxError("Prompt must contain 1-32,000 characters", code="invalid_prompt")
-    if not quality.strip():
+    quality_value = quality.strip() if quality else "standard"
+    if not quality_value:
         raise AsxError("Quality cannot be empty", code="invalid_quality")
     if not 1 <= count <= 4:
         raise AsxError("Count must be between 1 and 4", code="invalid_count")
@@ -250,20 +252,36 @@ def build_task(
             cache_models(client.base_url, models)
         model = resolve_model(models, model_selector, task_type)
 
-    canonical_size = image_size.strip().upper()
-    canonical_ratio = aspect_ratio.strip()
-    canonical_format = output_format.strip().lower()
+    canonical_size = (
+        image_size.strip().upper()
+        if image_size
+        else MODEL_DEFAULT_IMAGE_SIZES.get(requested_model.casefold(), "1K")
+    )
+    canonical_ratio = aspect_ratio.strip() if aspect_ratio else "1:1"
+    canonical_format = output_format.strip().lower() if output_format else "png"
     if model is not None:
         model_capabilities = capabilities(model)
-        canonical_size = catalog_choice(
-            image_size, model_capabilities.get("image_sizes"), "image_size"
-        )
-        canonical_ratio = catalog_choice(
-            aspect_ratio, model_capabilities.get("aspect_ratios"), "aspect_ratio"
-        )
-        canonical_format = catalog_choice(
-            output_format, model_capabilities.get("output_formats"), "output_format"
-        )
+        image_sizes = model_capabilities.get("image_sizes")
+        aspect_ratios = model_capabilities.get("aspect_ratios")
+        output_formats = model_capabilities.get("output_formats")
+        if image_size is None:
+            if not isinstance(image_sizes, list) or not image_sizes:
+                raise AsxError("Selected model has invalid image_size capabilities", code="invalid_model_catalog")
+            canonical_size = str(image_sizes[0])
+        else:
+            canonical_size = catalog_choice(image_size, image_sizes, "image_size")
+        if aspect_ratio is None:
+            if not isinstance(aspect_ratios, list) or not aspect_ratios:
+                raise AsxError("Selected model has invalid aspect_ratio capabilities", code="invalid_model_catalog")
+            canonical_ratio = str(aspect_ratios[0])
+        else:
+            canonical_ratio = catalog_choice(aspect_ratio, aspect_ratios, "aspect_ratio")
+        if output_format is None:
+            if not isinstance(output_formats, list) or not output_formats:
+                raise AsxError("Selected model has invalid output_format capabilities", code="invalid_model_catalog")
+            canonical_format = str(output_formats[0])
+        else:
+            canonical_format = catalog_choice(output_format, output_formats, "output_format")
         max_images = model_capabilities.get("max_images")
         if not isinstance(max_images, int) or count > max_images:
             raise AsxError(
@@ -300,7 +318,7 @@ def build_task(
         "count": count,
         "image_size": canonical_size,
         "aspect_ratio": canonical_ratio,
-        "quality": quality,
+        "quality": quality_value,
         "output_format": canonical_format,
         "extra": {},
     }

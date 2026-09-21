@@ -862,18 +862,42 @@ def wait_and_download(
     finally:
         ledger_connection.close()
     if local_row is not None:
-        return sync_local_task(client, str(local_row["local_id"]), output_dir=output_dir)
+        task, request_id = _remote_task_for_row(client, local_row)
+        task, request_id = wait_for_terminal(client, task, request_id)
+        local_id = str(local_row["local_id"])
+        _update_local_snapshot(local_id, task, request_id)
+        if task.get("status") != "succeeded":
+            return task_payload(task, request_id, local_id=local_id), 4
+        target_dir = (
+            str(local_row.get("output_dir") or DEFAULT_OUTPUT_DIR)
+            if output_dir == DEFAULT_OUTPUT_DIR
+            else output_dir
+        )
+        download_started = time.perf_counter()
+        asset_metrics: list[dict[str, Any]] = []
+        files = download_assets(
+            client, task, target_dir, metrics=asset_metrics, local_task_id=local_id
+        )
+        payload = task_payload(task, request_id, files=files, local_id=local_id)
+        payload["timings"] = {
+            "download_seconds": round(time.perf_counter() - download_started, 3),
+            "asset_downloads": asset_metrics,
+        }
+        artifact_warning = index_downloaded_artifacts(task, files)
+        if artifact_warning:
+            payload["warnings"] = [artifact_warning]
+        return payload, 0
     task, request_id = client.task(task_id)
     task, request_id = wait_for_terminal(client, task, request_id)
     if task.get("status") != "succeeded":
         return task_payload(task, request_id), 4
     download_started = time.perf_counter()
-    asset_metrics: list[dict[str, Any]] = []
-    files = download_assets(client, task, output_dir, metrics=asset_metrics)
+    remote_asset_metrics: list[dict[str, Any]] = []
+    files = download_assets(client, task, output_dir, metrics=remote_asset_metrics)
     payload = task_payload(task, request_id, files=files)
     payload["timings"] = {
         "download_seconds": round(time.perf_counter() - download_started, 3),
-        "asset_downloads": asset_metrics,
+        "asset_downloads": remote_asset_metrics,
     }
     artifact_warning = index_downloaded_artifacts(task, files)
     if artifact_warning:

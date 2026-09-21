@@ -16,14 +16,16 @@ API Key 不得出现在命令参数、Prompt、日志或项目文件中。
 - “换个颜色/改背景/把刚才那张……”：先用 `recent --latest` 找最近结果，再执行 `edit --from-task`；只有结果有多个且无法判断时才追问。
 - “再来 5 张/批量生成……”：执行 `batch create` 或 `batch add`，返回批次进度和可继续操作的状态。
 - “继续上次/现在到哪了……”：执行 `task recover` 或 `task poll`，汇总状态、失败项和已下载图片。
-- 用户没有明确要求后台运行时，即使内部先使用 `--detach` 快速受理，也必须在同一轮继续等待、下载和展示最终结果。
+- 用户没有明确要求后台运行时，即使先使用 `--detach` 快速受理，也必须在同一轮继续等待、下载和展示最终结果。
 - 用户没有要求解释实现时，不要要求用户手动复制 Task ID、运行 `history` 或扫描磁盘。
 
 ## 路由规则
 
 - 新图使用 `generate`；换色、替换背景、修改或局部重绘使用 `edit`。
 - 参考/模仿图片必须作为独立的 `--reference`（生成）或 `--image`（编辑）参数，Prompt 只保留文字指令。
-- Prompt 原样提交；未指定模型、尺寸、比例或质量时使用脚本默认值，不先调用 `models` 探测。
+- 普通请求中 Prompt 原样提交；未指定模型时使用当前固定默认模型 `gpt-image-2.5-sunburst`，不随机切换模型；未指定尺寸、比例或质量时使用脚本默认值，不先调用 `models` 探测。
+- 用户要求模型推荐、Prompt 优化，或请求包含复杂编辑、多参考图、海报、信息图或组图时，读取
+  [references/model-prompting.md](references/model-prompting.md)。其中的模型策略是经验建议，不是供应商硬性语法；保留用户原始意图，不要无理由重写 Prompt。
 - 普通请求直接执行 `generate`/`edit` 并等待下载；用户要求立即返回、后台运行或稍后查询时加 `--detach`。
 - 用户要求批量或追加时使用 `batch create`/`batch add`，不要用批次命令替代单 Task 操作。
 
@@ -37,14 +39,14 @@ API Key 不得出现在命令参数、Prompt、日志或项目文件中。
 
 必须遵守以下边界：
 
-- 不要直接读取、写入、迁移、删除或依赖本 skill 的 `state.db` 内部结构。
+- 不要直接读取、写入、迁移、删除或依赖本 Skill 管理的本地状态文件。
 - 任务状态通过 CLI 的结构化 JSON 输出或 Asynx 公开 API 获取；用户自己的工作台可以维护自己的数据库。
 - API Key 不得暴露到浏览器代码、URL、前端构建产物或日志；浏览器直连时必须由用户自行提供安全的服务端或本地桥接方案。
 - 不要因为用户要自定义页面，就替用户创建额外网关、服务或固定工作流；只实现用户明确要求的集成部分。
 
 ## 本地图片处理
 
-用户只要求处理已有图片时，优先使用本地确定性工具；这些命令不调用 Asynx、不需要 API Key，也不读写 skill 的 `state.db`：
+用户只要求处理已有图片时，优先使用本地确定性工具；这些命令不调用 Asynx、不需要 API Key，也不读写 Skill 的任务记录：
 
 ```bash
 python3 "<skill-dir>/scripts/asynx.py" image info input.png
@@ -90,7 +92,7 @@ python3 "<skill-dir>/scripts/asynx.py" doctor
 只有用户要求验证网络和 Key 时才执行 `doctor --verify`。随后根据诊断给出的配置路径和绝对 `configure` 命令指导用户；交互式
 配置必须由用户在自己的终端执行，Agent 的非交互子进程不能代跑。
 
-## 单任务与本地账本
+## 单任务与本地记录
 
 ```bash
 python3 "<skill-dir>/scripts/asynx.py" generate --prompt "<提示词>"
@@ -99,7 +101,7 @@ python3 "<skill-dir>/scripts/asynx.py" edit --prompt "<编辑指令>" --from-tas
 ```
 
 根据需要添加 `--model`、`--image-size`、`--aspect-ratio`、`--quality`、`--count`、`--output-format`、`--reference`、`--mask`、
-`--output-dir`、`--keep-reference-original` 或 `--detach`。提交前会写入本地 `state.db`，成功下载的 Asset 会自动建立索引。
+`--output-dir`、`--keep-reference-original` 或 `--detach`。Skill 会保存必要的本地任务记录，成功下载的结果会自动建立索引。
 
 `--detach` 只快速受理并返回 Task ID，不代表任务已完成。中断、会话切换或需要稍后处理时使用本地任务接口：
 
@@ -125,7 +127,7 @@ python3 "<skill-dir>/scripts/asynx.py" recent --query "<描述或 Task ID>"
 
 ## 批量任务
 
-批量任务与单任务共用本机 SQLite v1 账本，Asynx 端每张图仍是独立 Task。创建批次后立即返回批次 ID，不要因为异步任务尚未完成而阻塞用户对话：
+批量任务与单任务共用本地任务记录，Asynx 端每张图仍是独立 Task。创建批次后立即返回批次 ID，不要因为异步任务尚未完成而阻塞用户对话：
 
 ```bash
 python3 "<skill-dir>/scripts/asynx.py" batch create \
