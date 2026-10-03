@@ -304,7 +304,7 @@ class UnitTestCase(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(installed.returncode, 0, installed.stderr)
-            self.assertEqual(installed.stdout.strip(), "0.5.1")
+            self.assertEqual(installed.stdout.strip(), "0.5.2")
 
     def test_installer_can_install_both_agents_noninteractively(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -461,7 +461,7 @@ class UnitTestCase(unittest.TestCase):
         self.assertIsNone(request_id)
         self.assertEqual(body["input"]["image_size"], "2K")
         self.assertEqual(body["input"]["aspect_ratio"], "1:1")
-        self.assertEqual(body["input"]["quality"], "standard")
+        self.assertEqual(body["input"]["quality"], "auto")
         self.assertEqual(body["input"]["output_format"], "png")
 
     def test_task_polling_starts_at_two_seconds_and_caps_at_four(self) -> None:

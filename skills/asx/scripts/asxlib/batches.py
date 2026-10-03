@@ -13,6 +13,7 @@ from .client import AsynxClient
 from .constants import (
     DEFAULT_BATCH_SUBMISSIONS_PER_POLL,
     DEFAULT_OUTPUT_DIR,
+    DEFAULT_QUALITY,
     KNOWN_STATUSES,
     LOCAL_ITEM_STATUSES,
     MAX_BATCH_ITEMS,
@@ -168,7 +169,7 @@ def create_batch(
     model_selector: str | None,
     image_size: str,
     aspect_ratio: str,
-    quality: str,
+    quality: str | None,
     count: int,
     output_format: str,
     references: list[str],
@@ -308,7 +309,11 @@ def add_to_batch(
                 prompt=prompt if prompt is not None else str(input_value.get("prompt", "")),
                 image_size=image_size or str(input_value.get("image_size", "1K")),
                 aspect_ratio=aspect_ratio or str(input_value.get("aspect_ratio", "1:1")),
-                quality=quality or str(input_value.get("quality", "standard")),
+                quality=(
+                    quality
+                    if quality is not None
+                    else str(input_value.get("quality", DEFAULT_QUALITY))
+                ),
                 count=count or int(input_value.get("count", 1)),
                 output_format=output_format or str(input_value.get("output_format", "png")),
                 references=references if references is not None else existing_references,

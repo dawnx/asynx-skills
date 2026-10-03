@@ -12,6 +12,7 @@ from .config import config_status, configure, doctor, load_credentials
 from .constants import (
     DEFAULT_BATCH_SUBMISSIONS_PER_POLL,
     DEFAULT_OUTPUT_DIR,
+    DEFAULT_QUALITY,
     KNOWN_STATUSES,
     VERSION,
 )
@@ -38,7 +39,7 @@ def _add_image_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model")
     parser.add_argument("--image-size")
     parser.add_argument("--aspect-ratio")
-    parser.add_argument("--quality")
+    parser.add_argument("--quality", help=f"模型原生质量参数，默认 {DEFAULT_QUALITY}")
     parser.add_argument("--count", type=int, default=1)
     parser.add_argument("--output-format", choices=("png", "jpeg", "webp"))
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
@@ -59,7 +60,7 @@ def _add_batch_creation_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", help="模型名称或唯一片段")
     parser.add_argument("--image-size", help="图片尺寸档位")
     parser.add_argument("--aspect-ratio", help="宽高比")
-    parser.add_argument("--quality", help="质量参数")
+    parser.add_argument("--quality", help=f"模型原生质量参数，默认 {DEFAULT_QUALITY}")
     parser.add_argument("--count", type=int, default=1, help="每个 Task 的输出数量")
     parser.add_argument(
         "--output-format",

@@ -11,6 +11,7 @@ from typing import Any, Protocol, cast
 from .config import cache_path
 from .constants import (
     DEFAULT_MODEL,
+    DEFAULT_QUALITY,
     MODEL_CACHE_TTL_SECONDS,
     MODEL_DEFAULT_IMAGE_SIZES,
     REFERENCE_NETWORK_WARNING_BYTES,
@@ -223,7 +224,7 @@ def build_task(
 ) -> tuple[dict[str, Any], str, str | None]:
     if not 1 <= len(prompt) <= 32_000:
         raise AsxError("Prompt must contain 1-32,000 characters", code="invalid_prompt")
-    quality_value = quality.strip() if quality else "standard"
+    quality_value = quality.strip() if quality is not None else DEFAULT_QUALITY
     if not quality_value:
         raise AsxError("Quality cannot be empty", code="invalid_quality")
     if not 1 <= count <= 4:

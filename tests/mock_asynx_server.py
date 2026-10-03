@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 API_KEY = "asx-mock-test"
+SUNBURST_QUALITIES = ("low", "medium", "high", "xhigh", "max", "auto")
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
@@ -86,6 +87,19 @@ class MockState:
                 prompt = task.get("input", {}).get("prompt") if isinstance(task.get("input"), dict) else ""
                 if task["polls"] == 1:
                     task["status"] = "running"
+                elif (
+                    task.get("model") == "gpt-image-2.5-sunburst"
+                    and isinstance(task.get("input"), dict)
+                    and task["input"].get("quality", "standard") not in SUNBURST_QUALITIES
+                ):
+                    task["status"] = "failed"
+                    task["error"] = {
+                        "code": "provider_request_rejected",
+                        "message": (
+                            f"Invalid value for quality: {task['input'].get('quality', 'standard')!r}. "
+                            f"Supported values are: {', '.join(SUNBURST_QUALITIES)}."
+                        ),
+                    }
                 elif isinstance(prompt, str) and "[失败测试]" in prompt:
                     task["status"] = "failed"
                 else:
@@ -156,7 +170,9 @@ def _public_task(task: dict[str, Any], base_url: str) -> dict[str, Any]:
             ]
         }
     elif status == "failed":
-        response["error"] = {"code": "mock_failure", "message": "Mock 任务按测试要求失败"}
+        response["error"] = task.get("error") or {
+            "code": "mock_failure", "message": "Mock 任务按测试要求失败"
+        }
     elif status == "canceled":
         response["error"] = {"code": "task_canceled", "message": "Mock 任务已取消"}
     return response

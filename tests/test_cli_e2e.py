@@ -47,8 +47,10 @@ class CLIE2ETestCase(unittest.TestCase):
             {
                 "ASYNX_API_KEY": "asx-mock-test",
                 "ASYNX_BASE_URL": self.base_url,
+                "ASYNX_CONFIG_PATH": str(self.temp_path / "config.json"),
                 "ASYNX_STATE_PATH": str(self.temp_path / "state.db"),
                 "ASYNX_CACHE_PATH": str(self.temp_path / "models.json"),
+                "ASYNX_UPDATE_CHECK": "off",
             }
         )
 
@@ -65,7 +67,9 @@ class CLIE2ETestCase(unittest.TestCase):
             self.server.stderr.close()
         self.temporary.cleanup()
 
-    def run_cli(self, *arguments: str, with_credentials: bool = True) -> dict[str, Any]:
+    def run_cli(
+        self, *arguments: str, with_credentials: bool = True, expected_returncode: int = 0
+    ) -> dict[str, Any]:
         environment = self.environment.copy()
         if not with_credentials:
             environment.pop("ASYNX_API_KEY", None)
@@ -79,7 +83,10 @@ class CLIE2ETestCase(unittest.TestCase):
             timeout=20,
             check=False,
         )
-        self.assertEqual(result.returncode, 0, msg=f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}")
+        self.assertEqual(
+            result.returncode, expected_returncode,
+            msg=f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}",
+        )
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError:
@@ -139,6 +146,81 @@ class CLIE2ETestCase(unittest.TestCase):
 
         self.assertTrue(result["verification"]["ok"])
         self.assertGreaterEqual(result["verification"]["image_model_count"], 1)
+
+    def test_explicit_quality_values_reach_generate_and_edit_unchanged(self) -> None:
+        source = self.temp_path / "source.png"
+        source.write_bytes(VALID_PNG)
+        cases = [("generate", quality) for quality in ("low", "medium", "high", "xhigh", "max", "auto")]
+        cases.append(("edit", "max"))
+        for operation, quality in cases:
+            with self.subTest(operation=operation, quality=quality):
+                image_options = ["--image", str(source)] if operation == "edit" else []
+                submitted = self.run_cli(
+                    operation, "--prompt", f"显式质量 {quality}",
+                    "--model", "gpt-image-2.5-sunburst",
+                    "--quality", quality, *image_options, "--detach",
+                    "--output-dir", str(self.temp_path / "outputs"),
+                )
+                self.run_cli("task", "poll", submitted["task_id"])
+                finished = self.run_cli("task", "poll", submitted["task_id"])
+                self.assertEqual(finished["tasks"][0]["status"], "succeeded")
+                remote = self.run_cli("history", "--limit", "1")["tasks"][0]
+                self.assertEqual(remote["id"], submitted["task_id"])
+                self.assertEqual(remote["task_type"], f"image.{operation}")
+                self.assertEqual(remote["input"]["quality"], quality)
+
+    def test_rejected_quality_fails_without_assets_and_releases_billing(self) -> None:
+        output_dir = self.temp_path / "rejected"
+        failed = self.run_cli(
+            "generate", "--prompt", "旧质量参数不能被 mock 静默接受",
+            "--model", "gpt-image-2.5-sunburst",
+            "--quality", "standard", "--output-dir", str(output_dir),
+            expected_returncode=4,
+        )
+
+        self.assertFalse(failed["ok"])
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"]["code"], "provider_request_rejected")
+        self.assertIn("quality", failed["error"]["message"])
+        self.assertEqual(failed["billing"]["status"], "released")
+        self.assertEqual(failed["billing"]["captured_amount"], "0.00000000")
+        self.assertEqual(failed["billing"]["released_amount"], "0.01000000")
+        self.assertEqual(list(output_dir.glob("*")), [])
+        assets = self.run_cli("asset", "list", failed["task_id"], with_credentials=False)
+        self.assertEqual(assets["assets"], [])
+        remote = self.run_cli("history", "--limit", "1")["tasks"][0]
+        self.assertEqual(remote["input"]["quality"], "standard")
+        self.assertIsNone(remote["result"])
+
+    def test_batch_quality_is_inherited_and_per_item_override_is_preserved(self) -> None:
+        output_dir = self.temp_path / "batch-quality"
+        created = self.run_cli(
+            "batch", "create", "--prompt", "批次默认质量",
+            "--model", "gpt-image-2.5-sunburst",
+            "--quality", "max", "--output-dir", str(output_dir),
+        )
+        batch_id = created["batch"]["id"]
+        self.run_cli("batch", "add", batch_id, "--prompt", "追加时继承质量")
+        self.run_cli(
+            "batch", "add", batch_id, "--prompt", "本次覆盖质量", "--quality", "xhigh"
+        )
+        self.run_cli("batch", "add", batch_id, "--prompt", "仍然继承批次质量")
+
+        finished = self.poll_until_finished(batch_id)
+        self.assertEqual(finished["batch"]["status"], "completed")
+        self.assertEqual(len(list(output_dir.glob("*.png"))), 4)
+        history = self.run_cli("history", "--limit", "10")
+        qualities = {
+            task["input"]["prompt"]: task["input"]["quality"]
+            for task in history["tasks"]
+            if task["metadata"].get("asx_batch_id") == batch_id
+        }
+        self.assertEqual(qualities, {
+            "批次默认质量": "max",
+            "追加时继承质量": "max",
+            "本次覆盖质量": "xhigh",
+            "仍然继承批次质量": "max",
+        })
 
     def test_local_task_commands_resume_detached_submission(self) -> None:
         submitted = self.run_cli("generate", "--prompt", "本地账本任务", "--detach")
@@ -219,6 +301,11 @@ class CLIE2ETestCase(unittest.TestCase):
         )
         self.assertEqual(edited["status"], "succeeded")
         self.assertEqual(len(edited["files"]), 1)
+        history = self.run_cli("history", "--limit", "2")
+        self.assertEqual(
+            {task["task_type"]: task["input"]["quality"] for task in history["tasks"]},
+            {"image.generate": "auto", "image.edit": "auto"},
+        )
 
     def test_real_cli_processes_resume_append_edit_cancel_and_history(self) -> None:
         source = self.temp_path / "source.png"
@@ -316,6 +403,7 @@ class CLIE2ETestCase(unittest.TestCase):
         self.assertEqual(len(batches["batches"]), 3)
         history = self.run_cli("history", "--limit", "20")
         self.assertEqual(len(history["tasks"]), 9)
+        self.assertTrue(all(task["input"]["quality"] == "auto" for task in history["tasks"]))
         recovered = next(
             task
             for task in history["tasks"]

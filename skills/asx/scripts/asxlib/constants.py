@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from datetime import timezone
 
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 UTC = timezone.utc
 DEFAULT_BASE_URL = "https://asynx.llmapi.site/api"
 DEFAULT_MODEL = "gpt-image-2.5-sunburst"
+DEFAULT_QUALITY = "auto"
 MODEL_DEFAULT_IMAGE_SIZES = {"doubao-seedream-5-0-260128": "2K"}
 DEFAULT_OUTPUT_DIR = "generated-images"
 DEFAULT_BATCH_SUBMISSIONS_PER_POLL = 4
