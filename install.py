@@ -122,6 +122,9 @@ def _install_skill(destination: Path, *, install_dependencies: bool = True) -> N
     script.chmod(script.stat().st_mode | 0o111)
     if install_dependencies:
         _install_dependencies(destination)
+    client = _load_client_module(destination)
+    update_files = importlib.import_module(f"{client.__name__}.update_files")
+    update_files.record_install(destination, files=update_files.inventory(SKILL_SOURCE))
 
 
 def _uninstall_skill(destination: Path) -> bool:

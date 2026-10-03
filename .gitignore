@@ -4,6 +4,9 @@ __pycache__/
 .pytest_cache/
 generated-images/
 skills/asx/scripts/vendor/
+dist/
+.asx-runtime.lock
+.asx-install.json
 *.db
 *.db-shm
 *.db-wal

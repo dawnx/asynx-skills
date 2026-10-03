@@ -45,14 +45,35 @@ Codex 可以对普通图片请求自动调用 skill，也可以显式使用 `$as
 
 如果需要自定义工作台、网页、脚本或业务工作流，可以直接调用 Asynx 公开 API，也可以在自己的后端封装已安装的 `asynx.py`。实现方式、技术栈、页面结构和业务数据库由用户自行决定；不要直接读取或修改 Skill 管理的本地状态文件，也不要把 API Key 暴露到浏览器、前端构建产物、URL 或日志中。
 
-运行安装器可以更新已有安装，已保存的 API Key 会被复用。
+查看本机版本和安装位置，或检查是否有新版本：
 
-更新到新版本：
+```bash
+python3 ~/.agents/skills/asx/scripts/asynx.py update status
+python3 ~/.agents/skills/asx/scripts/asynx.py update check
+```
+
+图片任务完成后，Skill 最多每 6 小时联网检查一次稳定版更新。发现新版后会继续提醒，直到升级；期间使用缓存，不会每次请求网络。
+网络不可用时继续使用当前版本。设置 `ASYNX_UPDATE_CHECK=off` 可以关闭任务后的检查和提示，`update check --force` 可随时重新检查。
+
+确认升级时运行：
+
+```bash
+python3 ~/.agents/skills/asx/scripts/asynx.py update apply
+```
+
+默认升级已安装的 Codex 和 Claude Code 副本；`--target current` 只升级当前副本，也可指定 `--target codex` 或 `--target claude`。
+升级保留 API Key、任务记录和生成图片。存在本地修改时会停止，可用 `--force` 备份后覆盖。使用其他安装工具管理的副本，请通过原工具更新。
+升级失败会尝试恢复原版本；需要回到上一个版本或恢复中断的更新时，运行 `update rollback`。若 Agent 仍显示旧说明，请重新打开会话。
+
+Claude Code 用户将上述路径替换为 `~/.claude/skills/asx/scripts/asynx.py`；Windows 使用 `py` 和对应的用户安装路径。
+`0.5.0` 之前的版本没有更新命令，请先在仓库目录重新运行安装器一次：
 
 ```bash
 git pull
 python3 install.py
 ```
+
+自动更新提示和 `update apply` 只使用已发布的稳定 Release。仓库中尚未发布的改动，仍可通过重新运行安装器安装。
 
 卸载 skill：
 

@@ -170,3 +170,14 @@ python3 "<skill-dir>/scripts/asynx.py" batch cancel "<batch-id>"
 
 脚本将进度日志写到 stderr，将一个 JSON 对象写到 stdout。成功后报告 Task/批次 ID、实际模型、结果质量、计费金额和绝对文件路径；
 Codex 桌面端使用绝对路径展示图片。`timings` 仅用于性能诊断，除非用户询问耗时，否则无需逐项解释。
+
+## 版本更新
+
+图片任务结果包含 `update_notice` 时，先交付图片，再简短告知可升级的版本。此提示可以在后续任务中重复出现；脚本最多每 6 小时联网检查一次，其余使用缓存。不要在生图前额外检查版本。
+
+用户询问版本时执行 `update status`；要求检查新版时执行 `update check`，立即重新检查用 `update check --force`。
+用户要求升级时执行 `update apply`，默认更新已安装副本；只更新当前副本用 `--target current`。用户已明确要求升级时直接执行，不必再次确认。
+用户需要恢复上一版或中断的更新时执行 `update rollback`。更新命令不需要 API Key。
+
+未收到升级指令时只提示，不自行替换文件。遇到本地修改或未登记的安装副本时按命令结果说明原因，不自动添加 `--force`。
+用户要求关闭更新提示时，可设置 `ASYNX_UPDATE_CHECK=off`。旧版没有更新命令时，在仓库运行安装器升级一次即可。

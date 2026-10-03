@@ -1,0 +1,35 @@
+name: Release skill
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Check version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python -c 'import os, subprocess; v = subprocess.check_output(["python", "skills/asx/scripts/asynx.py", "--version"], text=True).strip(); assert os.environ["RELEASE_TAG"] == "v" + v'
+      - name: Test
+        env:
+          ASYNX_UPDATE_CHECK: 'off'
+        run: |
+          python -m pip install 'Pillow>=10.2,<13'
+          python -m unittest discover -s tests -q
+      - name: Build
+        run: python scripts/build_release.py --output-dir dist
+      - name: Publish stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" dist/asx-*.zip dist/asx-*.json --verify-tag --generate-notes
