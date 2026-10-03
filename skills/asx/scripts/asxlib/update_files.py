@@ -472,13 +472,13 @@ def replace_installations(
 def lock_targets(
     stack: ExitStack, targets: list[Path], already_locked: Path | None
 ) -> None:
-    from asx_runtime import file_lock, runtime_lock_path
+    from asx_runtime import LockBusyError, file_lock, runtime_lock_path
 
     try:
         for target in sorted(set(targets)):
             if target != already_locked:
                 stack.enter_context(file_lock(runtime_lock_path(target)))
-    except OSError as exc:
+    except LockBusyError as exc:
         raise AsxError(
             "有命令正在使用 Skill，请在任务结束后更新", code="update_busy"
         ) from exc

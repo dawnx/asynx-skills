@@ -2,18 +2,34 @@
 
 from __future__ import annotations
 
+import errno
 import importlib
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
+
+
+class LockBusyError(OSError):
+    """Another process holds an incompatible lock; filesystem errors are separate."""
 
 
 @contextmanager
 def file_lock(path: Path, *, exclusive: bool = True) -> Iterator[None]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+b") as handle:
+    handle: BinaryIO
+    if exclusive:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a+b")
+    else:
+        # Agent sandboxes can read installed skills without being allowed to write them.
+        try:
+            handle = path.open("rb")
+        except FileNotFoundError:
+            # Older/manual installations may not have an installer-created lock yet.
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handle = path.open("a+b")
+    with handle:
         if os.name == "nt":
             # LockFileEx supports shared readers; CRT byte locks serialize ordinary CLI commands.
             ctypes: Any = importlib.import_module("ctypes")
@@ -43,7 +59,12 @@ def file_lock(path: Path, *, exclusive: bool = True) -> Iterator[None]:
             if not kernel.LockFileEx(
                 native_handle, 1 | (2 if exclusive else 0), 0, 1, 0, overlapped
             ):
-                raise ctypes.WinError(ctypes.get_last_error())
+                error = ctypes.get_last_error()
+                if error == 33:  # ERROR_LOCK_VIOLATION
+                    raise LockBusyError(
+                        errno.EAGAIN, "Skill lock is already held", str(path)
+                    )
+                raise ctypes.WinError(error)
             try:
                 yield
             finally:
@@ -51,7 +72,14 @@ def file_lock(path: Path, *, exclusive: bool = True) -> Iterator[None]:
         else:
             lock_module: Any = importlib.import_module("fcntl")
             mode = lock_module.LOCK_EX if exclusive else lock_module.LOCK_SH
-            lock_module.flock(handle, mode | lock_module.LOCK_NB)
+            try:
+                lock_module.flock(handle, mode | lock_module.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+                    raise LockBusyError(
+                        errno.EAGAIN, "Skill lock is already held", str(path)
+                    ) from exc
+                raise
             try:
                 yield
             finally:

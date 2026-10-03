@@ -112,6 +112,10 @@ def _install_skill(destination: Path, *, install_dependencies: bool = True) -> N
     if destination.exists() and not destination.is_dir():
         raise RuntimeError(f"Installation target is not a directory: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
+    # Keep the lock outside the replaced directory and ready for read-only CLI calls.
+    # Never truncate or replace it: running commands may already hold this inode.
+    with (destination.parent / ".asx-runtime.lock").open("ab"):
+        pass
     shutil.copytree(
         SKILL_SOURCE,
         destination,

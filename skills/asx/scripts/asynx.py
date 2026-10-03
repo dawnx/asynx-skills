@@ -7,7 +7,7 @@ import sys
 from contextlib import nullcontext
 from pathlib import Path
 
-from asx_runtime import file_lock, runtime_lock_path
+from asx_runtime import LockBusyError, file_lock, runtime_lock_path
 
 _VENDOR = Path(__file__).resolve().parent / "vendor"
 if _VENDOR.is_dir():
@@ -31,14 +31,18 @@ if __name__ == "__main__":
     )
     try:
         guard.__enter__()
-    except OSError:
+    except OSError as exc:
+        busy = isinstance(exc, LockBusyError)
         print(
             json.dumps(
                 {
                     "ok": False,
                     "error": {
-                        "code": "update_busy",
-                        "message": "Skill 正在使用或更新中，请稍后重试",
+                        "code": "update_busy" if busy else "runtime_lock_error",
+                        "message": "Skill 正在使用或更新中，请稍后重试"
+                        if busy
+                        else f"无法访问 Skill 运行锁，请检查目录权限或重新运行安装器：{exc}",
+                        "details": {"path": str(runtime_lock_path(root)), "errno": exc.errno},
                     },
                 },
                 ensure_ascii=False,

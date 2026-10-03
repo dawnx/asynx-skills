@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import json
@@ -706,6 +707,97 @@ class UpdateTestCase(unittest.TestCase):
                 timeout=10,
             )
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+
+    def sandboxed_entrypoint(
+        self, *arguments: str, readable: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        """Deny installation writes even on hosts where chmod is ineffective."""
+        return subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                """
+import errno, pathlib, runpy, sys
+from unittest.mock import patch
+lock = pathlib.Path(sys.argv[1])
+readable = sys.argv[2] == "read"
+script = pathlib.Path(sys.argv[3])
+arguments = sys.argv[4:]
+original_open, original_mkdir = pathlib.Path.open, pathlib.Path.mkdir
+def guarded_open(path, mode="r", *args, **kwargs):
+    if path == lock and (not readable or mode not in {"r", "rb"}):
+        raise PermissionError(errno.EPERM, "Operation not permitted", str(path))
+    return original_open(path, mode, *args, **kwargs)
+def guarded_mkdir(path, *args, **kwargs):
+    if path == lock.parent:
+        raise PermissionError(errno.EPERM, "Operation not permitted", str(path))
+    return original_mkdir(path, *args, **kwargs)
+sys.path.insert(0, str(script.parent))
+sys.argv = [str(script), *arguments]
+with patch.object(pathlib.Path, "open", guarded_open), patch.object(pathlib.Path, "mkdir", guarded_mkdir):
+    runpy.run_path(str(script), run_name="__main__")
+""",
+                str(runtime_lock_path(self.codex)),
+                "read" if readable else "deny",
+                str(self.codex / "scripts" / "asynx.py"),
+                *arguments,
+            ],
+            env=self.env,
+            capture_output=True,
+            encoding="utf-8",
+            check=False,
+            timeout=10,
+        )
+
+    def test_installer_prepares_lock_without_replacing_an_existing_inode(self) -> None:
+        installer._install_skill(self.codex, install_dependencies=False)
+        lock = runtime_lock_path(self.codex)
+        self.assertTrue(lock.is_file())
+        lock.write_bytes(b"preserve existing lock")
+        inode = lock.stat().st_ino
+        installer._install_skill(self.codex, install_dependencies=False)
+        self.assertEqual(lock.stat().st_ino, inode)
+        self.assertEqual(lock.read_bytes(), b"preserve existing lock")
+
+    def test_installed_commands_work_without_installation_write_access(self) -> None:
+        installer._install_skill(self.codex, install_dependencies=False)
+        for arguments in (("--version",), ("config", "status")):
+            with self.subTest(arguments=arguments):
+                proc = self.sandboxed_entrypoint(*arguments)
+                self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+                if arguments == ("--version",):
+                    self.assertEqual(proc.stdout.strip(), read_version(SOURCE))
+                else:
+                    self.assertTrue(json.loads(proc.stdout)["ok"])
+
+    def test_unreadable_runtime_lock_is_not_reported_as_busy(self) -> None:
+        installer._install_skill(self.codex, install_dependencies=False)
+        proc = self.sandboxed_entrypoint("--version", readable=False)
+        self.assertEqual(proc.returncode, 2, proc.stderr + proc.stdout)
+        error = json.loads(proc.stdout)["error"]
+        self.assertEqual(error["code"], "runtime_lock_error")
+        self.assertEqual(error["details"]["errno"], errno.EPERM)
+        self.assertEqual(error["details"]["path"], str(runtime_lock_path(self.codex)))
+
+    def test_sandboxed_command_still_respects_an_active_update(self) -> None:
+        installer._install_skill(self.codex, install_dependencies=False)
+        with file_lock(runtime_lock_path(self.codex)):
+            proc = self.sandboxed_entrypoint("--version")
+        self.assertEqual(proc.returncode, 2, proc.stderr + proc.stdout)
+        self.assertEqual(json.loads(proc.stdout)["error"]["code"], "update_busy")
+
+    def test_update_write_permission_failure_is_not_reported_as_busy(self) -> None:
+        self.install(self.codex)
+        error = PermissionError(errno.EPERM, "Operation not permitted")
+        with (
+            patch("asx_runtime.file_lock", side_effect=error),
+            patch.object(updates, "_fetch", side_effect=AssertionError("network forbidden")),
+            self.assertRaises(AsxError) as caught,
+        ):
+            updates.update_apply()
+        self.assertEqual(caught.exception.code, "update_failed")
+        self.assertEqual(read_version(self.codex), "0.4.0")
 
     def test_entrypoint_returns_utf8_even_with_ascii_stdio_environment(self) -> None:
         self.install(self.codex)
