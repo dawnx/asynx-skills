@@ -1,5 +1,5 @@
 ---
-name: asx
+name: asynx-image
 description: 通过已配置的 Asynx API 生成、编辑和批量处理图片。用于生图、参考图、图片编辑、批量任务、进度查询和中断恢复；用户明确要求时，也可接入自定义工作台或业务工作流。不要用于视频或非图片任务。
 ---
 
@@ -85,7 +85,7 @@ python3 "<skill-dir>/scripts/asynx.py" configure
 公共 Asynx 服务；只有用户明确说明是自托管部署时，才使用 `configure --base-url URL`。
 
 配置保存在当前 OS 用户的固定位置：macOS/Linux 为 `~/.config/asynx/config.json`，Windows 为
-`%APPDATA%\Asynx\config.json`；同一用户的 Codex、Claude Code 和多份 `asx` 默认共用它。`ASYNX_API_KEY` 环境变量优先，
+`%APPDATA%\Asynx\config.json`；同一用户的 Codex、Claude Code 和多份 `asynx-image` 默认共用它。`ASYNX_API_KEY` 环境变量优先，
 但普通 shell `export` 重启后通常失效。遇到缺少 Key 或重启后失效时，先执行以下安全诊断，不要读取或输出完整 Key：
 
 ```bash
@@ -173,6 +173,17 @@ python3 "<skill-dir>/scripts/asynx.py" batch cancel "<batch-id>"
 Codex 桌面端使用绝对路径展示图片。`timings` 仅用于性能诊断，除非用户询问耗时，否则无需逐项解释。
 
 ## 版本更新
+
+命令 JSON 中包含 `legacy_installation_notice` 时，先交付本次任务结果，再简短告知旧入口冲突。脚本只在输出结果前检查三个固定旧路径，不联网、不扫描其他目录；不要在调用前自行增加检查。没有此字段时无需提及旧版清理。
+
+旧版名称为 `asx`。用户要求安装或升级且发现旧入口时，Agent 应完成旧入口清理后继续安装，不必将文件操作交给用户：
+
+- 只检查本次安装目标对应的旧路径：Codex 的 `~/.agents/skills/asx`、`~/.codex/skills/asx`，Claude Code 的 `~/.claude/skills/asx`；Windows 使用当前用户主目录下的对应路径。不要在普通生图前扫描这些目录。
+- 检查旧路径中的 `SKILL.md` 与 `scripts/asynx.py`，确认属于 Asynx；无法确认归属时先说明情况，不按目录名直接删除。
+- 等待正在运行的旧版 CLI 命令退出，将旧入口移到所有 Agent 的 `skills` 扫描目录之外备份，再重跑新版仓库安装器。保留本地改动；符号链接只移动链接本身，不移动其目标。不要只把旧目录重命名为 `asynx-image`，也不要在 `skills` 内留下备份。
+- 保留 API Key 配置、任务数据库、缓存及生成图片。完成后报告新入口与备份位置，提示刷新 Skill 列表；安装失败时保留备份并说明恢复方式。
+
+旧版 `asx` 的 `update apply` 不能完成更名，需运行新版仓库安装器。没有安装或升级指令时，只提醒旧入口冲突，不移动文件。
 
 图片任务结果包含 `update_notice` 时，先交付图片，再简短告知可升级的版本。此提示可以在后续任务中重复出现；脚本最多每 6 小时联网检查一次，其余使用缓存。不要在生图前额外检查版本。
 

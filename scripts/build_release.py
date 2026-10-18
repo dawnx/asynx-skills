@@ -10,7 +10,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "asx"
+SKILL = ROOT / "skills" / "asynx-image"
 sys.path.insert(0, str(SKILL / "scripts"))
 
 from asxlib.update_files import MAX_PACKAGE_BYTES, read_version, version_tuple
@@ -22,8 +22,8 @@ def build_release(source: Path, destination: Path) -> tuple[Path, Path]:
         raise ValueError("Missing skill version")
     version_tuple(version)
     destination.mkdir(parents=True, exist_ok=True)
-    archive = destination / f"asx-{version}.zip"
-    manifest = destination / f"asx-{version}.json"
+    archive = destination / f"asynx-image-{version}.zip"
+    manifest = destination / f"asynx-image-{version}.json"
     files = [source / "SKILL.md"]
     # Only distributable code and instructions; never vendor, data, config or test artifacts.
     extensions = {
@@ -43,14 +43,14 @@ def build_release(source: Path, destination: Path) -> tuple[Path, Path]:
         for path in sorted(files):
             if path.is_symlink():
                 raise ValueError(f"Refusing symlink in release: {path}")
-            name = "asx/" + path.relative_to(source).as_posix()
+            name = "asynx-image/" + path.relative_to(source).as_posix()
             info = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o100644 << 16
             package.writestr(info, path.read_bytes())
         license_file = ROOT / "LICENSE"
         if license_file.is_file():
-            info = zipfile.ZipInfo("asx/LICENSE", date_time=(2020, 1, 1, 0, 0, 0))
+            info = zipfile.ZipInfo("asynx-image/LICENSE", date_time=(2020, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o100644 << 16
             package.writestr(info, license_file.read_bytes())

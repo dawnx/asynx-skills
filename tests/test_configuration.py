@@ -13,7 +13,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 ROOT = Path(__file__).parents[1]
-SCRIPTS = ROOT / "skills" / "asx" / "scripts"
+SCRIPTS = ROOT / "skills" / "asynx-image" / "scripts"
 CLI = SCRIPTS / "asynx.py"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SCRIPTS))

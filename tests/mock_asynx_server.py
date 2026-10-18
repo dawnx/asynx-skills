@@ -1,4 +1,4 @@
-"""用于 asx skill 端到端测试的本地 Mock Asynx 服务。"""
+"""用于 asynx-image skill 端到端测试的本地 Mock Asynx 服务。"""
 
 from __future__ import annotations
 

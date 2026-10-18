@@ -52,19 +52,19 @@ def skill_root() -> Path:
 
 
 def update_cache_path() -> Path:
-    return cache_path().with_name("updates.json")
+    return cache_path().with_name("asynx-image-updates.json")
 
 
 def journal_path() -> Path:
-    return update_cache_path().with_name("update-transaction.json")
+    return update_cache_path().with_name("asynx-image-update-transaction.json")
 
 
 def known_installations() -> dict[str, Path]:
     user_home = Path.home().resolve()
     return {
-        "codex": user_home / ".agents" / "skills" / "asx",
-        "claude": user_home / ".claude" / "skills" / "asx",
-        "codex-legacy": user_home / ".codex" / "skills" / "asx",
+        "codex": user_home / ".agents" / "skills" / "asynx-image",
+        "claude": user_home / ".claude" / "skills" / "asynx-image",
+        "codex-legacy": user_home / ".codex" / "skills" / "asynx-image",
     }
 
 
@@ -230,8 +230,8 @@ def _release_descriptor(version: str) -> dict[str, str]:
     return {
         "version": version,
         "release_url": f"{RELEASE_BASE_URL}/tag/v{version}",
-        "manifest_url": f"{base}/asx-{version}.json",
-        "archive_url": f"{base}/asx-{version}.zip",
+        "manifest_url": f"{base}/asynx-image-{version}.json",
+        "archive_url": f"{base}/asynx-image-{version}.zip",
     }
 
 
@@ -251,7 +251,7 @@ def _latest_release(*, timeout: float) -> dict[str, str]:
         for a in assets
         if isinstance(a, dict) and isinstance(a.get("name"), str)
     }
-    if not {f"asx-{tag[1:]}.zip", f"asx-{tag[1:]}.json"} <= names:
+    if not {f"asynx-image-{tag[1:]}.zip", f"asynx-image-{tag[1:]}.json"} <= names:
         raise AsxError("发布文件不完整", code="invalid_update_manifest")
     return descriptor
 
@@ -312,7 +312,7 @@ def automatic_update_notice() -> dict[str, Any] | None:
             return {
                 "current_version": VERSION,
                 "latest_version": result["latest_version"],
-                "message": f"asx {result['latest_version']} 已发布，可运行 update apply 升级。",
+                "message": f"Asynx 图片 {result['latest_version']} 已发布，可运行 update apply 升级。",
                 "update_command": result["update_command"],
                 "release_url": result["release_url"],
                 "outdated_copies": [

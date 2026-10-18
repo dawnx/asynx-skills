@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 ROOT = Path(__file__).parents[1]
-sys.path.insert(0, str(ROOT / "skills" / "asx" / "scripts"))
+sys.path.insert(0, str(ROOT / "skills" / "asynx-image" / "scripts"))
 
 from asxlib import AsxError, AsynxClient
 

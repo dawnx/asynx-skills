@@ -15,7 +15,7 @@ from urllib.request import urlopen
 from PIL import Image  # type: ignore[import-not-found]
 
 ROOT = Path(__file__).parents[1]
-CLI = ROOT / "skills" / "asx" / "scripts" / "asynx.py"
+CLI = ROOT / "skills" / "asynx-image" / "scripts" / "asynx.py"
 SERVER = ROOT / "tests" / "mock_asynx_server.py"
 sys.path.insert(0, str(ROOT))
 
@@ -124,7 +124,7 @@ class CLIE2ETestCase(unittest.TestCase):
         self.assertEqual(base64.b64decode(reference.split(",", 1)[1]), VALID_PNG)
 
     def test_installed_generation_with_read_only_runtime_lock(self) -> None:
-        installed = self.temp_path / ".agents" / "skills" / "asx"
+        installed = self.temp_path / ".agents" / "skills" / "asynx-image"
         installer._install_skill(installed, install_dependencies=False)
         lock = installed.parent / ".asx-runtime.lock"
         original_mode = lock.stat().st_mode

@@ -19,7 +19,7 @@ if __name__ == "__main__":
             stream.reconfigure(encoding="utf-8")
     root = Path(__file__).resolve().parents[1]
     managed = (root / ".asx-install.json").is_file() or (
-        root.name == "asx"
+        root.name == "asynx-image"
         and root.parent.name == "skills"
         and root.parent.parent.name in {".agents", ".claude", ".codex"}
     )

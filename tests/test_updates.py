@@ -21,7 +21,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "skills" / "asx"
+SOURCE = ROOT / "skills" / "asynx-image"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(SOURCE / "scripts"))
@@ -53,16 +53,16 @@ class UpdateTestCase(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
-        self.codex = self.root / "user" / ".agents" / "skills" / "asx"
-        self.claude = self.root / "user" / ".claude" / "skills" / "asx"
+        self.codex = self.root / "user" / ".agents" / "skills" / "asynx-image"
+        self.claude = self.root / "user" / ".claude" / "skills" / "asynx-image"
         self.cache = self.root / "cache" / "updates.json"
         self.journal = self.root / "cache" / "update-transaction.json"
         self.package = self.root / "package"
-        self.copy_skill(self.package, "0.6.0")
+        self.copy_skill(self.package, "0.7.0")
         archive, manifest = build_release(self.package, self.root / "release")
         self.archive = archive.read_bytes()
         self.manifest = json.loads(manifest.read_text())
-        self.release = updates._release_descriptor("0.6.0")
+        self.release = updates._release_descriptor("0.7.0")
         self.env = os.environ.copy()
         for name in tuple(self.env):
             if name.startswith("ASYNX_"):
@@ -113,10 +113,10 @@ class UpdateTestCase(unittest.TestCase):
         if url == updates.LATEST_RELEASE_URL:
             return json.dumps(
                 {
-                    "tag_name": "v0.6.0",
+                    "tag_name": "v0.7.0",
                     "draft": False,
                     "prerelease": False,
-                    "assets": [{"name": "asx-0.6.0.json"}, {"name": "asx-0.6.0.zip"}],
+                    "assets": [{"name": "asynx-image-0.7.0.json"}, {"name": "asynx-image-0.7.0.zip"}],
                 }
             ).encode()
         if url == self.release["manifest_url"]:
@@ -193,8 +193,8 @@ class UpdateTestCase(unittest.TestCase):
             first = updates.automatic_update_notice()
             second = updates.automatic_update_notice()
             assert first is not None and second is not None
-            self.assertEqual(first["latest_version"], "0.6.0")
-            self.assertEqual(second["latest_version"], "0.6.0")
+            self.assertEqual(first["latest_version"], "0.7.0")
+            self.assertEqual(second["latest_version"], "0.7.0")
             fetch.assert_called_once()
 
     def test_automatic_check_skips_source_copies_and_can_be_disabled(self) -> None:
@@ -224,10 +224,10 @@ class UpdateTestCase(unittest.TestCase):
 
     def test_prerelease_incomplete_release_and_bad_tag_are_rejected(self) -> None:
         cases: list[Any] = [
-            {"tag_name": "v0.6.0-rc1"},
-            {"tag_name": "v0.6.0", "prerelease": True},
-            {"tag_name": "v0.6.0", "draft": True},
-            {"tag_name": "v0.6.0", "assets": []},
+            {"tag_name": "v0.7.0-rc1"},
+            {"tag_name": "v0.7.0", "prerelease": True},
+            {"tag_name": "v0.7.0", "draft": True},
+            {"tag_name": "v0.7.0", "assets": []},
             [],
         ]
         for data in cases:
@@ -251,7 +251,7 @@ class UpdateTestCase(unittest.TestCase):
         self.assertTrue(result["updated"])
         self.assertEqual(len(result["installations"]), 2)
         for root in (self.codex, self.claude):
-            self.assertEqual(read_version(root), "0.6.0")
+            self.assertEqual(read_version(root), "0.7.0")
             self.assertIsNone(installation_problem(root))
             self.assertFalse((root / "scripts" / "obsolete.py").exists())
             proc = subprocess.run(
@@ -260,7 +260,7 @@ class UpdateTestCase(unittest.TestCase):
                 encoding="utf-8",
                 check=False,
             )
-            self.assertEqual(proc.stdout.strip(), "0.6.0", proc.stderr)
+            self.assertEqual(proc.stdout.strip(), "0.7.0", proc.stderr)
         for path in private.iterdir():
             self.assertEqual(path.read_bytes(), b"private-user-data")
         self.assertTrue(updates.update_status()["rollback_available"])
@@ -274,7 +274,7 @@ class UpdateTestCase(unittest.TestCase):
         with patch.object(updates, "_fetch", side_effect=self.fetch):
             updates.update_apply(target="codex")
         self.assertFalse(self.claude.exists())
-        self.assertEqual(read_version(self.codex), "0.6.0")
+        self.assertEqual(read_version(self.codex), "0.7.0")
 
     def test_only_selected_agent_is_updated(self) -> None:
         self.install(self.codex)
@@ -282,7 +282,7 @@ class UpdateTestCase(unittest.TestCase):
         with patch.object(updates, "_fetch", side_effect=self.fetch):
             updates.update_apply(target="claude")
         self.assertEqual(read_version(self.codex), "0.4.0")
-        self.assertEqual(read_version(self.claude), "0.6.0")
+        self.assertEqual(read_version(self.claude), "0.7.0")
 
     def test_private_data_inside_installation_blocks_even_forced_update(self) -> None:
         self.install(self.codex)
@@ -311,7 +311,7 @@ class UpdateTestCase(unittest.TestCase):
             "updates.known_installations=lambda:{'codex':root}; "
             "updates.update_cache_path=lambda:release/'updates.json'; "
             "updates.journal_path=lambda:release/'transaction.json'; "
-            "latest=json.dumps({'tag_name':'v0.6.0','assets':[{'name':'asx-0.6.0.zip'},{'name':'asx-0.6.0.json'}]}).encode(); "
+            "latest=json.dumps({'tag_name':'v0.7.0','assets':[{'name':'asynx-image-0.7.0.zip'},{'name':'asynx-image-0.7.0.json'}]}).encode(); "
             "updates._fetch=lambda url,**kw:latest if url==updates.LATEST_RELEASE_URL else (release/url.rsplit('/',1)[-1]).read_bytes(); "
             "update_files.prepare_dependencies=lambda *args:None; "
             "sys.argv=[str(root/'scripts'/'asynx.py'),'update','apply','--target','current']; "
@@ -327,7 +327,7 @@ class UpdateTestCase(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertTrue(json.loads(result.stdout)["updated"])
-        self.assertEqual(read_version(self.codex), "0.6.0")
+        self.assertEqual(read_version(self.codex), "0.7.0")
         self.assertTrue(script.is_file())
 
     def test_bad_notice_metadata_does_not_lose_the_completed_result(self) -> None:
@@ -345,7 +345,7 @@ class UpdateTestCase(unittest.TestCase):
         with self.assertRaises(AsxError) as error:
             updates.update_rollback()
         self.assertEqual(error.exception.code, "update_backup_changed")
-        self.assertEqual(read_version(self.codex), "0.6.0")
+        self.assertEqual(read_version(self.codex), "0.7.0")
 
     def test_interrupted_explicit_rollback_can_finish_on_next_command(self) -> None:
         self.install(self.codex)
@@ -378,7 +378,7 @@ class UpdateTestCase(unittest.TestCase):
         with self.assertRaises(AsxError) as error:
             updates.update_rollback()
         self.assertEqual(error.exception.code, "update_backup_missing")
-        self.assertEqual(read_version(self.codex), "0.6.0")
+        self.assertEqual(read_version(self.codex), "0.7.0")
 
     def test_user_edit_after_update_is_protected_during_rollback(self) -> None:
         self.install(self.codex)
@@ -435,10 +435,10 @@ class UpdateTestCase(unittest.TestCase):
         )
 
     def test_other_agent_can_still_trigger_notice_when_current_is_latest(self) -> None:
-        self.install(self.codex, "0.6.0")
+        self.install(self.codex, "0.7.0")
         self.install(self.claude)
         with (
-            patch.object(updates, "VERSION", "0.6.0"),
+            patch.object(updates, "VERSION", "0.7.0"),
             patch.object(updates, "_fetch", side_effect=self.fetch),
         ):
             self.assertTrue(updates.update_check()["update_available"])
@@ -485,20 +485,20 @@ class UpdateTestCase(unittest.TestCase):
                 result = updates.update_apply()
             self.assertTrue(result["updated"])
             self.assertEqual(requests, ["/latest", "/manifest", "/archive"])
-            self.assertEqual(read_version(self.codex), "0.6.0")
-            self.assertEqual(read_version(self.claude), "0.6.0")
+            self.assertEqual(read_version(self.codex), "0.7.0")
+            self.assertEqual(read_version(self.claude), "0.7.0")
         finally:
             server.shutdown()
             server.server_close()
             thread.join()
 
     def test_same_and_older_releases_never_downgrade(self) -> None:
-        self.install(self.codex, "0.7.0")
-        self.install(self.claude, "0.6.0")
+        self.install(self.codex, "0.8.0")
+        self.install(self.claude, "0.7.0")
         with patch.object(updates, "_fetch", side_effect=self.fetch) as fetch:
             self.assertFalse(updates.update_apply()["updated"])
             self.assertEqual(fetch.call_count, 1)
-        self.assertEqual(read_version(self.codex), "0.7.0")
+        self.assertEqual(read_version(self.codex), "0.8.0")
 
     def test_modified_files_require_force_and_are_backed_up(self) -> None:
         self.install(self.codex)
@@ -861,7 +861,7 @@ with patch.object(pathlib.Path, "open", guarded_open), patch.object(pathlib.Path
 
         def notice() -> dict[str, str]:
             events.append("checked")
-            return {"latest_version": "0.6.0"}
+            return {"latest_version": "0.7.0"}
 
         with (
             patch.object(sys, "argv", ["asynx.py", "wait", "task_test"]),
@@ -884,16 +884,17 @@ class PackageTestCase(unittest.TestCase):
 
     def test_archive_rejects_traversal_links_and_collisions(self) -> None:
         for name, mode in (
+            ("asx/SKILL.md", 0o100644),
             ("../escaped", 0o100644),
-            ("/asx/SKILL.md", 0o100644),
-            ("asx/../../escaped", 0o100644),
-            ("asx/scripts/evil", stat.S_IFLNK | 0o777),
-            ("asx/scripts/C:evil", 0o100644),
-            ("asx/scripts/..\\evil", 0o100644),
-            ("asx/.asx-install.json", 0o100644),
-            ("asx/scripts/vendor/evil.py", 0o100644),
-            ("asx/scripts/CON.py", 0o100644),
-            ("asx/scripts/trailing. ", 0o100644),
+            ("/asynx-image/SKILL.md", 0o100644),
+            ("asynx-image/../../escaped", 0o100644),
+            ("asynx-image/scripts/evil", stat.S_IFLNK | 0o777),
+            ("asynx-image/scripts/C:evil", 0o100644),
+            ("asynx-image/scripts/..\\evil", 0o100644),
+            ("asynx-image/.asx-install.json", 0o100644),
+            ("asynx-image/scripts/vendor/evil.py", 0o100644),
+            ("asynx-image/scripts/CON.py", 0o100644),
+            ("asynx-image/scripts/trailing. ", 0o100644),
         ):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -904,7 +905,7 @@ class PackageTestCase(unittest.TestCase):
                     output.writestr(item, "invalid")
                 manifest = {
                     "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
-                    "version": "0.6.0",
+                    "version": "0.7.0",
                 }
                 with self.assertRaises(AsxError) as error:
                     extract_package(archive, root / "out", manifest)
@@ -915,12 +916,12 @@ class PackageTestCase(unittest.TestCase):
         good = {
             "schema": 1,
             "version": "0.5.0",
-            "archive": "asx-0.5.0.zip",
+            "archive": "asynx-image-0.5.0.zip",
             "python_min": "3.10",
             "sha256": "a" * 64,
         }
         for field, value in (
-            ("version", "0.6.0"),
+            ("version", "0.7.0"),
             ("archive", "../../evil.zip"),
             ("sha256", "bad"),
             ("python_min", "x"),
@@ -932,12 +933,12 @@ class PackageTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source"
-            UpdateTestCase.copy_skill(source, "0.6.0")
+            UpdateTestCase.copy_skill(source, "0.7.0")
             archive, manifest_file = build_release(source, root / "build")
             manifest = json.loads(manifest_file.read_text())
             with self.assertRaises(AsxError):
                 extract_package(
-                    archive, root / "wrong-version", {**manifest, "version": "0.7.0"}
+                    archive, root / "wrong-version", {**manifest, "version": "0.8.0"}
                 )
             with (
                 patch("asxlib.update_files.MAX_UNPACKED_BYTES", 1),
@@ -950,15 +951,15 @@ class PackageTestCase(unittest.TestCase):
             root = Path(directory)
             archive = root / "duplicate.zip"
             with zipfile.ZipFile(archive, "w") as package:
-                package.writestr("asx/SKILL.md", "one")
-                package.writestr("asx/skill.md", "two")
+                package.writestr("asynx-image/SKILL.md", "one")
+                package.writestr("asynx-image/skill.md", "two")
             with self.assertRaises(AsxError):
                 extract_package(
                     archive,
                     root / "out",
                     {
                         "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
-                        "version": "0.6.0",
+                        "version": "0.7.0",
                     },
                 )
 

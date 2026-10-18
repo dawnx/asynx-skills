@@ -21,3 +21,4 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -s tests -p test_updates.py -v
+      - run: python -m unittest discover -s tests -p test_skill_rename.py -v

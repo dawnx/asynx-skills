@@ -13,7 +13,7 @@ from pathlib import Path
 from types import ModuleType
 
 ROOT = Path(__file__).resolve().parent
-SKILL_SOURCE = ROOT / "skills" / "asx"
+SKILL_SOURCE = ROOT / "skills" / "asynx-image"
 PILLOW_REQUIREMENT = "Pillow>=10.2,<13"
 
 
@@ -81,9 +81,9 @@ def _resolve_targets(selection: str, home: Path) -> list[str]:
 
 def _target_path(target: str, home: Path) -> Path:
     if target == "codex":
-        return home / ".agents" / "skills" / "asx"
+        return home / ".agents" / "skills" / "asynx-image"
     if target == "claude":
-        return home / ".claude" / "skills" / "asx"
+        return home / ".claude" / "skills" / "asynx-image"
     raise ValueError(f"Unknown target: {target}")
 
 
@@ -106,6 +106,24 @@ def _install_dependencies(destination: Path) -> None:
     )
     if result.returncode:
         raise RuntimeError(f"无法将 Pillow 安装到 skill 的隔离依赖目录：{vendor}")
+
+
+def _check_legacy_installations(home: Path, targets: list[str]) -> None:
+    candidates = [_target_path(target, home).with_name("asx") for target in targets]
+    if "codex" in targets:
+        candidates.append(home / ".codex" / "skills" / "asx")
+    existing = [path for path in candidates if path.exists() or path.is_symlink()]
+    if existing:
+        paths = "\n".join(str(path) for path in existing)
+        raise RuntimeError(
+            "检测到旧版 asx，需移除旧入口后继续安装 asynx-image：\n"
+            f"{paths}\n"
+            "Agent 操作提示：用户已要求安装或升级时，请检查上述路径的 SKILL.md 和 scripts/asynx.py，"
+            "确认属于 Asynx 后，等待旧版命令退出，将旧入口移到所有 Agent 的 skills 扫描目录之外备份，"
+            "然后重跑本次安装命令。符号链接只移动链接本身，不移动其目标；无法确认归属时先说明情况。\n"
+            "不要只将旧目录改名为 asynx-image。保留用户配置、任务数据和生成图片，无需重新配置 API Key。"
+            "未收到安装或升级指令时只提醒，不移动文件。"
+        )
 
 
 def _install_skill(destination: Path, *, install_dependencies: bool = True) -> None:
@@ -137,7 +155,7 @@ def _uninstall_skill(destination: Path) -> bool:
         return True
     if not destination.exists():
         return False
-    if not destination.is_dir() or destination.name != "asx" or destination.parent.name != "skills":
+    if not destination.is_dir() or destination.name != "asynx-image" or destination.parent.name != "skills":
         raise RuntimeError(f"Refusing to remove an unexpected path: {destination}")
     shutil.rmtree(destination)
     return True
@@ -224,7 +242,7 @@ def run(
     if args.uninstall:
         targets = _installed_targets(user_home) if args.target == "auto" else _resolve_targets(args.target, user_home)
         if not targets:
-            print("没有找到已安装的 asx skill。")
+            print("没有找到已安装的 asynx-image skill。")
             return 0
         if not args.yes:
             if not sys.stdin.isatty():
@@ -241,6 +259,7 @@ def run(
                 print(f"已从 {label} 卸载：{destination}")
         return 0
     targets = _resolve_targets(args.target, user_home)
+    _check_legacy_installations(user_home, targets)
     for target in targets:
         destination = _target_path(target, user_home)
         _install_skill(destination, install_dependencies=install_dependencies)
@@ -266,9 +285,9 @@ def run(
                 return verification
 
     if "codex" in targets:
-        print("Try in Codex: $asx generate an image of a red chair")
+        print("Try in Codex: $asynx-image generate an image of a red chair")
     if "claude" in targets:
-        print("Try in Claude Code: /asx generate an image of a red chair")
+        print("Try in Claude Code: /asynx-image generate an image of a red chair")
     return 0
 
 

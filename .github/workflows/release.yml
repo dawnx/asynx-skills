@@ -19,7 +19,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          python -c 'import os, subprocess; v = subprocess.check_output(["python", "skills/asx/scripts/asynx.py", "--version"], text=True).strip(); assert os.environ["RELEASE_TAG"] == "v" + v'
+          python -c 'import os, subprocess; v = subprocess.check_output(["python", "skills/asynx-image/scripts/asynx.py", "--version"], text=True).strip(); assert os.environ["RELEASE_TAG"] == "v" + v'
       - name: Test
         env:
           ASYNX_UPDATE_CHECK: 'off'
@@ -32,4 +32,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" dist/asx-*.zip dist/asx-*.json --verify-tag --generate-notes
+        run: gh release create "$RELEASE_TAG" dist/asynx-image-*.zip dist/asynx-image-*.json --verify-tag --generate-notes

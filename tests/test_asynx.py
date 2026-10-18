@@ -14,7 +14,7 @@ from typing import Any, ClassVar
 from unittest.mock import patch
 
 ROOT = Path(__file__).parents[1]
-SCRIPTS = ROOT / "skills" / "asx" / "scripts"
+SCRIPTS = ROOT / "skills" / "asynx-image" / "scripts"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SCRIPTS))
 
@@ -304,7 +304,7 @@ class UnitTestCase(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(installed.returncode, 0, installed.stderr)
-            self.assertEqual(installed.stdout.strip(), "0.5.2")
+            self.assertEqual(installed.stdout.strip(), "0.6.1")
 
     def test_installer_can_install_both_agents_noninteractively(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -322,8 +322,8 @@ class UnitTestCase(unittest.TestCase):
                     install_dependencies=False,
                 )
             self.assertEqual(result, 0)
-            self.assertTrue((home / ".agents" / "skills" / "asx" / "SKILL.md").is_file())
-            self.assertTrue((home / ".claude" / "skills" / "asx" / "SKILL.md").is_file())
+            self.assertTrue((home / ".agents" / "skills" / "asynx-image" / "SKILL.md").is_file())
+            self.assertTrue((home / ".claude" / "skills" / "asynx-image" / "SKILL.md").is_file())
 
     def test_installer_uninstall_only_removes_installed_skill(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -336,7 +336,7 @@ class UnitTestCase(unittest.TestCase):
 
     def test_installer_places_pillow_in_private_vendor_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            destination = Path(directory) / ".agents" / "skills" / "asx"
+            destination = Path(directory) / ".agents" / "skills" / "asynx-image"
             with patch("install.subprocess.run") as pip:
                 pip.return_value.returncode = 0
                 installer._install_skill(destination)

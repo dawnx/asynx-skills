@@ -8,7 +8,13 @@ from typing import Any, NoReturn
 from .artifacts import recent_payload
 from .batches import execute_batch
 from .client import AsynxClient
-from .config import config_status, configure, doctor, load_credentials
+from .config import (
+    config_status,
+    configure,
+    doctor,
+    legacy_installation_notice,
+    load_credentials,
+)
 from .constants import (
     DEFAULT_BATCH_SUBMISSIONS_PER_POLL,
     DEFAULT_OUTPUT_DIR,
@@ -388,5 +394,8 @@ def main(*, locked_root: Path | None = None) -> NoReturn:
         payload, exit_code = AsxError(
             f"操作失败：{exc}", code="unexpected_error", exit_code=2
         ).payload(), 2
+    legacy_notice = legacy_installation_notice()
+    if legacy_notice:
+        payload["legacy_installation_notice"] = legacy_notice
     emit(payload)
     raise SystemExit(exit_code)

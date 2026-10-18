@@ -28,7 +28,7 @@ cd asynx-skills
 py install.py
 ```
 
-安装器会自动检测 Codex 和 Claude Code，把同一个 `asx` skill 安装到对应目录，不会修改用户的全局 Python 环境。首次安装时只隐藏询问一次 API Key，并检查配置是否可用。
+安装器会自动检测 Codex 和 Claude Code，把同一个 `asynx-image` skill 安装到对应目录，不会修改用户的全局 Python 环境。首次安装时只隐藏询问一次 API Key，并检查配置是否可用。
 重复运行安装器会复用已有 Key。
 
 也可以显式指定目标：
@@ -39,7 +39,7 @@ python3 install.py --target claude
 python3 install.py --target both
 ```
 
-Codex 可以对普通图片请求自动调用 skill，也可以显式使用 `$asx`。Claude Code 可以隐式调用，也可以使用 `/asx`。
+Codex 可以对普通图片请求自动调用 skill，也可以显式使用 `$asynx-image`。Claude Code 可以隐式调用，也可以使用 `/asynx-image`。
 
 在 Codex 中不需要输入命令。直接说“生成一张机械键盘”“把刚才那张换成蓝色”“再来 5 张”即可；Agent 会自动选择生成、编辑、最近结果或批次操作，默认等待完成并展示最终图片。只有结果存在多个合理候选时才会询问你选择哪一张。
 
@@ -48,8 +48,8 @@ Codex 可以对普通图片请求自动调用 skill，也可以显式使用 `$as
 查看本机版本和安装位置，或检查是否有新版本：
 
 ```bash
-python3 ~/.agents/skills/asx/scripts/asynx.py update status
-python3 ~/.agents/skills/asx/scripts/asynx.py update check
+python3 ~/.agents/skills/asynx-image/scripts/asynx.py update status
+python3 ~/.agents/skills/asynx-image/scripts/asynx.py update check
 ```
 
 图片任务完成后，Skill 最多每 6 小时联网检查一次稳定版更新。发现新版后会继续提醒，直到升级；期间使用缓存，不会每次请求网络。
@@ -58,22 +58,48 @@ python3 ~/.agents/skills/asx/scripts/asynx.py update check
 确认升级时运行：
 
 ```bash
-python3 ~/.agents/skills/asx/scripts/asynx.py update apply
+python3 ~/.agents/skills/asynx-image/scripts/asynx.py update apply
 ```
 
 默认升级已安装的 Codex 和 Claude Code 副本；`--target current` 只升级当前副本，也可指定 `--target codex` 或 `--target claude`。
 升级保留 API Key、任务记录和生成图片。存在本地修改时会停止，可用 `--force` 备份后覆盖。使用其他安装工具管理的副本，请通过原工具更新。
 升级失败会尝试恢复原版本；需要回到上一个版本或恢复中断的更新时，运行 `update rollback`。若 Agent 仍显示旧说明，请重新打开会话。
 
-Claude Code 用户将上述路径替换为 `~/.claude/skills/asx/scripts/asynx.py`；Windows 使用 `py` 和对应的用户安装路径。
-`0.5.0` 之前的版本没有更新命令，请先在仓库目录重新运行安装器一次：
+Claude Code 用户将上述路径替换为 `~/.claude/skills/asynx-image/scripts/asynx.py`；Windows 使用 `py` 和对应的用户安装路径。
+
+### 从旧版 asx 更换到 asynx-image
+
+从 `0.6.1` 开始，Skill 名称与安装目录改为 `asynx-image`。旧版 `asx` 的 `update apply` 不能完成这次更名，请重新安装一次：
+
+可以让 Agent 帮你完成：“请安装最新版 asynx-image，并把旧版 asx 入口移到 skills 目录之外备份，保留密钥和任务记录。”
+新版安装器会给 Agent 列出冲突路径和处理步骤，清理后继续安装。自行操作时按以下步骤进行：
+
+1. 等待当前 Skill 命令退出，将旧安装目录移出所有 Agent 的 `skills` 目录，或删除旧安装目录：
+   - Codex：`~/.agents/skills/asx`；早期安装还可能位于 `~/.codex/skills/asx`。
+   - Claude Code：`~/.claude/skills/asx`。
+   - Windows 对应 `%USERPROFILE%\.agents\skills\asx`、`%USERPROFILE%\.codex\skills\asx` 和 `%USERPROFILE%\.claude\skills\asx`。
+2. 在仓库目录更新代码并重新安装：
 
 ```bash
 git pull
 python3 install.py
 ```
 
+Windows 使用 `py install.py`。没有仓库副本时，按上面的首次安装步骤克隆仓库即可。
+
+3. 重新打开 Agent 或刷新 Skill 列表。Codex 使用 `$asynx-image`，Claude Code 使用 `/asynx-image`。
+
+不要仅将旧安装目录改名；目录中的旧程序和更新逻辑也需要替换。安装器发现旧目录时会列出路径并停止，不会自行删除。
+API Key、任务记录和已生成图片仍可继续使用：保留用户配置和数据目录，macOS/Linux 上包括 `~/.config/asynx`、
+`~/.local/state/asx` 和 `~/.cache/asx`；Windows 上包括 `%APPDATA%\Asynx` 和 `%LOCALAPPDATA%\Asynx`。
+旧对话中的安装路径链接不会自动改变，后续请使用新目录。
+
+运行新版命令时，如果旧入口仍然存在，JSON 结果会附带 `legacy_installation_notice`，Agent 会先交付结果再提醒。
+检查仅访问上述三个固定旧路径，不联网、不自动移动文件，也不影响任务是否成功。旧目录移除后不再提示。
+
 自动更新提示和 `update apply` 只使用已发布的稳定 Release。仓库中尚未发布的改动，仍可通过重新运行安装器安装。
+
+### 卸载
 
 卸载 skill：
 
@@ -92,31 +118,31 @@ macOS/Linux：
 
 ```bash
 # Codex
-python3 ~/.agents/skills/asx/scripts/asynx.py configure
+python3 ~/.agents/skills/asynx-image/scripts/asynx.py configure
 
 # Claude Code
-python3 ~/.claude/skills/asx/scripts/asynx.py configure
+python3 ~/.claude/skills/asynx-image/scripts/asynx.py configure
 ```
 
 Windows PowerShell：
 
 ```powershell
 # Codex
-py "$env:USERPROFILE\.agents\skills\asx\scripts\asynx.py" configure
+py "$env:USERPROFILE\.agents\skills\asynx-image\scripts\asynx.py" configure
 
 # Claude Code
-py "$env:USERPROFILE\.claude\skills\asx\scripts\asynx.py" configure
+py "$env:USERPROFILE\.claude\skills\asynx-image\scripts\asynx.py" configure
 ```
 
 配置文件位于 macOS/Linux 的 `~/.config/asynx/config.json`，Windows 位于 `%APPDATA%\Asynx\config.json`，
-并尽量设置为仅当前用户可读写。Codex、Claude Code 和同一用户安装的多份 `asx` 默认共用这个配置；更新或卸载 skill
+并尽量设置为仅当前用户可读写。Codex、Claude Code 和同一用户安装的多份 `asynx-image` 默认共用这个配置；更新或卸载 skill
 不会删除它。只有切换 OS 用户、HOME 或显式设置不同的 `ASYNX_CONFIG_PATH` 时才会使用另一份配置。旧版本曾按
 `XDG_CONFIG_HOME` 保存配置，新版安装器会在能发现旧文件时迁移到上述固定位置，并保留旧文件。
 
 自托管部署可以显式指定 Base URL：
 
 ```bash
-python3 ~/.agents/skills/asx/scripts/asynx.py configure \
+python3 ~/.agents/skills/asynx-image/scripts/asynx.py configure \
   --base-url "https://asynx.example.com/api"
 ```
 
@@ -132,9 +158,9 @@ export ASYNX_BASE_URL="https://asynx.llmapi.site/api"
 Asynx 的只读模型目录：
 
 ```bash
-python3 ~/.agents/skills/asx/scripts/asynx.py config status
-python3 ~/.agents/skills/asx/scripts/asynx.py doctor
-python3 ~/.agents/skills/asx/scripts/asynx.py doctor --verify
+python3 ~/.agents/skills/asynx-image/scripts/asynx.py config status
+python3 ~/.agents/skills/asynx-image/scripts/asynx.py doctor
+python3 ~/.agents/skills/asynx-image/scripts/asynx.py doctor --verify
 ```
 
 Claude Code 或 Windows 用户把命令中的脚本路径替换为上面对应的已安装路径。诊断会报告实际配置文件、凭据来源、环境变量覆盖、
@@ -143,15 +169,15 @@ Claude Code 或 Windows 用户把命令中的脚本路径替换为上面对应�
 ## 生成、编辑与任务管理
 
 ```bash
-python3 skills/asx/scripts/asynx.py models
+python3 skills/asynx-image/scripts/asynx.py models
 
-python3 skills/asx/scripts/asynx.py generate \
+python3 skills/asynx-image/scripts/asynx.py generate \
   --prompt "混凝土展厅中的红色椅子" \
   --model "gpt-image-2.5-sunburst" \
   --image-size 2K \
   --aspect-ratio 16:9
 
-python3 skills/asx/scripts/asynx.py edit \
+python3 skills/asynx-image/scripts/asynx.py edit \
   --prompt "把背景替换成白色摄影棚" \
   --image /absolute/path/source.png
 ```
@@ -165,14 +191,14 @@ python3 skills/asx/scripts/asynx.py edit \
 只处理已有图片时，可以使用不调用 Asynx、也不写入任务记录的确定性工具：
 
 ```bash
-python3 skills/asx/scripts/asynx.py image info input.png
-python3 skills/asx/scripts/asynx.py image convert input.png --output output.webp --format webp
-python3 skills/asx/scripts/asynx.py image resize input.png --output small.png --width 1200
-python3 skills/asx/scripts/asynx.py image crop input.png --output crop.png --box 0,0,800,800
-python3 skills/asx/scripts/asynx.py image slice input.png --output-dir tiles --rows 3 --columns 3
-python3 skills/asx/scripts/asynx.py image contact-sheet images/*.png --output sheet.jpg
-python3 skills/asx/scripts/asynx.py image apply-mask input.png --mask mask.png --output cutout.png
-python3 skills/asx/scripts/asynx.py image batch-convert \
+python3 skills/asynx-image/scripts/asynx.py image info input.png
+python3 skills/asynx-image/scripts/asynx.py image convert input.png --output output.webp --format webp
+python3 skills/asynx-image/scripts/asynx.py image resize input.png --output small.png --width 1200
+python3 skills/asynx-image/scripts/asynx.py image crop input.png --output crop.png --box 0,0,800,800
+python3 skills/asynx-image/scripts/asynx.py image slice input.png --output-dir tiles --rows 3 --columns 3
+python3 skills/asynx-image/scripts/asynx.py image contact-sheet images/*.png --output sheet.jpg
+python3 skills/asynx-image/scripts/asynx.py image apply-mask input.png --mask mask.png --output cutout.png
+python3 skills/asynx-image/scripts/asynx.py image batch-convert \
   --input-dir source --output-dir converted --format webp --recursive
 ```
 
@@ -181,7 +207,7 @@ python3 skills/asx/scripts/asynx.py image batch-convert \
 参考图生成必须把图片与 Prompt 分开传入：
 
 ```powershell
-py skills/asx/scripts/asynx.py generate `
+py skills/asynx-image/scripts/asynx.py generate `
   --prompt "参考该图片的风格和色调，生成一张卡牌立绘" `
   --reference "E:\ARPG\sanguo\heroCard\006linchong.png"
 ```
@@ -206,7 +232,7 @@ Prompt 中不要放图片路径。客户端不会替 Agent 猜测或上传 Promp
 而是保留 URL 交给 Asynx 服务端拉取和校验；图片数量和请求体限制仍然适用。
 
 ```bash
-python3 skills/asx/scripts/asynx.py generate \
+python3 skills/asynx-image/scripts/asynx.py generate \
   --prompt "保留参考图的纹理细节，生成产品海报" \
   --reference /absolute/path/source.png \
   --keep-reference-original
@@ -218,12 +244,12 @@ python3 skills/asx/scripts/asynx.py generate \
 中断、会话切换或需要稍后推进时使用本地任务接口：
 
 ```bash
-python3 skills/asx/scripts/asynx.py task list
-python3 skills/asx/scripts/asynx.py task status TASK_ID
-python3 skills/asx/scripts/asynx.py task poll [TASK_ID]
-python3 skills/asx/scripts/asynx.py task recover
-python3 skills/asx/scripts/asynx.py task cancel TASK_ID
-python3 skills/asx/scripts/asynx.py asset list TASK_ID
+python3 skills/asynx-image/scripts/asynx.py task list
+python3 skills/asynx-image/scripts/asynx.py task status TASK_ID
+python3 skills/asynx-image/scripts/asynx.py task poll [TASK_ID]
+python3 skills/asynx-image/scripts/asynx.py task recover
+python3 skills/asynx-image/scripts/asynx.py task cancel TASK_ID
+python3 skills/asynx-image/scripts/asynx.py asset list TASK_ID
 ```
 
 `task list` 查询本地任务；`task status` 查看本地快照；`task poll` 刷新一个或全部未完成任务并下载已完成 Asset；`task recover`
@@ -234,14 +260,14 @@ python3 skills/asx/scripts/asynx.py asset list TASK_ID
 可以按 Prompt、模型、Task ID 或文件信息查找最近结果：
 
 ```bash
-python3 skills/asx/scripts/asynx.py recent --latest
-python3 skills/asx/scripts/asynx.py recent --query "红色椅子"
+python3 skills/asynx-image/scripts/asynx.py recent --latest
+python3 skills/asynx-image/scripts/asynx.py recent --query "红色椅子"
 ```
 
 编辑已经下载的结果时，无需手动定位文件路径，直接引用原 Task：
 
 ```bash
-python3 skills/asx/scripts/asynx.py edit \
+python3 skills/asynx-image/scripts/asynx.py edit \
   --from-task TASK_ID \
   --prompt "把背景替换成白色摄影棚"
 ```
@@ -264,7 +290,7 @@ Skill 会在本机保存任务和批次状态。Asynx 仍然为每张图片创�
 创建一个 12 项批次：
 
 ```bash
-python3 skills/asx/scripts/asynx.py batch create \
+python3 skills/asynx-image/scripts/asynx.py batch create \
   --prompt "赛博朋克城市夜景" \
   --model "gpt-image-2.5-sunburst" \
   --total 12
@@ -273,7 +299,7 @@ python3 skills/asx/scripts/asynx.py batch create \
 命令会返回批次 ID，并立即提交少量首批 Task。追加 5 项：
 
 ```bash
-python3 skills/asx/scripts/asynx.py batch add BATCH_ID \
+python3 skills/asynx-image/scripts/asynx.py batch add BATCH_ID \
   --total 5 \
   --prompt "赛博朋克城市雨夜"
 ```
@@ -283,16 +309,16 @@ python3 skills/asx/scripts/asynx.py batch add BATCH_ID \
 推进一次状态和下载：
 
 ```bash
-python3 skills/asx/scripts/asynx.py batch poll BATCH_ID
-python3 skills/asx/scripts/asynx.py batch status BATCH_ID --items
+python3 skills/asynx-image/scripts/asynx.py batch poll BATCH_ID
+python3 skills/asynx-image/scripts/asynx.py batch status BATCH_ID --items
 ```
 
 暂停、恢复或取消：
 
 ```bash
-python3 skills/asx/scripts/asynx.py batch pause BATCH_ID
-python3 skills/asx/scripts/asynx.py batch resume BATCH_ID
-python3 skills/asx/scripts/asynx.py batch cancel BATCH_ID
+python3 skills/asynx-image/scripts/asynx.py batch pause BATCH_ID
+python3 skills/asynx-image/scripts/asynx.py batch resume BATCH_ID
+python3 skills/asynx-image/scripts/asynx.py batch cancel BATCH_ID
 ```
 
 取消只向上游发出请求；已经开始的 Task 可能继续运行并计费。若返回 `cancel_requested`，继续用 `batch poll` 观察最终状态。
@@ -302,7 +328,7 @@ python3 skills/asx/scripts/asynx.py batch cancel BATCH_ID
 如果需要前台持续等待，可以使用 `batch wait BATCH_ID`。查看 Asynx 远端历史任务（仅用于显式诊断）：
 
 ```bash
-python3 skills/asx/scripts/asynx.py history --limit 20
+python3 skills/asynx-image/scripts/asynx.py history --limit 20
 ```
 
 批次图片默认保存到 `generated-images/<批次 ID>/`。输出文件、API Key 和本地状态文件都不应提交到 Git。

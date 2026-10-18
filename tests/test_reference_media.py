@@ -12,7 +12,7 @@ from unittest.mock import patch
 from PIL import Image  # type: ignore[import-not-found]
 
 ROOT = Path(__file__).parents[1]
-SCRIPTS = ROOT / "skills" / "asx" / "scripts"
+SCRIPTS = ROOT / "skills" / "asynx-image" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from asxlib import images, reference_media

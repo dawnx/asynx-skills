@@ -162,7 +162,7 @@ def extract_package(archive: Path, destination: Path, manifest: dict[str, Any]) 
                 mode = item.external_attr >> 16
                 if (
                     not parts
-                    or parts[0] != "asx"
+                    or parts[0] != "asynx-image"
                     or len(parts) < 2
                     or any(
                         part in {".", "..", ".git", "vendor", RECEIPT} for part in parts
@@ -202,7 +202,7 @@ def extract_package(archive: Path, destination: Path, manifest: dict[str, Any]) 
         raise AsxError(
             "更新包内容无效，现有安装未修改", code="invalid_update_package"
         ) from exc
-    root = destination / "asx"
+    root = destination / "asynx-image"
     if read_version(root) != manifest["version"]:
         raise AsxError("更新包版本与发布信息不一致", code="invalid_update_package")
     required = (
@@ -221,7 +221,7 @@ def validate_manifest(value: Any, version: str) -> dict[str, Any]:
         not isinstance(value, dict)
         or value.get("schema") != 1
         or value.get("version") != version
-        or value.get("archive") != f"asx-{version}.zip"
+        or value.get("archive") != f"asynx-image-{version}.zip"
         or not isinstance(value.get("sha256"), str)
         or not _HASH.fullmatch(value["sha256"])
         or not isinstance(value.get("python_min"), str)

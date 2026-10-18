@@ -250,13 +250,35 @@ def config_status() -> dict[str, Any]:
     }
 
 
+def legacy_installation_notice() -> dict[str, Any] | None:
+    """Inspect only fixed legacy entry paths; never mutate installations or state."""
+    try:
+        home = Path.home()
+        candidates = [home / agent / "skills" / "asx" for agent in (".agents", ".claude", ".codex")]
+        paths = [str(path) for path in candidates if path.exists() or path.is_symlink()]
+    except (OSError, RuntimeError):
+        # An optional cleanup reminder must not hide the command's actual result.
+        return None
+    if not paths:
+        return None
+    return {
+        "code": "legacy_skill_installation",
+        "paths": paths,
+        "message": (
+            "发现可能残留的旧版 asx 入口。用户要求安装或升级时，先确认这些路径属于 Asynx，"
+            "等待旧版命令退出，将入口移到所有 Agent 的 skills 扫描目录之外备份，再继续安装。"
+            "符号链接只移动链接本身；保留密钥、任务数据和图片。其他情况下仅提醒用户，不移动文件。"
+        ),
+    }
+
+
 def _installation_info() -> list[dict[str, Any]]:
     current = Path(__file__).resolve().parents[2]
     candidates = [
         current,
-        Path.home() / ".agents" / "skills" / "asx",
-        Path.home() / ".claude" / "skills" / "asx",
-        Path.home() / ".codex" / "skills" / "asx",
+        Path.home() / ".agents" / "skills" / "asynx-image",
+        Path.home() / ".claude" / "skills" / "asynx-image",
+        Path.home() / ".codex" / "skills" / "asynx-image",
     ]
     installations: list[dict[str, Any]] = []
     seen: set[Path] = set()

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
-SCRIPTS = ROOT / "skills" / "asx" / "scripts"
+SCRIPTS = ROOT / "skills" / "asynx-image" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from asxlib import artifacts
