@@ -96,7 +96,9 @@ def _ensure_parent(path: Path) -> None:
         raise AsxError(f"无法创建输出目录：{path.parent}", code="output_directory_failed") from exc
 
 
-def _save(image: Any, output: str, output_format: str | None = None) -> dict[str, Any]:
+def _save(
+    image: Any, output: str, output_format: str | None = None, *, exclusive: bool = False
+) -> dict[str, Any]:
     image_module, _chops, _color, _ops, _unidentified = _pillow()
     path = Path(output).expanduser().resolve()
     _ensure_parent(path)
@@ -112,7 +114,11 @@ def _save(image: Any, output: str, output_format: str | None = None) -> dict[str
     elif format_name in {"PNG", "WEBP"} and prepared.mode not in {"RGB", "RGBA", "L", "LA", "P"}:
         prepared = prepared.convert("RGBA" if "A" in prepared.getbands() else "RGB")
     try:
-        prepared.save(path, format=format_name)
+        if exclusive:
+            with path.open("xb") as handle:
+                prepared.save(handle, format=format_name)
+        else:
+            prepared.save(path, format=format_name)
         size = path.stat().st_size
     except OSError as exc:
         raise AsxError(f"无法保存图片：{path}", code="image_write_failed") from exc
@@ -249,16 +255,26 @@ def _batch_convert(input_dir: str, output_dir: str, output_format: str, recursiv
     sources = sorted(path for path in source_dir.glob(pattern) if path.is_file() and path.suffix.casefold() in _INPUT_SUFFIXES)
     if not sources:
         raise AsxError("输入目录中没有 PNG、JPEG 或 WebP 图片", code="no_images_found")
-    _ensure_parent(destination / "placeholder")
     _format_name, suffix = _format(output_format, Path(f"output{_FORMATS[output_format.casefold()][1]}"))
+    plan: list[tuple[Path, Path]] = []
+    targets: set[str] = set()
+    for source in sources:
+        target = destination / source.relative_to(source_dir).with_suffix(suffix)
+        # Conservative case folding also protects case-insensitive filesystems.
+        identity = str(target.resolve()).casefold()
+        if identity in targets or target.exists() or target.is_symlink():
+            raise AsxError(
+                f"输出路径冲突，未转换任何图片：{target}。请更换输出目录或调整同名文件。",
+                code="image_output_conflict",
+            )
+        targets.add(identity)
+        plan.append((source, target))
     files: list[dict[str, Any]] = []
     failed: list[dict[str, str]] = []
-    for source in sources:
-        relative = source.relative_to(source_dir).with_suffix(suffix)
-        target = destination / relative
+    for source, target in plan:
         try:
             image, _path, _source_format, _frames = _open_image(str(source))
-            files.append(_save(image, str(target), output_format))
+            files.append(_save(image, str(target), output_format, exclusive=True))
         except AsxError as exc:
             failed.append({"path": str(source), "code": exc.code, "message": exc.message})
     return {"source_dir": str(source_dir), "output_dir": str(destination), "files": files, "failed": failed, "count": len(files), "failed_count": len(failed)}

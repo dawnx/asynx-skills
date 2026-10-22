@@ -417,6 +417,28 @@ def get_task(
     return _row_dict(row) if row is not None else None
 
 
+def cancel_blocked_batch_intent(connection: sqlite3.Connection, idempotency_key: str) -> bool:
+    """Honor batch cancellation, including ledgers saved by older versions."""
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'batch_items'"
+    ).fetchone() is None:
+        return False
+    blocked = connection.execute(
+        "SELECT 1 FROM batch_items i JOIN batches b ON b.id = i.batch_id "
+        "WHERE i.idempotency_key = ? AND "
+        "(b.cancel_requested = 1 OR b.status = 'canceled' OR i.status = 'canceled')",
+        (idempotency_key,),
+    ).fetchone()
+    if blocked is None:
+        return False
+    connection.execute(
+        "UPDATE tasks SET status = 'canceled', updated_at = ? "
+        "WHERE idempotency_key = ? AND remote_task_id IS NULL",
+        (utc_now(), idempotency_key),
+    )
+    return True
+
+
 def list_tasks(
     connection: sqlite3.Connection,
     *,

@@ -256,7 +256,9 @@ def build_task(
     canonical_size = (
         image_size.strip().upper()
         if image_size
-        else MODEL_DEFAULT_IMAGE_SIZES.get(requested_model.casefold(), "1K")
+        else MODEL_DEFAULT_IMAGE_SIZES.get(
+            str(model["name"] if model is not None else requested_model).casefold(), "1K"
+        )
     )
     canonical_ratio = aspect_ratio.strip() if aspect_ratio else "1:1"
     canonical_format = output_format.strip().lower() if output_format else "png"
@@ -265,24 +267,9 @@ def build_task(
         image_sizes = model_capabilities.get("image_sizes")
         aspect_ratios = model_capabilities.get("aspect_ratios")
         output_formats = model_capabilities.get("output_formats")
-        if image_size is None:
-            if not isinstance(image_sizes, list) or not image_sizes:
-                raise AsxError("Selected model has invalid image_size capabilities", code="invalid_model_catalog")
-            canonical_size = str(image_sizes[0])
-        else:
-            canonical_size = catalog_choice(image_size, image_sizes, "image_size")
-        if aspect_ratio is None:
-            if not isinstance(aspect_ratios, list) or not aspect_ratios:
-                raise AsxError("Selected model has invalid aspect_ratio capabilities", code="invalid_model_catalog")
-            canonical_ratio = str(aspect_ratios[0])
-        else:
-            canonical_ratio = catalog_choice(aspect_ratio, aspect_ratios, "aspect_ratio")
-        if output_format is None:
-            if not isinstance(output_formats, list) or not output_formats:
-                raise AsxError("Selected model has invalid output_format capabilities", code="invalid_model_catalog")
-            canonical_format = str(output_formats[0])
-        else:
-            canonical_format = catalog_choice(output_format, output_formats, "output_format")
+        canonical_size = catalog_choice(canonical_size, image_sizes, "image_size")
+        canonical_ratio = catalog_choice(canonical_ratio, aspect_ratios, "aspect_ratio")
+        canonical_format = catalog_choice(canonical_format, output_formats, "output_format")
         max_images = model_capabilities.get("max_images")
         if not isinstance(max_images, int) or count > max_images:
             raise AsxError(

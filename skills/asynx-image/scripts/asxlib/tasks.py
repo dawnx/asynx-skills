@@ -33,6 +33,7 @@ from .output import log
 from .state import (
     append_event,
     bind_remote_task,
+    cancel_blocked_batch_intent,
     create_task_intent,
     list_assets,
     update_task,
@@ -499,6 +500,14 @@ def recover_tasks(client: AsynxClient, *, limit: int = 50) -> dict[str, Any]:
             continue
         try:
             if not row.get("remote_task_id"):
+                connection = connect_ledger_db()
+                try:
+                    blocked = cancel_blocked_batch_intent(connection, str(row["idempotency_key"]))
+                    connection.commit()
+                finally:
+                    connection.close()
+                if blocked:
+                    continue
                 body = row.get("request")
                 if not isinstance(body, dict):
                     raise AsxError("本地请求体损坏，无法恢复", code="invalid_task_state")

@@ -25,6 +25,7 @@ from .output import log
 from .state import (
     append_event,
     bind_remote_task,
+    cancel_blocked_batch_intent,
     create_task_intent,
     ensure_batch_schema,
 )
@@ -69,6 +70,28 @@ def _item_key(batch_id: str, sequence: int) -> str:
     return f"asx-{batch_id}-{sequence:06d}"
 
 
+def _available_files(raw: str | None) -> list[str]:
+    try:
+        files = json.loads(raw) if raw else None
+    except (ValueError, TypeError):
+        return []
+    if isinstance(files, list) and files and all(
+        isinstance(path, str) and Path(path).is_file() for path in files
+    ):
+        return cast(list[str], files)
+    return []
+
+
+def _pending_downloads(connection: sqlite3.Connection, batch_id: str) -> int:
+    return sum(
+        not _available_files(row["files_json"])
+        for row in connection.execute(
+            "SELECT files_json FROM batch_items WHERE batch_id = ? AND status = 'succeeded'",
+            (batch_id,),
+        )
+    )
+
+
 def batch_summary(connection: sqlite3.Connection, batch: sqlite3.Row) -> dict[str, Any]:
     rows = connection.execute(
         "SELECT status, COUNT(*) AS count FROM batch_items WHERE batch_id = ? GROUP BY status",
@@ -76,13 +99,8 @@ def batch_summary(connection: sqlite3.Connection, batch: sqlite3.Row) -> dict[st
     ).fetchall()
     counts = {str(row["status"]): int(row["count"]) for row in rows}
     total = sum(counts.values())
-    pending_download = int(
-        connection.execute(
-            "SELECT COUNT(*) FROM batch_items WHERE batch_id = ? "
-            "AND status = 'succeeded' AND files_json IS NULL",
-            (batch["id"],),
-        ).fetchone()[0]
-    )
+    pending_download = _pending_downloads(connection, str(batch["id"]))
+    unsuccessful = sum(counts.get(status, 0) for status in ("failed", "timeout", "canceled"))
     finished = (
         sum(counts.get(status, 0) for status in ("succeeded", "failed", "timeout", "canceled"))
         - pending_download
@@ -102,6 +120,11 @@ def batch_summary(connection: sqlite3.Connection, batch: sqlite3.Row) -> dict[st
         "pending_download": pending_download,
         "counts": counts,
         "cancel_requested": bool(batch["cancel_requested"]),
+        "partial": bool(unsuccessful),
+        **(
+            {"action_required": "查看 batch status --items，检查失败、超时或取消的项目"}
+            if unsuccessful else {}
+        ),
     }
 
 
@@ -436,12 +459,11 @@ def _refresh_batch_status(connection: sqlite3.Connection, batch_id: str) -> None
     unfinished = int(
         connection.execute(
             "SELECT COUNT(*) FROM batch_items WHERE batch_id = ? AND "
-            "(status NOT IN ('succeeded', 'failed', 'timeout', 'canceled') "
-            "OR (status = 'succeeded' AND files_json IS NULL))",
+            "status NOT IN ('succeeded', 'failed', 'timeout', 'canceled')",
             (batch_id,),
         ).fetchone()[0]
     )
-    if total and unfinished == 0:
+    if total and unfinished == 0 and _pending_downloads(connection, batch_id) == 0:
         connection.execute(
             "UPDATE batches SET status = CASE WHEN cancel_requested = 1 "
             "THEN 'canceled' ELSE 'completed' END, updated_at = ? WHERE id = ?",
@@ -462,12 +484,14 @@ def poll_batch(
     connection = connect_db()
     try:
         batch = get_batch(connection, batch_id)
+        summary = batch_summary(connection, batch)
         if batch["status"] == "paused":
-            return {"ok": True, "batch": batch_summary(connection, batch), "paused": True}
-        if batch["status"] == "completed" or (
-            batch["status"] == "canceled" and not batch["cancel_requested"]
-        ):
-            return {"ok": True, "batch": batch_summary(connection, batch), "finished": True}
+            return {"ok": not summary["partial"], "batch": summary, "paused": True}
+        if (
+            batch["status"] == "completed"
+            or (batch["status"] == "canceled" and not batch["cancel_requested"])
+        ) and not summary["pending_download"]:
+            return {"ok": not summary["partial"], "batch": summary, "finished": True}
         stale_before = datetime.now(UTC) - timedelta(minutes=5)
         connection.execute(
             "UPDATE batch_items SET status = 'pending', updated_at = ? "
@@ -481,13 +505,17 @@ def poll_batch(
         asset_downloads: list[dict[str, Any]] = []
         pending = connection.execute(
             "SELECT * FROM batch_items WHERE batch_id = ? AND status = 'pending' "
+            "AND EXISTS (SELECT 1 FROM batches WHERE id = batch_id "
+            "AND cancel_requested = 0 AND status = 'active') "
             "ORDER BY sequence LIMIT ?",
             (batch["id"], submissions_limit),
         ).fetchall()
         for item in pending:
             claim = connection.execute(
                 "UPDATE batch_items SET status = 'submitting', error_json = NULL, updated_at = ? "
-                "WHERE id = ? AND status = 'pending'",
+                "WHERE id = ? AND status = 'pending' "
+                "AND EXISTS (SELECT 1 FROM batches WHERE id = batch_id "
+                "AND cancel_requested = 0 AND status = 'active')",
                 (utc_now(), item["id"]),
             )
             if claim.rowcount != 1:
@@ -512,6 +540,9 @@ def poll_batch(
                     status="submitting",
                 )
                 connection.commit()
+                if cancel_blocked_batch_intent(connection, str(item["idempotency_key"])):
+                    connection.commit()
+                    continue
                 if intent.get("remote_task_id"):
                     task, request_id = client.task(str(intent["remote_task_id"]))
                 else:
@@ -566,12 +597,13 @@ def poll_batch(
                 connection.commit()
                 submitted += 1
             except AsxError as exc:
+                canceled = cancel_blocked_batch_intent(connection, str(item["idempotency_key"]))
                 _update_item(
                     connection,
                     int(item["id"]),
                     status=(
-                        "failed"
-                        if exc.http_status in {400, 404, 410, 422}
+                        "canceled" if canceled
+                        else "failed" if exc.http_status in {400, 404, 410, 422}
                         else "pending"
                     ),
                     error=exc.payload().get("error"),
@@ -587,15 +619,8 @@ def poll_batch(
         ).fetchall()
         downloaded = 0
         for item in remote_items:
-            if item["status"] == "succeeded" and item["files_json"]:
-                try:
-                    cached_files = json.loads(item["files_json"])
-                except json.JSONDecodeError:
-                    cached_files = []
-                if isinstance(cached_files, list) and cached_files and all(
-                    isinstance(path, str) and Path(path).is_file() for path in cached_files
-                ):
-                    continue
+            if item["status"] == "succeeded" and _available_files(item["files_json"]):
+                continue
             remote_task_id: str | None = item["task_id"]
             if not isinstance(remote_task_id, str):
                 continue
@@ -662,7 +687,7 @@ def poll_batch(
                 connection.commit()
             files: list[str] | None = None
             if status == "succeeded":
-                files = json.loads(item["files_json"]) if item["files_json"] else None
+                files = _available_files(item["files_json"])
                 if not files:
                     try:
                         files = download_assets(
@@ -713,9 +738,6 @@ def poll_batch(
             result["asset_downloads_now"] = asset_downloads
         if artifact_warnings:
             result["warnings"] = artifact_warnings
-        if result["counts"].get("failed", 0):
-            result["partial"] = True
-            result["action_required"] = "查看 batch status --items，处理失败项"
         return {"ok": not bool(result.get("partial")), "batch": result}
     finally:
         connection.close()
@@ -745,6 +767,17 @@ def cancel_batch(client: AsynxClient, batch_id: str | None) -> dict[str, Any]:
         if batch["status"] == "completed":
             return {"ok": True, "batch": batch_summary(connection, batch), "finished": True}
         connection.execute(
+            "UPDATE batches SET cancel_requested = 1, updated_at = ? WHERE id = ?",
+            (utc_now(), batch["id"]),
+        )
+        connection.execute(
+            "UPDATE tasks SET status = 'canceled', updated_at = ? "
+            "WHERE remote_task_id IS NULL AND idempotency_key IN "
+            "(SELECT idempotency_key FROM batch_items WHERE batch_id = ? "
+            "AND status IN ('pending', 'submitting'))",
+            (utc_now(), batch["id"]),
+        )
+        connection.execute(
             "UPDATE batch_items SET status = 'canceled', error_json = NULL, updated_at = ? "
             "WHERE batch_id = ? AND status IN ('pending', 'submitting')",
             (utc_now(), batch["id"]),
@@ -773,10 +806,6 @@ def cancel_batch(client: AsynxClient, batch_id: str | None) -> dict[str, Any]:
                     error=exc.payload().get("error"),
                 )
             connection.commit()
-        connection.execute(
-            "UPDATE batches SET cancel_requested = 1, updated_at = ? WHERE id = ?",
-            (utc_now(), batch["id"]),
-        )
         _refresh_batch_status(connection, batch["id"])
         connection.commit()
         summary = batch_summary(connection, get_batch(connection, batch["id"]))
@@ -808,7 +837,7 @@ def wait_for_batch(
     while True:
         result = poll_batch(client, batch_id)
         batch = result["batch"]
-        if batch["status"] in {"completed", "canceled"}:
+        if batch["status"] in {"completed", "canceled"} and not batch["pending_download"]:
             return result
         if max_wait and time.monotonic() - started >= max_wait:
             result["wait_timeout"] = True
@@ -833,11 +862,13 @@ def execute_batch(
     if client is None:
         raise AsxError("此批次操作需要 API Key", code="missing_api_key")
     if action == "poll":
-        return poll_batch(client, args.batch_id, submissions_limit=args.limit), 0
+        result = poll_batch(client, args.batch_id, submissions_limit=args.limit)
+        return result, 0 if result["ok"] else 4
     if action == "wait":
-        return wait_for_batch(
+        result = wait_for_batch(
             client, args.batch_id, interval=args.interval, max_wait=args.max_wait
-        ), 0
+        )
+        return result, 0 if result["ok"] else 4
     if action == "cancel":
         return cancel_batch(client, args.batch_id), 0
     if action == "create":
@@ -868,7 +899,7 @@ def execute_batch(
         progressed["created"] = True
         if created.get("warnings"):
             progressed["warnings"] = created["warnings"]
-        return progressed, 0
+        return progressed, 0 if progressed["ok"] else 4
     if action == "add":
         references = args.reference if args.reference else args.image if args.image else None
         result = add_to_batch(
@@ -891,5 +922,5 @@ def execute_batch(
         progressed["added"] = args.total
         if result.get("warnings"):
             progressed["warnings"] = result["warnings"]
-        return progressed, 0
+        return progressed, 0 if progressed["ok"] else 4
     raise AssertionError("unreachable")

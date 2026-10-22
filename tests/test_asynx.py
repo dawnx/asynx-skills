@@ -304,7 +304,7 @@ class UnitTestCase(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(installed.returncode, 0, installed.stderr)
-            self.assertEqual(installed.stdout.strip(), "0.6.1")
+            self.assertEqual(installed.stdout.strip(), "0.6.2")
 
     def test_installer_can_install_both_agents_noninteractively(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
