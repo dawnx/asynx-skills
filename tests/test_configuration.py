@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -18,7 +20,8 @@ CLI = SCRIPTS / "asynx.py"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SCRIPTS))
 
-from asxlib import config
+from asxlib import cli, config
+from asxlib.errors import AsxError
 
 import install as installer
 
@@ -229,6 +232,88 @@ class ConfigurationPathTestCase(unittest.TestCase):
 
 
 class ConfigurationCLITestCase(unittest.TestCase):
+    def test_configure_terminal_and_redirect_preserve_saved_key_without_exposing_it(self) -> None:
+        for terminal in (True, False):
+            with self.subTest(terminal=terminal), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                output, errors = io.StringIO(), io.StringIO()
+                secret = "asx-new-private-key"
+                environment_key = "asx-environment-private-key"
+                with (
+                    patch.dict(os.environ, isolated_environment(home, ASYNX_API_KEY=environment_key), clear=True),
+                    patch.object(sys, "argv", [str(CLI), "configure"]),
+                    patch.object(sys, "stdin", TTY()),
+                    contextlib.redirect_stdout(output),
+                    contextlib.redirect_stderr(errors),
+                    patch.object(output, "isatty", return_value=terminal),
+                    patch("asxlib.config.getpass.getpass", return_value=secret),
+                    patch.object(cli, "legacy_installation_notice", return_value=None),
+                    patch.object(cli, "AsynxClient") as api,
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    cli.main()
+                self.assertEqual(raised.exception.code, 0)
+                api.assert_not_called()
+                with patch.dict(os.environ, isolated_environment(home), clear=True):
+                    self.assertEqual(config.read_config()["api_key"], secret)
+                if terminal:
+                    self.assertEqual(output.getvalue(), "")
+                else:
+                    payload = json.loads(output.getvalue())
+                    self.assertTrue(payload["ok"])
+                    self.assertTrue(payload["configured"])
+                self.assertIn("ASYNX_API_KEY", errors.getvalue())
+                for key in (secret, environment_key):
+                    self.assertNotIn(key, output.getvalue() + errors.getvalue())
+
+    def test_configure_cancel_preserves_existing_key_and_exit_status(self) -> None:
+        for interruption in (EOFError, KeyboardInterrupt):
+            with self.subTest(interruption=interruption), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                output, errors = io.StringIO(), io.StringIO()
+                with (
+                    patch.dict(os.environ, isolated_environment(home), clear=True),
+                    patch.object(sys, "argv", [str(CLI), "configure"]),
+                    patch.object(sys, "stdin", TTY()),
+                    contextlib.redirect_stdout(output),
+                    contextlib.redirect_stderr(errors),
+                    patch.object(output, "isatty", return_value=True),
+                    patch("asxlib.config.getpass.getpass", side_effect=interruption),
+                    patch.object(cli, "legacy_installation_notice", return_value=None),
+                ):
+                    path = config.save_config("asx-existing-private-key", config.DEFAULT_BASE_URL)
+                    before = path.read_bytes()
+                    with self.assertRaises(SystemExit) as raised:
+                        cli.main()
+                    self.assertEqual(raised.exception.code, 130)
+                    self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(output.getvalue(), "")
+                self.assertNotIn("asx-existing-private-key", errors.getvalue())
+
+    def test_installer_verification_does_not_echo_upstream_body(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        for code, status in (("network_error", None), ("unauthorized", 401), ("forbidden", 403), ("busy", 429), ("upstream_error", 502)):
+            with self.subTest(code=code):
+                api = Mock()
+                api.models.side_effect = AsxError(
+                    'upstream body containing asx-private-key', code=code, http_status=status, request_id="req-test"
+                )
+                client = SimpleNamespace(
+                    AsxError=AsxError,
+                    load_credentials=lambda: ("asx-private-key", "https://example.test"),
+                    AsynxClient=Mock(return_value=api),
+                )
+                errors = io.StringIO()
+                with contextlib.redirect_stderr(errors):
+                    result = installer._verify(cast(Any, client))
+                self.assertEqual(result, 1)
+                self.assertNotIn("asx-private-key", errors.getvalue())
+                self.assertNotIn("upstream body", errors.getvalue())
+                self.assertIn(code, errors.getvalue())
+                self.assertIn("req-test", errors.getvalue())
+
     def test_new_process_and_installed_copies_share_saved_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)

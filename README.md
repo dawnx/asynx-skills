@@ -6,7 +6,7 @@
 ## 要求
 
 - Python 3.10 或更高版本
-- 一个同时拥有 `tasks:read` 和 `tasks:write` Scope 的 Asynx API Key
+- 一个 Asynx API Key
 
 公共服务可以在 <https://asynx.llmapi.site/api-keys> 创建 Key。
 
@@ -28,7 +28,7 @@ cd asynx-skills
 py install.py
 ```
 
-安装器会自动检测 Codex 和 Claude Code，把同一个 `asynx-image` skill 安装到对应目录，不会修改用户的全局 Python 环境。首次安装时只隐藏询问一次 API Key，并检查配置是否可用。
+安装器会自动检测 Codex 和 Claude Code，把同一个 `asynx-image` skill 安装到对应目录，不会修改用户的全局 Python 环境。首次安装时隐藏输入 API Key，然后检查能否访问模型目录；不会生成图片，也不会验证实际生图权限和余额。
 重复运行安装器会复用已有 Key。
 
 也可以显式指定目标：
@@ -72,7 +72,7 @@ Claude Code 用户将上述路径替换为 `~/.claude/skills/asynx-image/scripts
 从 `0.6.1` 开始，Skill 名称与安装目录改为 `asynx-image`。旧版 `asx` 的 `update apply` 不能完成这次更名，请重新安装一次：
 
 可以让 Agent 帮你完成：“请安装最新版 asynx-image，并把旧版 asx 入口移到 skills 目录之外备份，保留密钥和任务记录。”
-新版安装器会给 Agent 列出冲突路径和处理步骤，清理后继续安装。自行操作时按以下步骤进行：
+新版安装器会列出旧入口的位置，可以让 Agent 帮你备份清理后继续安装。自行操作时按以下步骤进行：
 
 1. 等待当前 Skill 命令退出，将旧安装目录移出所有 Agent 的 `skills` 目录，或删除旧安装目录：
    - Codex：`~/.agents/skills/asx`；早期安装还可能位于 `~/.codex/skills/asx`。
@@ -112,7 +112,7 @@ python3 install.py --uninstall
 ## 配置
 
 安装器会自动配置公共 Asynx 服务。配置必须在用户自己的交互式终端中完成，不要让 Agent 代为输入 Key，也不要把 Key
-粘贴到对话中。之后需要轮换 Key 时，运行对应的已安装脚本，而不是依赖当前工作目录中的仓库相对路径。
+粘贴到对话中。输入时终端不会显示字符，这是正常的。`configure` 提示“已保存”仅表示密钥已写入配置文件，不代表连接已验证；完成后可回到 Agent 对话中继续请求生成图片。之后需要轮换 Key 时，运行对应的已安装脚本，而不是依赖当前工作目录中的仓库相对路径。
 
 macOS/Linux：
 

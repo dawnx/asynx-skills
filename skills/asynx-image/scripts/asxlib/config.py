@@ -66,13 +66,13 @@ def _read_config_file(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise AsxError(
-            f"Cannot read Asynx configuration at {path}: {exc}",
+            f"无法读取配置文件，请检查文件权限和 JSON 格式：{path}",
             code="invalid_config",
             details={"config_path": str(path)},
         ) from exc
     if not isinstance(value, dict):
         raise AsxError(
-            f"Asynx configuration at {path} must be a JSON object",
+            f"配置文件格式不正确，应为 JSON 对象：{path}",
             code="invalid_config",
             details={"config_path": str(path)},
         )
@@ -104,7 +104,7 @@ def validate_base_url(value: str) -> str:
         or parts.query
         or parts.fragment
     ):
-        raise AsxError("The Asynx Base URL is invalid", code="invalid_base_url")
+        raise AsxError("服务地址格式不正确，请使用不含密钥、查询参数或片段的完整 HTTP(S) 地址。", code="invalid_base_url")
     local_hosts = {"localhost", "127.0.0.1", "::1"}
     if parts.scheme != "https" and parts.hostname not in local_hosts:
         raise AsxError(
@@ -131,8 +131,8 @@ def validate_api_key(value: Any) -> str:
         command = _configure_command()
         checked = [str(path) for path in _checked_config_paths()]
         raise AsxError(
-            "Asynx API key is not configured. "
-            f"Checked: {', '.join(checked)}. Run in your terminal: {command}",
+            f"尚未配置有效的 Asynx API Key。配置文件：{canonical}。"
+            f"请在自己的终端运行以下命令配置（不要将密钥发到对话中）：{command}",
             code="missing_api_key",
             details={
                 "config_path": str(canonical),
@@ -143,7 +143,7 @@ def validate_api_key(value: Any) -> str:
         )
     normalized = value.strip()
     if not normalized.startswith("asx-"):
-        raise AsxError("Asynx API keys must start with 'asx-'", code="invalid_api_key")
+        raise AsxError("API Key 格式不正确，应以 asx- 开头。请复制完整密钥后重试。", code="invalid_api_key")
     return normalized
 
 
@@ -181,7 +181,7 @@ def _write_config(payload: dict[str, Any], path: Path) -> Path:
             except OSError:
                 pass
         raise AsxError(
-            f"Cannot save Asynx configuration at {path}: {exc}",
+            f"无法保存配置，请检查目录写入权限和剩余磁盘空间：{path}",
             code="config_write_failed",
             details={"config_path": str(path)},
         ) from exc
@@ -458,25 +458,36 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
 
 def configure(base_url_override: str | None = None) -> dict[str, Any]:
     if not sys.stdin.isatty():
-        raise AsxError("configure requires an interactive terminal", code="interactive_terminal_required")
+        raise AsxError(
+            "请在自己的终端运行配置命令并输入 API Key，不要在对话中发送密钥。",
+            code="interactive_terminal_required",
+        )
     migrated = migrate_legacy_config()
     current = read_config()
     configured_url = current.get("base_url") if isinstance(current.get("base_url"), str) else None
     base_url = validate_base_url(
         base_url_override or os.environ.get("ASYNX_BASE_URL") or configured_url or DEFAULT_BASE_URL
     )
-    log(f"Configuration: {config_path()}")
+    log(f"配置文件：{config_path()}")
     if migrated:
-        log(f"Migrated legacy configuration to: {migrated}")
-    log(f"Base URL: {base_url}")
+        log(f"已将旧配置保存到：{migrated}，原文件已保留。")
+    if base_url != DEFAULT_BASE_URL:
+        log(f"服务地址：{base_url}")
     if base_url == DEFAULT_BASE_URL:
-        log("Create an API key at https://asynx.llmapi.site/api-keys")
-    log("Required scopes: tasks:read and tasks:write")
+        log("还没有 API Key？请前往 https://asynx.llmapi.site/api-keys 创建。")
+    log("输入时不会显示字符，这是正常的。")
     existing_key = current.get("api_key") if isinstance(current.get("api_key"), str) else ""
-    label = "API key (press Enter to keep the existing key): " if existing_key else "API key: "
-    entered_key = getpass.getpass(label).strip()
+    label = "请输入 API Key（直接回车保留已保存的密钥）：" if existing_key else "请输入 API Key："
+    try:
+        entered_key = getpass.getpass(label).strip()
+    except (EOFError, KeyboardInterrupt):
+        raise AsxError("已取消输入，未保存新密钥。", code="interrupted", exit_code=130) from None
     api_key = validate_api_key(entered_key or existing_key)
     path = save_config(api_key, base_url)
+    log("API Key 已保存，尚未验证连接。")
+    if os.environ.get("ASYNX_API_KEY"):
+        log("注意：当前设置了 ASYNX_API_KEY 环境变量，运行时会优先使用它；如需使用刚保存的密钥，请先移除或更新该环境变量。")
+    log("可回到 Agent 对话中继续请求生成图片，无需发送密钥。")
     return {
         "ok": True,
         "configured": True,

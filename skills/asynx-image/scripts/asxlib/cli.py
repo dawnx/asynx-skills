@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -24,7 +25,7 @@ from .constants import (
 )
 from .errors import AsxError
 from .local_images import execute_local_image
-from .output import emit
+from .output import emit, log
 from .tasks import (
     cancel_local_task,
     history_payload,
@@ -184,7 +185,7 @@ def parser() -> argparse.ArgumentParser:
     configure_command = commands.add_parser("configure", help="安全保存 Asynx API Key")
     configure_command.add_argument(
         "--base-url",
-        help="use a self-hosted Asynx API instead of the default service",
+        help="使用自托管 Asynx 服务地址；使用公共服务时无需设置",
     )
     update = commands.add_parser("update", help="检查、安装或回滚 Skill 更新")
     update_commands = update.add_subparsers(dest="update_command", required=True)
@@ -365,6 +366,7 @@ def execute(args: argparse.Namespace, *, locked_root: Path | None = None) -> tup
 
 
 def main(*, locked_root: Path | None = None) -> NoReturn:
+    args: argparse.Namespace | None = None
     try:
         args = parser().parse_args()
         payload, exit_code = execute(args, locked_root=locked_root)
@@ -397,5 +399,13 @@ def main(*, locked_root: Path | None = None) -> NoReturn:
     legacy_notice = legacy_installation_notice()
     if legacy_notice:
         payload["legacy_installation_notice"] = legacy_notice
-    emit(payload)
+    if args is not None and args.command == "configure" and sys.stdout.isatty():
+        # configure is the one CLI interaction users perform themselves.
+        # Keep redirected stdout JSON for callers that consume its existing contract.
+        if not payload.get("ok"):
+            log(payload["error"]["message"])
+        if legacy_notice:
+            log("发现旧版 asx 入口，可让 Agent 帮你检查和清理；密钥和任务记录应保留。")
+    else:
+        emit(payload)
     raise SystemExit(exit_code)

@@ -29,7 +29,7 @@ def _load_client_module(skill_root: Path) -> ModuleType:
         submodule_search_locations=[str(package)],
     )
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load the installed Asynx client from: {package}")
+        raise RuntimeError(f"无法加载已安装的 Skill，请重新运行安装命令。位置：{package}")
     client = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = client
     try:
@@ -41,7 +41,7 @@ def _load_client_module(skill_root: Path) -> ModuleType:
         raise
     module_path = Path(client.__file__ or "").resolve()
     if not module_path.is_relative_to(package):
-        raise RuntimeError(f"Loaded Asynx client from an unexpected path: {module_path}")
+        raise RuntimeError(f"加载的 Skill 位置不正确，请重新运行安装命令。位置：{module_path}")
     return client
 
 
@@ -56,16 +56,16 @@ def _detected_targets(home: Path) -> list[str]:
 
 def _prompt_target() -> list[str]:
     if not sys.stdin.isatty():
-        raise RuntimeError("No agent installation was detected; pass --target codex, claude, or both")
-    print("Install for Codex, Claude Code, or both? [codex/claude/both]", file=sys.stderr)
+        raise RuntimeError("未检测到 Codex 或 Claude Code，请在安装命令后添加 --target codex、--target claude 或 --target both。")
+    print("要安装到哪个 Agent？codex = Codex，claude = Claude Code，both = 两者", file=sys.stderr)
     while True:
-        print("Target [codex]: ", end="", file=sys.stderr, flush=True)
+        print("请选择（直接回车选择 Codex）：", end="", file=sys.stderr, flush=True)
         value = input().strip().casefold() or "codex"
         if value in {"codex", "claude"}:
             return [value]
         if value == "both":
             return ["codex", "claude"]
-        print("Enter codex, claude, or both.", file=sys.stderr)
+        print("请输入 codex、claude 或 both。", file=sys.stderr)
 
 
 def _resolve_targets(selection: str, home: Path) -> list[str]:
@@ -90,6 +90,7 @@ def _target_path(target: str, home: Path) -> Path:
 def _install_dependencies(destination: Path) -> None:
     vendor = destination / "scripts" / "vendor"
     vendor.mkdir(parents=True, exist_ok=True)
+    print("正在安装图片处理依赖，首次安装可能需要一些时间……", file=sys.stderr)
     result = subprocess.run(
         [
             sys.executable,
@@ -103,9 +104,10 @@ def _install_dependencies(destination: Path) -> None:
             PILLOW_REQUIREMENT,
         ],
         check=False,
+        capture_output=True,
     )
     if result.returncode:
-        raise RuntimeError(f"无法将 Pillow 安装到 skill 的隔离依赖目录：{vendor}")
+        raise RuntimeError("图片处理依赖安装失败。请检查网络连接以及当前 Python 是否已安装 pip，然后重新运行安装命令。")
 
 
 def _check_legacy_installations(home: Path, targets: list[str]) -> None:
@@ -118,17 +120,14 @@ def _check_legacy_installations(home: Path, targets: list[str]) -> None:
         raise RuntimeError(
             "检测到旧版 asx，需移除旧入口后继续安装 asynx-image：\n"
             f"{paths}\n"
-            "Agent 操作提示：用户已要求安装或升级时，请检查上述路径的 SKILL.md 和 scripts/asynx.py，"
-            "确认属于 Asynx 后，等待旧版命令退出，将旧入口移到所有 Agent 的 skills 扫描目录之外备份，"
-            "然后重跑本次安装命令。符号链接只移动链接本身，不移动其目标；无法确认归属时先说明情况。\n"
-            "不要只将旧目录改名为 asynx-image。保留用户配置、任务数据和生成图片，无需重新配置 API Key。"
-            "未收到安装或升级指令时只提醒，不移动文件。"
+            "可以让 Agent 帮你确认并将旧入口移出 skills 目录备份，再继续安装。\n"
+            "请保留密钥、任务记录和生成图片，无需迁移这些数据，也不要仅将旧目录改名。"
         )
 
 
 def _install_skill(destination: Path, *, install_dependencies: bool = True) -> None:
     if destination.exists() and not destination.is_dir():
-        raise RuntimeError(f"Installation target is not a directory: {destination}")
+        raise RuntimeError(f"安装位置被同名文件占用，请先检查该文件：{destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     # Keep the lock outside the replaced directory and ready for read-only CLI calls.
     # Never truncate or replace it: running commands may already hold this inode.
@@ -156,7 +155,7 @@ def _uninstall_skill(destination: Path) -> bool:
     if not destination.exists():
         return False
     if not destination.is_dir() or destination.name != "asynx-image" or destination.parent.name != "skills":
-        raise RuntimeError(f"Refusing to remove an unexpected path: {destination}")
+        raise RuntimeError(f"该路径不是预期的 Skill 安装目录，未执行删除：{destination}")
     shutil.rmtree(destination)
     return True
 
@@ -185,8 +184,21 @@ def _verify(client: ModuleType) -> int:
         api_key, base_url = client.load_credentials()
         models, _request_id = client.AsynxClient(base_url, api_key).models()
     except client.AsxError as exc:
-        print(f"Configuration check failed: {exc.message}", file=sys.stderr)
-        print("The skill is installed. Fix the key or network connection and run install.py again.", file=sys.stderr)
+        if exc.http_status == 401 or exc.code in {"missing_api_key", "invalid_api_key"}:
+            message = "API Key 未通过验证，请检查密钥是否完整、有效，并在自己的终端重新配置。"
+        elif exc.http_status == 403:
+            message = "当前密钥无权访问模型目录，请检查密钥权限或联系服务管理员。"
+        elif exc.code == "network_error":
+            message = "暂时无法连接 Asynx，请检查网络或服务地址后重试；这不代表密钥错误。"
+        elif exc.http_status == 429:
+            message = "请求过于频繁，请稍后重试连接检查。"
+        else:
+            message = "暂时无法完成模型目录检查，请稍后重试；若持续失败，可将下方错误编号提供给支持人员。"
+        print(f"Skill 已安装，但连接检查未通过。{message}", file=sys.stderr)
+        print(f"错误编号：{exc.code}", file=sys.stderr)
+        if exc.request_id:
+            print(f"请求编号：{exc.request_id}", file=sys.stderr)
+        print("无需重装 Skill，可回到 Agent 对话中请求检查配置和连接。", file=sys.stderr)
         return 1
     capable = [
         model
@@ -194,9 +206,9 @@ def _verify(client: ModuleType) -> int:
         if {"image.generate", "image.edit"}.intersection(model.get("task_types", []))
     ]
     if not capable:
-        print("Configuration check failed: no image models are currently available.", file=sys.stderr)
+        print("Skill 已安装，连接正常，但当前没有可用的图片模型。请稍后重试或联系服务管理员。", file=sys.stderr)
         return 1
-    print(f"Configuration verified: {len(capable)} image model(s) available.")
+    print(f"连接检查通过，可访问 {len(capable)} 个图片模型。本次未生成图片，实际生图权限和余额尚未验证。")
     return 0
 
 
@@ -264,40 +276,49 @@ def run(
         destination = _target_path(target, user_home)
         _install_skill(destination, install_dependencies=install_dependencies)
         label = "Codex" if target == "codex" else "Claude Code"
-        print(f"Installed for {label}: {destination}")
+        print(f"已安装到 {label}：{destination}")
 
     client = _load_client_module(_target_path(targets[0], user_home))
     migrate = getattr(client, "migrate_legacy_config", None)
     if callable(migrate):
         migrated_path = migrate()
         if migrated_path is not None:
-            print(f"Migrated legacy configuration: {migrated_path}")
-    print(f"Configuration file: {client.config_path().resolve()}")
+            print(f"已迁移旧配置，原文件已保留：{migrated_path}")
+    print(f"配置文件：{client.config_path().resolve()}")
     if not args.skip_config:
         if _configured(client):
-            print("Using the existing Asynx API key configuration.")
+            if os.environ.get("ASYNX_API_KEY"):
+                print("正在使用 ASYNX_API_KEY 环境变量中的密钥，它优先于配置文件；此步骤不会将它保存到配置文件。")
+            else:
+                print("正在使用已保存的 API Key，无需重复输入。")
         else:
             client.configure()
-            print(f"Saved configuration: {client.config_path()}")
         if not args.no_verify:
             verification = _verify(client)
             if verification:
                 return verification
+        else:
+            print("已跳过连接检查，尚未验证密钥是否可用。")
+    else:
+        print("已跳过密钥配置和连接检查；若尚未配置，请回到 Agent 对话中请求配置指引。")
 
     if "codex" in targets:
-        print("Try in Codex: $asynx-image generate an image of a red chair")
+        print("回到 Codex，可输入：$asynx-image 生成一张卡通猫的图片")
     if "claude" in targets:
-        print("Try in Claude Code: /asynx-image generate an image of a red chair")
+        print("回到 Claude Code，可输入：/asynx-image 生成一张卡通猫的图片")
     return 0
 
 
 def main() -> int:
     try:
         return run()
+    except (KeyboardInterrupt, EOFError):
+        print("操作已中断。已完成的安装或配置步骤会保留，可以重新运行命令继续。", file=sys.stderr)
+        return 130
     except Exception as exc:  # noqa: BLE001 - installer failures share one CLI error path
         message = getattr(exc, "message", str(exc))
-        print(f"Installation failed: {message}", file=sys.stderr)
-        return 1
+        print(f"未能完成操作：{message}", file=sys.stderr)
+        return int(getattr(exc, "exit_code", 1))
 
 
 if __name__ == "__main__":
