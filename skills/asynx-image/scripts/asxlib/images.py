@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import stat
@@ -268,7 +269,8 @@ def build_task(
         aspect_ratios = model_capabilities.get("aspect_ratios")
         output_formats = model_capabilities.get("output_formats")
         canonical_size = catalog_choice(canonical_size, image_sizes, "image_size")
-        canonical_ratio = catalog_choice(canonical_ratio, aspect_ratios, "aspect_ratio")
+        if aspect_ratio or task_type != "image.edit":
+            canonical_ratio = catalog_choice(canonical_ratio, aspect_ratios, "aspect_ratio")
         canonical_format = catalog_choice(canonical_format, output_formats, "output_format")
         max_images = model_capabilities.get("max_images")
         if not isinstance(max_images, int) or count > max_images:
@@ -296,11 +298,35 @@ def build_task(
                 "Selected model does not support masks", code="unsupported_model_capability"
             )
 
+    source_sizes: list[tuple[int, int] | None] = []
     prepared, prepared_mask = prepare_inputs(
         references,
         mask=mask,
         keep_original=keep_reference_original,
+        source_sizes=source_sizes,
     )
+    if task_type == "image.edit" and not aspect_ratio:
+        if any(size is None for size in source_sizes):
+            raise AsxError(
+                "无法读取 URL 输入图的比例；请指定 --aspect-ratio，或改用本地图片以自动保持画幅。",
+                code="edit_aspect_ratio_required",
+            )
+        ratios = {
+            f"{width // math.gcd(width, height)}:{height // math.gcd(width, height)}"
+            for size in source_sizes if size is not None
+            for width, height in [size]
+        }
+        if len(ratios) != 1:
+            raise AsxError(
+                "输入图片的比例不同；请指定输出 --aspect-ratio，或只传入要修改的图片。",
+                code="ambiguous_edit_aspect_ratio",
+                details={"input_aspect_ratios": sorted(ratios)},
+            )
+        canonical_ratio = ratios.pop()
+        if model is not None:
+            canonical_ratio = catalog_choice(
+                canonical_ratio, capabilities(model).get("aspect_ratios"), "aspect_ratio"
+            )
     task_input: dict[str, Any] = {
         "prompt": prompt,
         "count": count,

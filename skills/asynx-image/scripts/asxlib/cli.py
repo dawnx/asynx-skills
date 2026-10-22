@@ -35,6 +35,7 @@ from .tasks import (
     models_payload,
     poll_local_tasks,
     recover_tasks,
+    refresh_task,
     run_submission,
     task_payload,
     wait_and_download,
@@ -244,12 +245,13 @@ def parser() -> argparse.ArgumentParser:
     task_list.add_argument("--limit", type=int, default=50, help="返回数量")
     task_status = task_commands.add_parser("status", help="查看本地任务快照")
     task_status.add_argument("task_id")
+    task_status.add_argument("--refresh", action="store_true", help="查询最新进度并下载已完成结果，不提交任务")
     task_poll = task_commands.add_parser("poll", help="刷新一个或全部本地任务")
     task_poll.add_argument("task_id", nargs="?")
     task_poll.add_argument("--limit", type=int, default=50, help="最多刷新任务数")
-    task_commands.add_parser("recover", help="恢复未完成或提交窗口中断的任务").add_argument(
-        "--limit", type=int, default=50, help="最多恢复任务数"
-    )
+    task_recover = task_commands.add_parser("recover", help="恢复提交中断的原任务，可能提交请求")
+    task_recover.add_argument("task_id", nargs="?", help="只恢复此任务；省略时检查最近一批记录")
+    task_recover.add_argument("--limit", type=int, default=50, help="未指定 ID 时最多检查的任务数")
     task_cancel = task_commands.add_parser("cancel", help="请求取消远端任务")
     task_cancel.add_argument("task_id")
 
@@ -281,7 +283,7 @@ def parser() -> argparse.ArgumentParser:
 
     batch_status = batch_commands.add_parser("status", help="查询批次状态")
     batch_status.add_argument("batch_id", nargs="?", help="批次 ID，省略时使用最近的活动批次")
-    batch_status.add_argument("--refresh", action="store_true", help="查询 Asynx 最新状态")
+    batch_status.add_argument("--refresh", action="store_true", help="刷新已提交任务并下载结果，不提交新任务")
     batch_status.add_argument("--items", action="store_true", help="列出每个 Task")
     batch_commands.add_parser("list", help="列出本机批次")
 
@@ -330,12 +332,16 @@ def execute(args: argparse.Namespace, *, locked_root: Path | None = None) -> tup
         if args.task_command == "list":
             return local_tasks_payload(status=args.status, limit=args.limit), 0
         if args.task_command == "status":
+            if args.refresh:
+                result, code = refresh_task(_client(), args.task_id)
+                return {"ok": result["ok"], "schema_version": 1, "task": result}, code
             return local_task_status(args.task_id), 0
         client = _client()
         if args.task_command == "poll":
             return poll_local_tasks(client, args.task_id, limit=args.limit), 0
         if args.task_command == "recover":
-            return recover_tasks(client, limit=args.limit), 0
+            result = recover_tasks(client, args.task_id, limit=args.limit)
+            return result, 0 if result["ok"] else 4
         if args.task_command == "cancel":
             return cancel_local_task(client, args.task_id)
     if args.command == "asset" and args.asset_command == "list":

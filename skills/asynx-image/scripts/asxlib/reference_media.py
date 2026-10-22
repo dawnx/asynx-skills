@@ -43,6 +43,7 @@ class PreparedImage:
     width: int | None
     height: int | None
     normalized: bool
+    original_size: tuple[int, int] | None = None
 
 
 def _pillow() -> tuple[Any, Any, Any]:
@@ -193,6 +194,7 @@ def prepare_image(value: str, *, keep_original: bool = False) -> PreparedImage:
                 code="reference_image_requires_normalization",
             )
         return PreparedImage(_data_url(content_type, data), content_type, len(data), width, height, False)
+    original_size = (width, height)
     normalized, width, height = _webp(image)
     return PreparedImage(
         _data_url("image/webp", normalized),
@@ -201,6 +203,7 @@ def prepare_image(value: str, *, keep_original: bool = False) -> PreparedImage:
         width,
         height,
         True,
+        original_size,
     )
 
 
@@ -241,6 +244,7 @@ def prepare_inputs(
     *,
     mask: str | None,
     keep_original: bool,
+    source_sizes: list[tuple[int, int] | None] | None = None,
 ) -> tuple[list[str], str | None]:
     if len(references) > MAX_REFERENCE_IMAGES:
         raise AsxError(
@@ -248,6 +252,11 @@ def prepare_inputs(
             code="too_many_images",
         )
     prepared = [prepare_image(value, keep_original=keep_original) for value in references]
+    if source_sizes is not None:
+        source_sizes.extend(
+            item.original_size or ((item.width, item.height) if item.width and item.height else None)
+            for item in prepared
+        )
     prepared_mask = prepare_mask(mask, source=prepared[0] if prepared else None) if mask else None
     total_bytes = sum(item.size_bytes or 0 for item in prepared)
     if prepared_mask:

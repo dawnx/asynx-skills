@@ -5,7 +5,7 @@ description: 通过 Asynx 生成、参考图创作和编辑图片，管理批量
 
 # Asynx 图片
 
-使用本 Skill 的 `scripts/asynx.py` 完成图片操作。下文 `<skill-dir>` 替换为当前 Skill 的绝对路径；需要 Python 3.10+，Windows 可用 `py` 替代 `python3`。普通请求直接执行，不先检查版本、扫描目录或读取全部参考文件。
+使用本 Skill 的 `scripts/asynx.py` 完成图片操作。下文 `<skill-dir>` 替换为当前 Skill 的绝对路径；需要 Python 3.10+，Windows 可用 `py` 替代 `python3`。普通生成和明确的换色、换背景、角色修改可按本页直接提交，无需读取提示词参考、检查版本或扫描目录。
 
 ## 生成与编辑
 
@@ -18,10 +18,11 @@ python3 "<skill-dir>/scripts/asynx.py" edit --prompt "<修改要求>" --from-tas
 
 - 新图使用 `generate`，修改已有图片使用 `edit`。图片通过 `--reference` 或 `--image` 独立传入，不把路径当作 Prompt；多张输入重复对应参数。
 - 用户给定的 Prompt 保留原意，普通请求直接提交；只有需要整理复杂创作意图或用户要求优化时才补充结构，不擅自改变主体、风格、构图和文字。
-- 未指定模型时省略 `--model`，使用脚本固定默认模型；完整模型名直接传入，模糊名称由脚本匹配。不要自行切换模型或为普通请求先查 `models`。
-- 比例以用户要求为先；海报、壁纸、横幅等用途明确时传合适的 `--aspect-ratio`，其余使用脚本默认值。尺寸和质量默认不传；指定质量时使用模型支持的值，不传 GPT Image 不支持的 `standard`。
-- 本地参考图交给脚本压缩和校验，不额外预处理；只有用户要求保留原始编码时用 `--keep-reference-original`。Mask 或输入限制见[操作参考](references/operations.md#输入图片)。
+- 未指定模型、尺寸或质量时省略对应参数，使用脚本默认值；用户指定模型时直接传入 `--model`，无需先查模型目录。
+- 新图按用户指定的比例或海报、壁纸等用途传 `--aspect-ratio`，其余使用默认值。编辑本地图片默认沿用原图比例；改变画幅时显式传入。多图比例不一致或输入是 URL 时，按提示明确输出比例。
+- 原图直接交给脚本处理，不额外压缩或编码。保留原始编码、Mask 和特殊输入要求按需读取[输入说明](references/operations.md#输入图片)。
 - 单任务默认等待、下载并展示结果。用户要求后台运行或稍后查询时才加 `--detach`；它只表示已受理。若先分离提交但用户仍要求本轮完成，继续等待原任务，不重新生成。
+- 终端首次调用优先等待 30 秒（支持时设置 `yield_time_ms: 30000`）；返回运行中的会话后，继续等待同一进程，每次 30–60 秒，以宿主限制为准。脚本负责轮询和下载，不另起命令重复监控。
 - 批量或追加使用批次命令，按下面的按需入口读取批次说明；不要套用单任务的等待规则。
 
 ## 选择图片与查询任务
@@ -38,13 +39,11 @@ python3 "<skill-dir>/scripts/asynx.py" asset list "<task-id>"
 
 ```bash
 python3 "<skill-dir>/scripts/asynx.py" task list
-python3 "<skill-dir>/scripts/asynx.py" task status "<task-id>"
-python3 "<skill-dir>/scripts/asynx.py" task poll "<task-id>"
-python3 "<skill-dir>/scripts/asynx.py" status "<remote-task-id>"
-python3 "<skill-dir>/scripts/asynx.py" wait "<remote-task-id>"
+python3 "<skill-dir>/scripts/asynx.py" task status "<task-id>" --refresh
+python3 "<skill-dir>/scripts/asynx.py" wait "<task-id>"
 ```
 
-`task status` 是本地快照；`task poll` 刷新指定任务并下载完成结果；顶层 `status` 只查询远端，不更新本地记录；`wait` 持续等待远端任务。查询进度不要使用 `task recover`：它可能重新提交中断的请求，且不能指定单个任务。恢复、取消和文件缺失的处理见[任务恢复](references/operations.md#任务恢复与取消)。
+查询用 `task status --refresh`，等结果用 `wait`，均可传本地或远端任务 ID；完成后会下载原结果，不重新生图。提交中断的恢复和取消见[任务恢复](references/operations.md#任务恢复与取消)，不要为查询进度执行恢复。
 
 ## 按需读取
 
@@ -57,7 +56,7 @@ python3 "<skill-dir>/scripts/asynx.py" wait "<remote-task-id>"
 | 输入图片限制、Mask 编辑或特殊参数 | [输入与参数](references/operations.md#输入图片) |
 | 恢复中断、取消任务、找回下载文件 | [任务恢复](references/operations.md#任务恢复与取消) |
 | 配置、连接异常、安装、升级或旧入口清理 | [配置与维护](references/setup.md) |
-| 模型推荐、Prompt 优化、复杂编辑或图文布局 | [模型与提示词](references/model-prompting.md)，读取本身不要求查模型目录 |
+| 用户要求模型推荐、Prompt 优化，或需梳理多图关系、复杂图文布局 | [模型与提示词](references/model-prompting.md)，读取本身不要求查模型目录 |
 
 缺少 API Key 时，让用户在自己的终端运行以下命令，不在对话中索取密钥；已配置却报错时按维护参考诊断：
 
@@ -67,9 +66,11 @@ python3 "<skill-dir>/scripts/asynx.py" configure
 
 ## 结果与边界
 
-- 成功优先展示图片或文件，Codex 桌面端用绝对路径展示。默认不罗列任务 ID、模型、计费字段或日志；用户查询时再提供。
+- 普通成功结果直接展示 `files` 中的图片或文件，Codex 桌面端用绝对路径展示；`images` 已含实际尺寸、比例和格式，无需另查。默认不追加费用、状态查询或逐项视觉评审，不展示诊断字段。
+- 用户要求检查或纠错时，针对指定问题查看图片；尺寸与格式使用结果元数据。检查后直接交付，不把文件已下载等同于内容已正确，也不未经用户同意自动重新生图。
 - 进度用自然语言概括；失败说明已知原因、影响和下一步，不直接转发 JSON 或上游英文，也不猜测原因。部分失败、下载失败和 `degraded` 等影响结果的信息必须说明；降级原因未提供时，不自行断言画质变差。
 - 中断等待不等于取消。已开始的任务可能继续执行和计费；恢复结果不能通过重新生图替代，不无条件重试失败任务。
+- `next_action_args` 给出继续原任务的脚本参数；仅在需要继续时使用。下载失败可重试原下载，提交恢复或失败后的重新生成须符合用户要求的范围。
 - 返回 `warnings`、`update_notice` 或 `legacy_installation_notice` 时，先交付本次结果，再说明相关提示。不要提前查更新；未收到升级或清理指令时不替换、移动文件。
 - API Key 不得进入对话、命令参数、Prompt、日志、项目文件或浏览器代码。通过脚本管理任务，不直接读取、修改或依赖本 Skill 的数据库及内部状态文件。
 

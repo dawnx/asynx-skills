@@ -20,6 +20,7 @@ from .constants import (
     UTC,
 )
 from .errors import AsxError
+from .image_results import attach_image_details, requested_aspect_ratio
 from .images import build_task, task_input_warnings
 from .output import log
 from .state import (
@@ -84,12 +85,18 @@ def _available_files(raw: str | None) -> list[str]:
 
 def _pending_downloads(connection: sqlite3.Connection, batch_id: str) -> int:
     return sum(
-        not _available_files(row["files_json"])
+        not _completed_item_files(row)
         for row in connection.execute(
-            "SELECT files_json FROM batch_items WHERE batch_id = ? AND status = 'succeeded'",
+            "SELECT files_json, error_json FROM batch_items WHERE batch_id = ? AND status = 'succeeded'",
             (batch_id,),
         )
     )
+
+
+def _completed_item_files(item: sqlite3.Row) -> list[str]:
+    # files_json may contain partial downloads; a saved download error keeps the
+    # item incomplete until all assets are retrieved and the error is cleared.
+    return [] if item["error_json"] else _available_files(item["files_json"])
 
 
 def batch_summary(connection: sqlite3.Connection, batch: sqlite3.Row) -> dict[str, Any]:
@@ -122,8 +129,18 @@ def batch_summary(connection: sqlite3.Connection, batch: sqlite3.Row) -> dict[st
         "cancel_requested": bool(batch["cancel_requested"]),
         "partial": bool(unsuccessful),
         **(
+            {
+                "next_action_args": ["batch", "status", batch["id"], "--refresh"],
+                "action_required": "批次已暂停。可刷新已提交任务的状态；继续提交剩余项目需明确恢复批次。",
+            }
+            if batch["status"] == "paused"
+            else {"next_action_args": ["batch", "wait", batch["id"]]}
+            if finished < total
+            else {}
+        ),
+        **(
             {"action_required": "查看 batch status --items，检查失败、超时或取消的项目"}
-            if unsuccessful else {}
+            if unsuccessful and batch["status"] != "paused" else {}
         ),
     }
 
@@ -400,6 +417,7 @@ def batch_status(batch_id: str | None, *, include_items: bool = False) -> dict[s
     try:
         batch = get_batch(connection, batch_id)
         summary = batch_summary(connection, batch)
+        _attach_batch_results(connection, batch, summary)
         if include_items:
             items = connection.execute(
                 "SELECT sequence, status, task_id, files_json, error_json, updated_at "
@@ -418,6 +436,95 @@ def batch_status(batch_id: str | None, *, include_items: bool = False) -> dict[s
                 for row in items
             ]
         return {"ok": True, "batch": summary}
+    finally:
+        connection.close()
+
+
+def _attach_batch_results(
+    connection: sqlite3.Connection, batch: sqlite3.Row, summary: dict[str, Any]
+) -> None:
+    """Collect deliverables only when returning to the caller, never on each wait tick."""
+    rows = connection.execute(
+        "SELECT i.*, t.remote_json FROM batch_items i LEFT JOIN tasks t "
+        "ON t.idempotency_key = i.idempotency_key WHERE i.batch_id = ? ORDER BY i.sequence",
+        (batch["id"],),
+    ).fetchall()
+    ledger_files: dict[str, list[str]] = {}
+    for asset in connection.execute(
+        "SELECT t.idempotency_key, a.path FROM assets a "
+        "JOIN tasks t ON t.local_id = a.local_task_id "
+        "JOIN batch_items i ON i.idempotency_key = t.idempotency_key "
+        "WHERE i.batch_id = ? AND a.state = 'available' ORDER BY i.sequence, a.remote_index",
+        (batch["id"],),
+    ):
+        ledger_files.setdefault(str(asset["idempotency_key"]), []).append(str(asset["path"]))
+    files: list[str] = []
+    images: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    download_errors: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    template_ratio = requested_aspect_ratio(_template(batch))
+    for row in rows:
+        identity = {"sequence": row["sequence"], "task_id": row["task_id"]}
+        error = json.loads(row["error_json"]) if row["error_json"] else None
+        if row["status"] in {"failed", "timeout", "canceled"}:
+            failures.append({**identity, "status": row["status"], "error": error})
+        stored_files = json.loads(row["files_json"]) if row["files_json"] else []
+        stored_files = list(dict.fromkeys([
+            *stored_files, *ledger_files.get(str(row["idempotency_key"]), []),
+        ]))
+        available = [path for path in stored_files if isinstance(path, str) and Path(path).is_file()]
+        if row["status"] == "succeeded" and (error or not _available_files(row["files_json"])):
+            download_errors.append({
+                **identity,
+                "error": error or {
+                    "code": "download_pending",
+                    "message": "图片已生成，但尚未完整下载；刷新或等待此批次即可继续下载，无需重新生成。",
+                },
+            })
+        elif error and row["status"] not in {"failed", "timeout", "canceled"}:
+            warnings.append({**identity, **error})
+        remote = json.loads(row["remote_json"]) if row["remote_json"] else {}
+        if remote.get("result_quality") == "degraded":
+            warnings.append({
+                **identity, "code": "result_degraded", "result_quality": "degraded",
+                "message": "此项结果被服务标记为降级，请检查是否符合需求。",
+            })
+        item_body = json.loads(row["body_json"])
+        ratio = (
+            template_ratio if item_body.get("_asx_inherit_template")
+            else requested_aspect_ratio(item_body)
+        )
+        new_files = [path for path in available if path not in seen]
+        seen.update(new_files)
+        files.extend(new_files)
+        details: dict[str, Any] = {}
+        if new_files:
+            attach_image_details(details, new_files, expected_ratio=ratio)
+        images.extend({**image, **identity} for image in details.get("images", []))
+        warnings.extend({**warning, **identity} for warning in details.get("warnings", []))
+    summary.update(files=files, images=images, failed_items=failures, download_errors=download_errors)
+    if download_errors:
+        warnings.append({
+            "code": "batch_download_incomplete",
+            "message": "部分图片尚未完整下载，请继续等待或刷新此批次；不要重新提交生成任务。",
+        })
+    if failures:
+        paused_notice = summary.get("action_required", "") if batch["status"] == "paused" else ""
+        summary["action_required"] = (
+            paused_notice + "查看 failed_items 中的失败、超时或取消项；重新生成可能产生费用"
+        )
+    if warnings:
+        summary.setdefault("warnings", []).extend(warnings)
+
+
+def _finish_batch_result(result: dict[str, Any]) -> dict[str, Any]:
+    connection = connect_db()
+    try:
+        batch = get_batch(connection, result["batch"]["id"])
+        _attach_batch_results(connection, batch, result["batch"])
+        return result
     finally:
         connection.close()
 
@@ -478,6 +585,8 @@ def poll_batch(
     batch_id: str | None,
     *,
     submissions_limit: int = DEFAULT_BATCH_SUBMISSIONS_PER_POLL,
+    _refresh_only: bool = False,
+    _include_results: bool = True,
 ) -> dict[str, Any]:
     if not 1 <= submissions_limit <= 50:
         raise AsxError("Submission limit must be between 1 and 50", code="invalid_submission_limit")
@@ -485,30 +594,36 @@ def poll_batch(
     try:
         batch = get_batch(connection, batch_id)
         summary = batch_summary(connection, batch)
-        if batch["status"] == "paused":
+        if batch["status"] == "paused" and not _refresh_only:
+            if _include_results:
+                _attach_batch_results(connection, batch, summary)
             return {"ok": not summary["partial"], "batch": summary, "paused": True}
         if (
             batch["status"] == "completed"
             or (batch["status"] == "canceled" and not batch["cancel_requested"])
         ) and not summary["pending_download"]:
+            if _include_results:
+                _attach_batch_results(connection, batch, summary)
             return {"ok": not summary["partial"], "batch": summary, "finished": True}
         stale_before = datetime.now(UTC) - timedelta(minutes=5)
         connection.execute(
             "UPDATE batch_items SET status = 'pending', updated_at = ? "
-            "WHERE batch_id = ? AND status = 'submitting' AND updated_at < ?",
-            (utc_now(), batch["id"], stale_before.isoformat(timespec="seconds")),
+            "WHERE batch_id = ? AND status = 'submitting' AND updated_at < ? AND ? = 0",
+            (utc_now(), batch["id"], stale_before.isoformat(timespec="seconds"), _refresh_only),
         )
         connection.commit()
 
         submitted = 0
         artifact_warnings: list[dict[str, Any]] = []
         asset_downloads: list[dict[str, Any]] = []
+        refresh_errors: list[dict[str, Any]] = []
         pending = connection.execute(
             "SELECT * FROM batch_items WHERE batch_id = ? AND status = 'pending' "
             "AND EXISTS (SELECT 1 FROM batches WHERE id = batch_id "
             "AND cancel_requested = 0 AND status = 'active') "
+            "AND ? = 0 "
             "ORDER BY sequence LIMIT ?",
-            (batch["id"], submissions_limit),
+            (batch["id"], _refresh_only, submissions_limit),
         ).fetchall()
         for item in pending:
             claim = connection.execute(
@@ -593,6 +708,7 @@ def poll_batch(
                     status=status if status in LOCAL_ITEM_STATUSES else "submitted",
                     task_id=submitted_task_id,
                     request_id=request_id,
+                    error=task.get("error") if status in {"failed", "timeout", "canceled"} else None,
                 )
                 connection.commit()
                 submitted += 1
@@ -619,7 +735,7 @@ def poll_batch(
         ).fetchall()
         downloaded = 0
         for item in remote_items:
-            if item["status"] == "succeeded" and _available_files(item["files_json"]):
+            if item["status"] == "succeeded" and _completed_item_files(item):
                 continue
             remote_task_id: str | None = item["task_id"]
             if not isinstance(remote_task_id, str):
@@ -629,6 +745,10 @@ def poll_batch(
             try:
                 task, request_id = client.task(remote_task_id)
             except AsxError as exc:
+                refresh_errors.append({
+                    "sequence": item["sequence"], "task_id": remote_task_id,
+                    "error": exc.payload().get("error"),
+                })
                 permanent = exc.http_status in {400, 404, 410, 422}
                 if state_task_row is not None and permanent:
                     update_state_task(
@@ -654,6 +774,13 @@ def poll_batch(
                 continue
             status = task.get("status")
             if not isinstance(status, str) or status not in KNOWN_STATUSES:
+                refresh_errors.append({
+                    "sequence": item["sequence"], "task_id": remote_task_id,
+                    "error": {
+                        "code": "invalid_task_status",
+                        "message": "Asynx returned an unknown task status",
+                    },
+                })
                 _update_item(
                     connection,
                     int(item["id"]),
@@ -687,8 +814,9 @@ def poll_batch(
                 connection.commit()
             files: list[str] | None = None
             if status == "succeeded":
-                files = _available_files(item["files_json"])
+                files = _completed_item_files(item)
                 if not files:
+                    completed_files: list[str] = []
                     try:
                         files = download_assets(
                             client,
@@ -697,14 +825,17 @@ def poll_batch(
                             prefix=f"{batch['id']}-{int(item['sequence']):06d}",
                             metrics=asset_downloads,
                             local_task_id=batch_local_task_id,
+                            completed_files=completed_files,
                         )
                         downloaded += len(files)
                     except AsxError as exc:
+                        downloaded += len(completed_files)
                         _update_item(
                             connection,
                             int(item["id"]),
                             status="succeeded",
                             request_id=request_id,
+                            files=completed_files,
                             error=exc.payload().get("error"),
                         )
                         connection.commit()
@@ -738,9 +869,23 @@ def poll_batch(
             result["asset_downloads_now"] = asset_downloads
         if artifact_warnings:
             result["warnings"] = artifact_warnings
-        return {"ok": not bool(result.get("partial")), "batch": result}
+        if refresh_errors:
+            result["refresh_errors"] = refresh_errors
+            result["next_action_args"] = ["batch", "status", batch["id"], "--refresh"]
+            result.setdefault("warnings", []).append({
+                "code": "batch_refresh_incomplete",
+                "message": "部分任务未能查询到最新状态，当前进度可能不是最新；可再次刷新此批次，无需重新提交。",
+            })
+        if _include_results:
+            _attach_batch_results(connection, get_batch(connection, batch["id"]), result)
+        return {"ok": not bool(result.get("partial") or refresh_errors), "batch": result}
     finally:
         connection.close()
+
+
+def refresh_batch(client: AsynxClient, batch_id: str | None) -> dict[str, Any]:
+    """Refresh already submitted tasks and downloads without advancing the queue."""
+    return poll_batch(client, batch_id, _refresh_only=True)
 
 
 def set_batch_paused(batch_id: str | None, paused: bool) -> dict[str, Any]:
@@ -835,13 +980,15 @@ def wait_for_batch(
         raise AsxError("Maximum wait time cannot be negative", code="invalid_max_wait")
     started = time.monotonic()
     while True:
-        result = poll_batch(client, batch_id)
+        result = poll_batch(client, batch_id, _include_results=False)
         batch = result["batch"]
+        if result.get("paused"):
+            return _finish_batch_result(result)
         if batch["status"] in {"completed", "canceled"} and not batch["pending_download"]:
-            return result
+            return _finish_batch_result(result)
         if max_wait and time.monotonic() - started >= max_wait:
             result["wait_timeout"] = True
-            return result
+            return _finish_batch_result(result)
         time.sleep(interval)
 
 
@@ -852,11 +999,25 @@ def execute_batch(
     if action == "list":
         return list_batches(), 0
     if action == "status":
+        refresh_warnings: list[dict[str, Any]] = []
+        refresh_errors: list[dict[str, Any]] = []
         if args.refresh:
             if client is None:
                 raise AsxError("查询批次需要 API Key", code="missing_api_key")
-            poll_batch(client, args.batch_id)
-        return batch_status(args.batch_id, include_items=args.items), 0
+            # Status reads may download existing results, but never create paid tasks.
+            refreshed = poll_batch(client, args.batch_id, _refresh_only=True, _include_results=False)
+            refresh_warnings = refreshed["batch"].get("warnings", [])
+            refresh_errors = refreshed["batch"].get("refresh_errors", [])
+        snapshot = batch_status(args.batch_id, include_items=args.items)
+        if refresh_warnings:
+            snapshot["batch"].setdefault("warnings", []).extend(refresh_warnings)
+        if refresh_errors:
+            snapshot["ok"] = False
+            snapshot["batch"]["refresh_errors"] = refresh_errors
+            snapshot["batch"]["next_action_args"] = [
+                "batch", "status", snapshot["batch"]["id"], "--refresh",
+            ]
+        return snapshot, 4 if refresh_errors else 0
     if action in {"pause", "resume"}:
         return set_batch_paused(args.batch_id, paused=action == "pause"), 0
     if client is None:

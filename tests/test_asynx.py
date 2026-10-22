@@ -304,7 +304,7 @@ class UnitTestCase(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(installed.returncode, 0, installed.stderr)
-            self.assertEqual(installed.stdout.strip(), "0.6.2")
+            self.assertEqual(installed.stdout.strip(), "0.6.3")
 
     def test_installer_can_install_both_agents_noninteractively(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -464,7 +464,7 @@ class UnitTestCase(unittest.TestCase):
         self.assertEqual(body["input"]["quality"], "auto")
         self.assertEqual(body["input"]["output_format"], "png")
 
-    def test_task_polling_starts_at_two_seconds_and_caps_at_four(self) -> None:
+    def test_task_polling_uses_initial_delay_then_four_seconds(self) -> None:
         class StatusClient:
             def __init__(self) -> None:
                 self.statuses = iter(["running", "delayed", "running", "succeeded"])
@@ -487,9 +487,10 @@ class UnitTestCase(unittest.TestCase):
                 },
                 "req_initial",
                 sleep=delays.append,
+                initial_delay=20.0,
             )
         self.assertEqual(result["status"], "succeeded")
-        self.assertEqual(delays, [2.0, 3.0, 4.0, 4.0])
+        self.assertEqual(delays, [20.0, 4.0, 4.0, 4.0])
 
     def test_batch_create_poll_and_append_are_resumable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

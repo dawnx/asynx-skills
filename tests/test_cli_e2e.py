@@ -51,6 +51,7 @@ class CLIE2ETestCase(unittest.TestCase):
                 "ASYNX_STATE_PATH": str(self.temp_path / "state.db"),
                 "ASYNX_CACHE_PATH": str(self.temp_path / "models.json"),
                 "ASYNX_UPDATE_CHECK": "off",
+                "ASYNX_INITIAL_POLL_DELAY_SECONDS": "0",
             }
         )
 
@@ -251,12 +252,65 @@ class CLIE2ETestCase(unittest.TestCase):
         self.assertEqual(waited["status"], "succeeded")
         self.assertEqual(len(waited["files"]), 1)
 
+    def test_edit_inherits_ratio_and_refresh_delivers_without_resubmission(self) -> None:
+        source = self.temp_path / "portrait.png"
+        Image.new("RGB", (120, 180), "red").save(source)
+        submitted = self.run_cli(
+            "edit", "--image", str(source), "--prompt", "换成蓝色", "--detach",
+            "--output-dir", str(self.temp_path / "edited"),
+        )
+        running = self.run_cli("task", "status", submitted["local_id"], "--refresh")
+        self.assertEqual(running["task"]["status"], "running")
+        completed = self.run_cli("task", "status", submitted["task_id"], "--refresh")
+        self.assertEqual(completed["task"]["download_status"], "downloaded")
+        self.assertEqual(len(completed["task"]["images"]), 1)
+        history = self.run_cli("history", "--limit", "10")["tasks"]
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["input"]["aspect_ratio"], "2:3")
+
+    def test_batch_refresh_does_not_advance_queue_and_returns_downloads(self) -> None:
+        created = self.run_cli(
+            "batch", "create", "--prompt", "仅查询已提交任务", "--total", "3", "--limit", "1",
+            "--output-dir", str(self.temp_path / "batch"),
+        )
+        batch_id = created["batch"]["id"]
+        self.run_cli("batch", "pause", batch_id)
+        refreshed = self.run_cli("batch", "status", batch_id, "--refresh")["batch"]
+        self.assertEqual(refreshed["status"], "paused")
+        self.assertEqual(refreshed["counts"].get("pending"), 2)
+        self.assertEqual(len(refreshed["files"]), 1)
+        self.assertEqual(len(refreshed["images"]), 1)
+        self.assertEqual(len(self.run_cli("history", "--limit", "10")["tasks"]), 1)
+
     def test_wait_reuses_deterministic_asset_path(self) -> None:
         generated = self.run_cli("generate", "--prompt", "重复等待测试")
         first = generated["files"]
         second = self.run_cli("wait", generated["task_id"])
         self.assertEqual(second["files"], first)
         self.assertEqual(len(list(Path(first[0]).parent.glob("*.png"))), 1)
+
+    def test_generation_edit_and_recovery_return_dimensions_without_extra_queries(self) -> None:
+        generated = self.run_cli(
+            "generate", "--prompt", "生成竖版图片", "--aspect-ratio", "2:3",
+            "--output-dir", str(self.temp_path / "outputs"),
+        )
+        edited = self.run_cli(
+            "edit", "--from-task", generated["task_id"], "--prompt", "换个颜色",
+            "--aspect-ratio", "2:3", "--output-dir", str(self.temp_path / "outputs"),
+        )
+        waited = self.run_cli("wait", edited["task_id"])
+        polled = self.run_cli("task", "poll", edited["task_id"])["tasks"][0]
+        for result in (generated, edited, waited, polled):
+            self.assertTrue(result["ok"])
+            self.assertNotIn("next_action", result)
+            self.assertEqual(result["images"][0]["path"], result["files"][0])
+            # The mock deliberately returns a square PNG for the portrait request.
+            self.assertEqual((result["images"][0]["width"], result["images"][0]["height"]), (1, 1))
+            self.assertEqual(result["images"][0]["format"], "png")
+            self.assertEqual(result["warnings"][0]["code"], "aspect_ratio_mismatch")
+            self.assertEqual(result["warnings"][0]["requested_aspect_ratio"], "2:3")
+        history = self.run_cli("history", "--limit", "10")
+        self.assertEqual(len(history["tasks"]), 2)
 
     def test_large_reference_warning_reaches_cli_output(self) -> None:
         source = self.temp_path / "noisy.png"

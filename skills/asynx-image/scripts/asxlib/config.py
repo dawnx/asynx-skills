@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import getpass
 import json
+import math
 import os
 import re
 import shlex
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .constants import DEFAULT_BASE_URL, VERSION
+from .constants import DEFAULT_BASE_URL, DEFAULT_INITIAL_POLL_DELAY_SECONDS, VERSION
 from .errors import AsxError
 from .output import log
 
@@ -91,6 +92,26 @@ def read_config_with_source() -> tuple[dict[str, Any], Path | None]:
 
 def read_config() -> dict[str, Any]:
     return read_config_with_source()[0]
+
+
+def initial_poll_delay_seconds() -> float:
+    raw = os.environ.get("ASYNX_INITIAL_POLL_DELAY_SECONDS")
+    value = raw if raw is not None else read_config().get(
+        "initial_poll_delay_seconds", DEFAULT_INITIAL_POLL_DELAY_SECONDS
+    )
+    try:
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise TypeError
+        delay = float(value)
+        if not math.isfinite(delay) or not 0 <= delay <= 300:
+            raise ValueError
+    except (TypeError, ValueError) as exc:
+        raise AsxError(
+            "首次查询等待时间必须为 0–300 秒的数字，请检查 initial_poll_delay_seconds "
+            "或 ASYNX_INITIAL_POLL_DELAY_SECONDS。",
+            code="invalid_poll_delay",
+        ) from exc
+    return delay
 
 
 def validate_base_url(value: str) -> str:
@@ -189,7 +210,9 @@ def _write_config(payload: dict[str, Any], path: Path) -> Path:
 
 
 def save_config(api_key: str, base_url: str) -> Path:
-    return _write_config({"api_key": api_key, "base_url": base_url}, config_path())
+    payload = read_config()
+    payload.update({"api_key": api_key, "base_url": base_url})
+    return _write_config(payload, config_path())
 
 
 def migrate_legacy_config() -> Path | None:

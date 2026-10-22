@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import timezone
 
-VERSION = "0.6.2"
+VERSION = "0.6.3"
 UTC = timezone.utc
 DEFAULT_BASE_URL = "https://asynx.llmapi.site/api"
 DEFAULT_MODEL = "gpt-image-2.5-sunburst"
@@ -12,6 +12,7 @@ DEFAULT_OUTPUT_DIR = "generated-images"
 DEFAULT_BATCH_SUBMISSIONS_PER_POLL = 4
 MODEL_CACHE_TTL_SECONDS = 300
 MAX_TASK_POLL_DELAY_SECONDS = 4.0
+DEFAULT_INITIAL_POLL_DELAY_SECONDS = 20.0
 MAX_BATCH_ITEMS = 1000
 REQUEST_TIMEOUT_SECONDS = 30
 DOWNLOAD_TIMEOUT_SECONDS = 120

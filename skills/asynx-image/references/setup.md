@@ -22,6 +22,8 @@ python3 "<skill-dir>/scripts/asynx.py" doctor --verify
 
 旧版曾按 `XDG_CONFIG_HOME` 保存配置，新版安装器和配置命令会尝试迁移到固定位置，并保留旧文件。不因发现多份文件就直接删除，按诊断显示的实际来源处理。
 
+新提交的单任务默认等待 20 秒后首次查询，之后约每 4 秒查询一次。需要调整时，可在上述配置文件中设置 `"initial_poll_delay_seconds": 20`（0–300 秒）；环境变量 `ASYNX_INITIAL_POLL_DELAY_SECONDS` 优先。普通调用无需传参。后台提交、已有任务查询/恢复及批次推进不额外增加这段等待；提交响应已是终态时也直接返回。
+
 ## 安装与卸载
 
 仓库地址为 [dawnx/asynx-skills](https://github.com/dawnx/asynx-skills)。以下命令只在克隆的仓库根目录运行，安装后的 Skill 包不包含安装器：

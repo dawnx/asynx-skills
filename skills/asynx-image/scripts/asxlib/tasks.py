@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .client import AsynxClient
+from .config import initial_poll_delay_seconds
 from .constants import (
     DEFAULT_OUTPUT_DIR,
     KNOWN_STATUSES,
@@ -22,6 +23,7 @@ from .constants import (
     UTC,
 )
 from .errors import AsxError
+from .image_results import attach_image_details, requested_aspect_ratio
 from .images import (
     build_task,
     cache_models,
@@ -76,6 +78,7 @@ def wait_for_terminal(
     request_id: str | None,
     *,
     sleep: Callable[[float], None] = time.sleep,
+    initial_delay: float = MAX_TASK_POLL_DELAY_SECONDS,
 ) -> tuple[dict[str, Any], str | None]:
     task_id = task.get("id")
     if not isinstance(task_id, str):
@@ -86,7 +89,7 @@ def wait_for_terminal(
         if deadline
         else datetime.now(UTC) + timedelta(minutes=20)
     )
-    delay = 2.0
+    delay = initial_delay
     last_status: str | None = None
     while True:
         status = task.get("status")
@@ -108,10 +111,19 @@ def wait_for_terminal(
                 exit_code=4,
                 task_id=task_id,
                 request_id=request_id,
+                details={"next_action_args": ["wait", task_id]},
             )
-        sleep(delay + random.uniform(0.0, delay * 0.15))
-        delay = min(delay * 1.5, MAX_TASK_POLL_DELAY_SECONDS)
-        task, request_id = client.task(task_id)
+        sleep(delay)
+        delay = MAX_TASK_POLL_DELAY_SECONDS + random.uniform(0.0, MAX_TASK_POLL_DELAY_SECONDS * 0.15)
+        try:
+            task, request_id = client.task(task_id)
+        except AsxError as exc:
+            exc.task_id = task_id
+            if exc.details is None:
+                exc.details = {}
+            if isinstance(exc.details, dict):
+                exc.details.setdefault("next_action_args", ["wait", task_id])
+            raise
 
 
 def _extension(content_type: str | None, data: bytes) -> str:
@@ -140,6 +152,7 @@ def download_assets(
     prefix: str | None = None,
     metrics: list[dict[str, Any]] | None = None,
     local_task_id: str | None = None,
+    completed_files: list[str] | None = None,
 ) -> list[str]:
     task_id = task.get("id")
     result = task.get("result")
@@ -152,7 +165,7 @@ def download_assets(
         )
     directory = Path(output_dir).expanduser().resolve()
     directory.mkdir(parents=True, exist_ok=True)
-    files: list[str] = []
+    files: list[str] = completed_files if completed_files is not None else []
     cached_assets: dict[int, dict[str, Any]] = {}
     if local_task_id:
         cache_connection = connect_ledger_db()
@@ -323,14 +336,21 @@ def _local_task_payload(row: dict[str, Any]) -> dict[str, Any]:
         for key in ("result_quality", "result", "deadline_at", "started_at", "finished_at"):
             if remote.get(key) is not None:
                 payload[key] = remote[key]
-    status = str(row.get("status"))
-    if status in {"intent", "submitting", "unknown"}:
-        payload["next_action"] = "task recover"
-    elif status in {"queued", "running", "delayed", "cancel_requested", "canceling"}:
-        payload["next_action"] = "task poll"
-    elif status == "succeeded":
-        payload["next_action"] = "asset list"
+    _task_followup(payload)
     return {key: value for key, value in payload.items() if value is not None}
+
+
+def _task_followup(payload: dict[str, Any]) -> None:
+    identifier = payload.get("local_id") or payload.get("task_id")
+    status = payload.get("status")
+    if not identifier or status in {"failed", "timeout", "canceled", "orphaned"}:
+        return
+    if status in {"intent", "submitting", "unknown"} and not payload.get("task_id"):
+        payload["next_action"] = "task recover"
+        payload["next_action_args"] = ["task", "recover", identifier]
+    else:
+        payload["next_action"] = "wait"
+        payload["next_action_args"] = ["wait", identifier]
 
 
 def _persist_task_intent(
@@ -419,9 +439,10 @@ def _remote_task_for_row(client: AsynxClient, row: dict[str, Any]) -> tuple[dict
     remote_id = row.get("remote_task_id")
     if not isinstance(remote_id, str):
         raise AsxError(
-            "本地 Task 尚未绑定远端 Task，请执行 task recover",
+            "该任务的提交尚未确认；恢复时请使用 task recover 并指定此任务 ID，不要重新生图。",
             code="task_not_submitted",
             task_id=str(row.get("local_id")),
+            details={"next_action_args": ["task", "recover", str(row["local_id"])]},
         )
     return client.task(remote_id)
 
@@ -471,42 +492,98 @@ def sync_local_task(
         connection.commit()
     finally:
         connection.close()
-    files: list[str] = []
-    if status == "succeeded" and download:
-        target_dir = output_dir or str(row.get("output_dir") or DEFAULT_OUTPUT_DIR)
-        files = download_assets(client, task, target_dir, local_task_id=local_id)
     connection = connect_ledger_db()
     try:
         current_row = get_ledger_task(connection, local_task_id=local_id) or row
     finally:
         connection.close()
+    if status == "succeeded" and download:
+        target_dir = output_dir or str(row.get("output_dir") or DEFAULT_OUTPUT_DIR)
+        delivered, code = _download_task_result(
+            client, task, request_id, target_dir, local_id=local_id,
+            expected_ratio=requested_aspect_ratio(row.get("request")),
+        )
+        for key in ("operation", "created_at", "updated_at", "last_polled"):
+            if current_row.get(key) is not None:
+                delivered[key] = current_row[key]
+        return delivered, code
     payload = _local_task_payload(current_row)
-    if files:
-        payload["files"] = files
     payload["request_id"] = request_id
     return payload, 0 if status not in {"failed", "timeout", "canceled"} else 4
 
 
-def recover_tasks(client: AsynxClient, *, limit: int = 50) -> dict[str, Any]:
+def refresh_task(client: AsynxClient, identifier: str) -> tuple[dict[str, Any], int]:
+    """Query one local or remote task, downloading results without submitting work."""
     connection = connect_ledger_db()
     try:
-        rows = list_ledger_tasks(connection, limit=limit)
+        row = get_ledger_task(connection, local_task_id=identifier) or get_ledger_task(
+            connection, remote_task_id=identifier
+        )
+    finally:
+        connection.close()
+    if row is not None:
+        if not row.get("remote_task_id"):
+            return _local_task_payload(row), 0
+        return sync_local_task(client, identifier)
+    if identifier.startswith("local_"):
+        raise AsxError(f"本地任务不存在：{identifier}", code="task_not_found")
+    task, request_id = client.task(identifier)
+    if task.get("status") == "succeeded":
+        return _download_task_result(client, task, request_id, DEFAULT_OUTPUT_DIR)
+    payload = task_payload(task, request_id)
+    return payload, 0 if payload["ok"] else 4
+
+
+def recover_tasks(
+    client: AsynxClient, identifier: str | None = None, *, limit: int = 50
+) -> dict[str, Any]:
+    connection = connect_ledger_db()
+    try:
+        rows = [_task_identifier_row(connection, identifier)] if identifier else list_ledger_tasks(connection, limit=limit)
     finally:
         connection.close()
     results: list[dict[str, Any]] = []
     for row in rows:
         status = str(row.get("status"))
-        if status in TERMINAL_STATUSES or status == "succeeded":
-            continue
+        if status in TERMINAL_STATUSES:
+            if not identifier:
+                continue
+            if status != "succeeded":
+                results.append(_local_task_payload(row))
+                continue
         try:
             if not row.get("remote_task_id"):
                 connection = connect_ledger_db()
                 try:
                     blocked = cancel_blocked_batch_intent(connection, str(row["idempotency_key"]))
+                    paused_batch = None
+                    if connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'batch_items'"
+                    ).fetchone():
+                        paused_batch = connection.execute(
+                            "SELECT b.id FROM batch_items i JOIN batches b ON b.id = i.batch_id "
+                            "WHERE i.idempotency_key = ? AND b.status = 'paused'",
+                            (row["idempotency_key"],),
+                        ).fetchone()
                     connection.commit()
                 finally:
                     connection.close()
                 if blocked:
+                    if identifier:
+                        results.append(_local_task_payload({**row, "status": "canceled"}))
+                    continue
+                if paused_batch is not None:
+                    paused = _local_task_payload(row)
+                    paused.update(
+                        paused=True,
+                        next_action="batch status",
+                        next_action_args=["batch", "status", paused_batch["id"], "--refresh"],
+                        warnings=[{
+                            "code": "batch_paused",
+                            "message": "此任务所属批次已暂停，未恢复提交；需要继续生成时请明确恢复该批次。",
+                        }],
+                    )
+                    results.append(paused)
                     continue
                 body = row.get("request")
                 if not isinstance(body, dict):
@@ -516,8 +593,8 @@ def recover_tasks(client: AsynxClient, *, limit: int = 50) -> dict[str, Any]:
             synced, _code = sync_local_task(client, str(row["local_id"]))
             results.append(synced)
         except AsxError as exc:
-            results.append({"ok": False, "local_id": row.get("local_id"), "error": exc.payload()["error"]})
-    return {"ok": all(item.get("ok", False) for item in results), "tasks": results}
+            results.append({**_local_task_payload(row), "ok": False, "error": exc.payload()["error"]})
+    return {"ok": all(item.get("ok", False) for item in results), "schema_version": 1, "tasks": results}
 
 
 def local_tasks_payload(*, status: str | None = None, limit: int = 50) -> dict[str, Any]:
@@ -648,8 +725,11 @@ def task_payload(
     *,
     files: list[str] | None = None,
     local_id: str | None = None,
+    expected_ratio: str | None = None,
 ) -> dict[str, Any]:
     status = task.get("status")
+    if not isinstance(status, str) or status not in KNOWN_STATUSES:
+        raise AsxError("Asynx 返回了未知的任务状态", code="invalid_task_status", task_id=task.get("id"))
     payload: dict[str, Any] = {
         "ok": status == "succeeded" or status not in TERMINAL_STATUSES,
         "task_id": task.get("id"),
@@ -663,15 +743,57 @@ def task_payload(
     }
     if files is not None:
         payload["files"] = files
+        attach_image_details(payload, files, expected_ratio=expected_ratio or requested_aspect_ratio(task))
     if status in TERMINAL_STATUSES and status != "succeeded":
         payload["ok"] = False
         payload["error"] = task.get("error") or {
             "code": f"task_{status}",
             "message": f"Task ended with status {status}",
         }
-    if status in {"queued", "running", "delayed", "canceling", "cancel_requested"}:
-        payload["next_action"] = "task poll"
+    if files is None:
+        _task_followup(payload)
     return {key: value for key, value in payload.items() if value is not None}
+
+
+def _download_task_result(
+    client: AsynxClient,
+    task: dict[str, Any],
+    request_id: str | None,
+    output_dir: str,
+    *,
+    local_id: str | None = None,
+    expected_ratio: str | None = None,
+    metrics: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], int]:
+    files: list[str] = []
+    download_error: dict[str, Any] | None = None
+    try:
+        download_assets(
+            client, task, output_dir, local_task_id=local_id,
+            metrics=metrics, completed_files=files,
+        )
+    except AsxError as exc:
+        download_error = exc.payload()["error"]
+    except (OSError, sqlite3.Error) as exc:
+        download_error = {"code": "output_write_failed", "message": f"结果保存失败：{exc}"}
+    payload = task_payload(
+        task, request_id, files=files, local_id=local_id, expected_ratio=expected_ratio,
+    )
+    payload["download_status"] = "failed" if download_error else "downloaded"
+    if not local_id and files:
+        warning = index_downloaded_artifacts(task, files)
+        if warning:
+            payload.setdefault("warnings", []).append(warning)
+    if download_error:
+        payload["ok"] = False
+        payload["error"] = {**download_error, "phase": "download"}
+        payload.setdefault("warnings", []).append({
+            "code": "download_incomplete",
+            "message": "图片已生成，但下载未完成；已保存的文件仍可使用。请继续下载原任务，不要重新生图。",
+        })
+        _task_followup(payload)
+        return payload, 4
+    return payload, 0
 
 
 def _update_local_snapshot(
@@ -713,6 +835,7 @@ def run_submission(
     client: AsynxClient, args: argparse.Namespace, task_type: str
 ) -> tuple[dict[str, Any], int]:
     started_at = time.perf_counter()
+    initial_delay = initial_poll_delay_seconds() if not args.detach else 0.0
     log(f"正在准备 {task_type} 请求")
     references = args.reference if task_type == "image.generate" else args.image
     from_task = getattr(args, "from_task", None)
@@ -772,6 +895,7 @@ def run_submission(
             exc.details = {}
         if isinstance(exc.details, dict):
             exc.details.setdefault("local_id", local_id)
+            exc.details.setdefault("next_action_args", ["task", "recover", local_id])
             exc.details.setdefault("idempotency_key", idempotency_key)
             if catalog_request_id:
                 exc.details.setdefault("catalog_request_id", catalog_request_id)
@@ -789,8 +913,11 @@ def run_submission(
         payload["timings"] = timings
         if input_warnings:
             payload["warnings"] = input_warnings
-        return payload, 0
-    task, request_id = wait_for_terminal(client, task, request_id)
+        return payload, 0 if payload["ok"] else 4
+    task, request_id = wait_for_terminal(
+        client, task, request_id,
+        initial_delay=MAX_TASK_POLL_DELAY_SECONDS if local_row.get("remote_task_id") else initial_delay,
+    )
     _update_local_snapshot(local_id, task, request_id)
     finished_at = time.perf_counter()
     timings["wait_seconds"] = round(finished_at - accepted_at, 3)
@@ -801,16 +928,16 @@ def run_submission(
             payload["warnings"] = input_warnings
         return payload, 4
     asset_metrics: list[dict[str, Any]] = []
-    files = download_assets(
-        client, task, output_dir, metrics=asset_metrics, local_task_id=local_id
+    payload, code = _download_task_result(
+        client, task, request_id, output_dir, metrics=asset_metrics, local_id=local_id,
+        expected_ratio=requested_aspect_ratio(body),
     )
     timings["download_seconds"] = round(time.perf_counter() - finished_at, 3)
     timings["asset_downloads"] = asset_metrics
-    payload = task_payload(task, request_id, files=files, local_id=local_id)
     payload["timings"] = timings
     if input_warnings:
-        payload["warnings"] = input_warnings
-    return payload, 0
+        payload.setdefault("warnings", []).extend(input_warnings)
+    return payload, code
 
 
 def models_payload(client: AsynxClient, operation: str) -> dict[str, Any]:
@@ -884,31 +1011,26 @@ def wait_and_download(
         )
         download_started = time.perf_counter()
         asset_metrics: list[dict[str, Any]] = []
-        files = download_assets(
-            client, task, target_dir, metrics=asset_metrics, local_task_id=local_id
+        payload, code = _download_task_result(
+            client, task, request_id, target_dir, metrics=asset_metrics, local_id=local_id,
+            expected_ratio=requested_aspect_ratio(local_row.get("request")),
         )
-        payload = task_payload(task, request_id, files=files, local_id=local_id)
         payload["timings"] = {
             "download_seconds": round(time.perf_counter() - download_started, 3),
             "asset_downloads": asset_metrics,
         }
-        artifact_warning = index_downloaded_artifacts(task, files)
-        if artifact_warning:
-            payload["warnings"] = [artifact_warning]
-        return payload, 0
+        return payload, code
     task, request_id = client.task(task_id)
     task, request_id = wait_for_terminal(client, task, request_id)
     if task.get("status") != "succeeded":
         return task_payload(task, request_id), 4
     download_started = time.perf_counter()
     remote_asset_metrics: list[dict[str, Any]] = []
-    files = download_assets(client, task, output_dir, metrics=remote_asset_metrics)
-    payload = task_payload(task, request_id, files=files)
+    payload, code = _download_task_result(
+        client, task, request_id, output_dir, metrics=remote_asset_metrics,
+    )
     payload["timings"] = {
         "download_seconds": round(time.perf_counter() - download_started, 3),
         "asset_downloads": remote_asset_metrics,
     }
-    artifact_warning = index_downloaded_artifacts(task, files)
-    if artifact_warning:
-        payload["warnings"] = [artifact_warning]
-    return payload, 0
+    return payload, code
