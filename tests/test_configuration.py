@@ -373,16 +373,31 @@ class ConfigurationCLITestCase(unittest.TestCase):
     def test_config_status_reports_environment_source_without_leaking_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
-            secret = "asx-environment-secret-123456789"
+            secret = "sk-environment-secret-123456789"
             environment = isolated_environment(home, ASYNX_API_KEY=secret)
             result, payload = run_cli(CLI, environment, "config", "status")
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(payload["configured"])
             self.assertEqual(payload["credential_source"], "environment")
+            self.assertTrue(payload["key_valid"])
             self.assertIn("ASYNX_API_KEY", payload["environment_overrides"])
             self.assertFalse(payload["config_exists"])
             self.assertNotIn(secret, json.dumps(payload))
+
+    def test_doctor_accepts_standard_and_legacy_api_keys(self) -> None:
+        for secret in ("sk-doctor-test", "asx-doctor-test"):
+            with self.subTest(secret=secret), tempfile.TemporaryDirectory() as directory:
+                result, payload = run_cli(
+                    CLI,
+                    isolated_environment(Path(directory), ASYNX_API_KEY=secret),
+                    "doctor",
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(payload["config"]["key_valid"])
+                credentials = next(item for item in payload["checks"] if item["name"] == "credentials")
+                self.assertTrue(credentials["ok"])
 
     def test_config_status_does_not_echo_credentials_from_invalid_base_url(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

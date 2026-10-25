@@ -183,7 +183,9 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     _add_local_image_commands(commands)
 
-    configure_command = commands.add_parser("configure", help="安全保存 Asynx API Key")
+    configure_command = commands.add_parser(
+        "configure", help="安全保存 LLMAPI API Key（旧版 asx- Key 仍可用）"
+    )
     configure_command.add_argument(
         "--base-url",
         help="使用自托管 Asynx 服务地址；使用公共服务时无需设置",
@@ -205,7 +207,7 @@ def parser() -> argparse.ArgumentParser:
     doctor_command.add_argument(
         "--verify",
         action="store_true",
-        help="连接 Asynx 验证凭据；默认诊断不会联网",
+        help="连接 Asynx 验证 LLMAPI API Key；默认诊断不会联网",
     )
     doctor_command.add_argument("--updates", action="store_true", help="同时检查 Skill 更新，使用 6 小时缓存")
     models = commands.add_parser("models", help="列出可用图片模型")

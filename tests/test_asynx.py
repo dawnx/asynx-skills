@@ -304,7 +304,7 @@ class UnitTestCase(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(installed.returncode, 0, installed.stderr)
-            self.assertEqual(installed.stdout.strip(), "0.6.3")
+            self.assertEqual(installed.stdout.strip(), "0.6.4")
 
     def test_installer_can_install_both_agents_noninteractively(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -348,10 +348,15 @@ class UnitTestCase(unittest.TestCase):
         self.assertEqual(command[-1], installer.PILLOW_REQUIREMENT)
         self.assertFalse(pip.call_args.kwargs["check"])
 
-    def test_api_key_rejects_provider_keys(self) -> None:
-        with self.assertRaises(AsxError) as caught:
-            config.validate_api_key("sk-provider-key")
-        self.assertEqual(caught.exception.code, "invalid_api_key")
+    def test_api_key_accepts_llmapi_and_legacy_keys(self) -> None:
+        self.assertEqual(config.validate_api_key("sk-provider-key"), "sk-provider-key")
+        self.assertEqual(config.validate_api_key("asx-legacy-key"), "asx-legacy-key")
+
+    def test_api_key_rejects_empty_and_whitespace_values(self) -> None:
+        for value in ("", "   ", "sk-provider key"):
+            with self.subTest(value=value), self.assertRaises(AsxError) as caught:
+                config.validate_api_key(value)
+            self.assertIn(caught.exception.code, {"missing_api_key", "invalid_api_key"})
 
     def test_default_model_fast_path_skips_catalog(self) -> None:
         class NoCatalogClient:

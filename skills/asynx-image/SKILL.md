@@ -58,7 +58,7 @@ python3 "<skill-dir>/scripts/asynx.py" wait "<task-id>"
 | 配置、连接异常、安装、升级或旧入口清理 | [配置与维护](references/setup.md) |
 | 用户要求模型推荐、Prompt 优化，或需梳理多图关系、复杂图文布局 | [模型与提示词](references/model-prompting.md)，读取本身不要求查模型目录 |
 
-缺少 API Key 时，让用户在自己的终端运行以下命令，不在对话中索取密钥；已配置却报错时按维护参考诊断：
+缺少 LLMAPI API Key 时，让用户在自己的终端运行以下命令，不在对话中索取密钥；旧版 `asx-` Key 仍可兼容。已配置却报错时按维护参考诊断：
 
 ```bash
 python3 "<skill-dir>/scripts/asynx.py" configure

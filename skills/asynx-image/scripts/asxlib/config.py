@@ -147,12 +147,12 @@ def _checked_config_paths() -> list[Path]:
 
 
 def validate_api_key(value: Any) -> str:
-    if not isinstance(value, str) or not value.strip() or any(char.isspace() for char in value):
+    if not isinstance(value, str) or not value.strip():
         canonical = config_path()
         command = _configure_command()
         checked = [str(path) for path in _checked_config_paths()]
         raise AsxError(
-            f"尚未配置有效的 Asynx API Key。配置文件：{canonical}。"
+            f"尚未配置有效的 LLMAPI API Key。配置文件：{canonical}。"
             f"请在自己的终端运行以下命令配置（不要将密钥发到对话中）：{command}",
             code="missing_api_key",
             details={
@@ -162,10 +162,9 @@ def validate_api_key(value: Any) -> str:
                 "credential_source": "none",
             },
         )
-    normalized = value.strip()
-    if not normalized.startswith("asx-"):
-        raise AsxError("API Key 格式不正确，应以 asx- 开头。请复制完整密钥后重试。", code="invalid_api_key")
-    return normalized
+    if any(char.isspace() for char in value):
+        raise AsxError("API Key 不能包含空白字符，请复制完整密钥后重试。", code="invalid_api_key")
+    return value
 
 
 def load_credentials() -> tuple[str, str]:
@@ -228,12 +227,12 @@ def migrate_legacy_config() -> Path | None:
 
 
 def _masked_key(value: Any) -> str | None:
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str) or not value.strip() or any(char.isspace() for char in value):
         return None
     normalized = value.strip()
-    if normalized.startswith("asx-"):
-        return f"asx-{normalized[4:8]}..." if len(normalized) > 8 else "asx-****"
-    return "<invalid>"
+    if len(normalized) <= 8:
+        return "<redacted>"
+    return f"{normalized[:4]}...{normalized[-4:]}"
 
 
 def config_status() -> dict[str, Any]:
@@ -265,7 +264,7 @@ def config_status() -> dict[str, Any]:
         "loaded_config_path": str(source) if source else None,
         "config_exists": canonical.exists(),
         "api_key_prefix": _masked_key(key),
-        "key_prefix_valid": isinstance(key, str) and key.strip().startswith("asx-"),
+        "key_valid": isinstance(key, str) and bool(key.strip()) and not any(char.isspace() for char in key),
         "base_url": normalized_base_url,
         "base_url_valid": base_url_valid,
         "skill_version": VERSION,
@@ -347,7 +346,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
     checks: list[dict[str, Any]] = [
         {
             "name": "credentials",
-            "ok": status["configured"] and status["key_prefix_valid"],
+            "ok": status["configured"] and status["key_valid"],
             "message": f"Credential source: {status['credential_source']}",
         },
         {"name": "config_permissions", "ok": permission_ok, "message": permission_message},
@@ -380,15 +379,15 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             {
                 "level": "error",
                 "code": "missing_api_key",
-                "message": f"Configure Asynx in a terminal with: {_configure_command()}",
+                "message": f"Configure an LLMAPI API Key in a terminal with: {_configure_command()}",
             }
         )
-    elif not status["key_prefix_valid"]:
+    elif not status["key_valid"]:
         issues.append(
             {
                 "level": "error",
                 "code": "invalid_api_key",
-                "message": "The configured API key does not start with 'asx-'",
+                "message": "The configured API key is empty or contains whitespace",
             }
         )
     if not status["base_url_valid"]:
@@ -497,7 +496,10 @@ def configure(base_url_override: str | None = None) -> dict[str, Any]:
     if base_url != DEFAULT_BASE_URL:
         log(f"服务地址：{base_url}")
     if base_url == DEFAULT_BASE_URL:
-        log("还没有 API Key？请前往 https://asynx.llmapi.site/api-keys 创建。")
+        log(
+            "还没有 API Key？请前往 https://llmapi.site/api-keys 创建 LLMAPI API Key。"
+            "旧版 asx- Key 仍可兼容。"
+        )
     log("输入时不会显示字符，这是正常的。")
     existing_key = current.get("api_key") if isinstance(current.get("api_key"), str) else ""
     label = "请输入 API Key（直接回车保留已保存的密钥）：" if existing_key else "请输入 API Key："
