@@ -15,6 +15,7 @@ python3 "<skill-dir>/scripts/asynx.py" doctor --verify
 - `config status` 查看配置来源与环境变量覆盖；需要进一步排查副本、权限等问题时用 `doctor`。两者默认不联网，不要读取配置原文输出完整密钥。
 - 用户要求验证连接或密钥时使用 `doctor --verify`。它只读模型目录；通过不代表已验证生图权限、余额或实际生成。网络错误不等于密钥错误。
 - 公共服务默认无需设置地址。用户明确使用自托管部署时才运行 `configure --base-url "https://asynx.example.com/api"`。
+- API Key 在 LLMAPI 控制台创建：<https://llmapi.site/api-keys>。当前接受任意非空且不含空白字符的 LLMAPI Key；旧版 `asx-` Key 仍可兼容。
 
 默认配置位置：macOS/Linux 为 `~/.config/asynx/config.json`，Windows 为 `%APPDATA%\Asynx\config.json`。同一系统用户的多份 Skill 默认共用；显式 `ASYNX_CONFIG_PATH` 可指定另一份文件。
 

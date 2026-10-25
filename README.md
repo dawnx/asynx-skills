@@ -4,7 +4,7 @@
 
 ## 安装
 
-需要 Python 3.10+。远程生图还需要 [Asynx API Key](https://asynx.llmapi.site/api-keys)；本地图片工具无需密钥。
+需要 Python 3.10+。远程生图还需要 [LLMAPI API Key](https://llmapi.site/api-keys)；本地图片工具无需密钥。旧版 `asx-` Key 仍可兼容。
 
 ```bash
 git clone https://github.com/dawnx/asynx-skills.git
