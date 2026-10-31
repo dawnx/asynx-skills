@@ -41,7 +41,7 @@ if __name__ == "__main__":
                         "code": "update_busy" if busy else "runtime_lock_error",
                         "message": "Skill 正在使用或更新中，请稍后重试"
                         if busy
-                        else f"无法访问 Skill 运行锁，请检查目录权限或重新运行安装器：{exc}",
+                        else "无法访问 Skill 安装目录，请检查目录权限，或通过原安装方式重新安装。",
                         "details": {"path": str(runtime_lock_path(root)), "errno": exc.errno},
                     },
                 },

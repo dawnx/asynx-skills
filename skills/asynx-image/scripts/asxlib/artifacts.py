@@ -58,7 +58,7 @@ def record_artifacts(
     created_at: str | None = None,
 ) -> list[dict[str, Any]]:
     if not task_id.strip():
-        raise AsxError("Artifact Task ID is empty", code="invalid_artifact")
+        raise AsxError("缺少任务 ID，无法保存结果记录。", code="invalid_artifact")
     timestamp = created_at or datetime.now(UTC).isoformat(timespec="seconds")
     records: list[dict[str, Any]] = []
     for position, value in enumerate(files):
@@ -137,14 +137,14 @@ def artifact_paths(connection: sqlite3.Connection, task_id: str) -> list[str]:
     rows = list_artifacts(connection, task_id=task_id, limit=1000)
     if not rows:
         raise AsxError(
-            f"No locally indexed artifacts for Task {task_id}",
+            f"本机没有任务 {task_id} 的结果文件记录，请先下载该任务的结果。",
             code="artifact_not_found",
             task_id=task_id,
         )
     missing = [str(row["path"]) for row in rows if row["missing"]]
     if missing:
         raise AsxError(
-            f"Indexed artifact file is missing: {missing[0]}",
+            f"结果文件已移动或删除，请提供新路径，或重新下载原任务结果：{missing[0]}",
             code="artifact_file_missing",
             task_id=task_id,
             details={"missing": missing},

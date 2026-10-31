@@ -38,7 +38,7 @@ def resolve_model(
     eligible = [model for model in models if task_type in model.get("task_types", [])]
     available = [str(model.get("name")) for model in eligible if isinstance(model.get("name"), str)]
     if not eligible:
-        raise AsxError(f"No image model supports {task_type}", code="no_compatible_model")
+        raise AsxError("当前没有可用于此操作的图片模型，请查看可用模型或稍后重试。", code="no_compatible_model")
     requested = selector or DEFAULT_MODEL
     exact = [
         model
@@ -57,13 +57,13 @@ def resolve_model(
         return matches[0]
     if len(matches) > 1:
         raise AsxError(
-            f"Model selector {requested!r} is ambiguous",
+            f"模型名称 {requested!r} 对应多个模型，请使用完整模型名称。",
             code="ambiguous_model",
             details={"matches": [str(model["name"]) for model in matches]},
         )
-    message = f"Model {requested!r} is unavailable"
+    message = f"模型 {requested!r} 当前不可用于此操作，请选择其他可用模型。"
     if selector is None:
-        message = f"Default model {DEFAULT_MODEL!r} is unavailable; choose a model explicitly"
+        message = f"默认模型 {DEFAULT_MODEL!r} 当前不可用，请指定其他可用模型。"
     raise AsxError(message, code="model_unavailable", details={"available": available})
 
 
@@ -125,21 +125,25 @@ def _looks_canonical(selector: str) -> bool:
 def capabilities(model: dict[str, Any]) -> dict[str, Any]:
     value = model.get("capabilities")
     if not isinstance(value, dict):
-        raise AsxError("Selected model has invalid capabilities", code="invalid_model_catalog")
+        raise AsxError("暂时无法读取所选模型的参数说明，请刷新模型列表或稍后重试。", code="invalid_model_catalog")
     return value
 
 
 def catalog_choice(value: str, allowed: Any, field: str) -> str:
     if not isinstance(allowed, list) or not all(isinstance(item, str) for item in allowed):
         raise AsxError(
-            f"Selected model has invalid {field} capabilities",
+            "暂时无法读取所选模型的参数说明，请刷新模型列表或稍后重试。",
             code="invalid_model_catalog",
         )
     for item in allowed:
         if item.casefold() == value.casefold():
             return cast(str, item)
+    label = {
+        "image_size": "图片尺寸", "aspect_ratio": "画幅比例", "output_format": "输出格式"
+    }.get(field, field)
+    options = "、".join(allowed) or "暂无可用选项"
     raise AsxError(
-        f"Selected model does not support {field}={value!r}",
+        f"所选模型不支持{label} {value!r}，支持的选项为：{options}。",
         code="unsupported_model_capability",
         details={"field": field, "requested": value, "allowed": allowed},
     )
@@ -152,17 +156,17 @@ def image_mime(data: bytes) -> str:
         return "image/jpeg"
     if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
-    raise AsxError("Local inputs must be PNG, JPEG, or WebP images", code="unsupported_image_format")
+    raise AsxError("输入图片需为 PNG、JPEG 或 WebP 格式，请转换格式后重试。", code="unsupported_image_format")
 
 
 def validate_idempotency_key(value: str) -> str:
     try:
         raw = value.encode("ascii")
     except UnicodeEncodeError as exc:
-        raise AsxError("Idempotency key must be printable ASCII", code="invalid_idempotency_key") from exc
+        raise AsxError("请求标识仅支持英文、数字和可见英文符号，请修改后重试。", code="invalid_idempotency_key") from exc
     if not 1 <= len(raw) <= 128 or any(byte < 0x21 or byte > 0x7E for byte in raw):
         raise AsxError(
-            "Idempotency key must contain 1-128 printable ASCII bytes without whitespace",
+            "请求标识需为 1–128 个英文、数字或可见英文符号，且不能包含空格或换行。",
             code="invalid_idempotency_key",
         )
     return value
@@ -198,8 +202,8 @@ def task_input_warnings(body: dict[str, Any]) -> list[dict[str, Any]]:
             "code": "large_reference_payload",
             "message": (
                 f"处理后的 {len(local_sources)} 张本地图片共 "
-                f"{image_bytes / 1024 / 1024:.2f} MiB，Base64 请求体为 "
-                f"{body_bytes / 1024 / 1024:.2f} MiB，弱网上传可能明显变慢"
+                f"{image_bytes / 1024 / 1024:.2f} MiB，实际上传数据约 "
+                f"{body_bytes / 1024 / 1024:.2f} MiB，网络较慢时上传可能需要更久。"
             ),
             "image_bytes": image_bytes,
             "request_body_bytes": body_bytes,
@@ -224,18 +228,18 @@ def build_task(
     keep_reference_original: bool = False,
 ) -> tuple[dict[str, Any], str, str | None]:
     if not 1 <= len(prompt) <= 32_000:
-        raise AsxError("Prompt must contain 1-32,000 characters", code="invalid_prompt")
+        raise AsxError("图片描述需为 1–32,000 个字符，请填写或缩短描述。", code="invalid_prompt")
     quality_value = quality.strip() if quality is not None else DEFAULT_QUALITY
     if not quality_value:
-        raise AsxError("Quality cannot be empty", code="invalid_quality")
+        raise AsxError("图片质量不能填写为空；无需指定时请省略该参数。", code="invalid_quality")
     if not 1 <= count <= 4:
-        raise AsxError("Count must be between 1 and 4", code="invalid_count")
+        raise AsxError("单次生成数量需为 1–4 张；更多图片请使用批量生成。", code="invalid_count")
     if task_type == "image.edit" and not references:
-        raise AsxError("Image editing requires at least one input image", code="missing_edit_image")
+        raise AsxError("编辑图片需要至少一张原图，请提供要修改的图片。", code="missing_edit_image")
 
     requested_model = (model_selector or DEFAULT_MODEL).strip()
     if not 1 <= len(requested_model) <= 160:
-        raise AsxError("Model name must contain 1-160 characters", code="invalid_model")
+        raise AsxError("模型名称需为 1–160 个字符，请检查名称。", code="invalid_model")
     request_id: str | None = None
     models = _cached_models(client.base_url)
     model: dict[str, Any] | None = None
@@ -275,13 +279,21 @@ def build_task(
         max_images = model_capabilities.get("max_images")
         if not isinstance(max_images, int) or count > max_images:
             raise AsxError(
-                f"Selected model supports at most {max_images} output images",
+                (
+                    f"所选模型单次最多生成 {max_images} 张图片，请减少数量或使用批量生成。"
+                    if isinstance(max_images, int)
+                    else "暂时无法确认所选模型的生成数量限制，请刷新模型列表或稍后重试。"
+                ),
                 code="unsupported_model_capability",
             )
         max_references = model_capabilities.get("max_reference_images")
         if not isinstance(max_references, int) or len(references) > max_references:
             raise AsxError(
-                f"Selected model supports at most {max_references} input images",
+                (
+                    f"所选模型最多接受 {max_references} 张输入图片，请减少参考图。"
+                    if isinstance(max_references, int)
+                    else "暂时无法确认所选模型的参考图数量限制，请刷新模型列表或稍后重试。"
+                ),
                 code="unsupported_model_capability",
             )
         if (
@@ -290,12 +302,12 @@ def build_task(
             and not model_capabilities.get("supports_reference_images")
         ):
             raise AsxError(
-                "Selected model does not support reference images",
+                "所选模型不支持参考图，请改用支持参考图的模型，或移除参考图。",
                 code="unsupported_model_capability",
             )
         if mask and not model_capabilities.get("supports_mask"):
             raise AsxError(
-                "Selected model does not support masks", code="unsupported_model_capability"
+                "所选模型不支持编辑蒙版（Mask），请改用支持蒙版的模型，或移除蒙版。", code="unsupported_model_capability"
             )
 
     source_sizes: list[tuple[int, int] | None] = []

@@ -129,7 +129,7 @@ def validate_base_url(value: str) -> str:
     local_hosts = {"localhost", "127.0.0.1", "::1"}
     if parts.scheme != "https" and parts.hostname not in local_hosts:
         raise AsxError(
-            "The Asynx Base URL must use HTTPS except for localhost development",
+            "服务地址必须使用 HTTPS；只有本机调试地址可以使用 HTTP。请检查服务地址配置。",
             code="insecure_base_url",
         )
     return candidate
@@ -172,7 +172,7 @@ def load_credentials() -> tuple[str, str]:
     api_key = os.environ.get("ASYNX_API_KEY") or config.get("api_key")
     base_url = os.environ.get("ASYNX_BASE_URL") or config.get("base_url") or DEFAULT_BASE_URL
     if not isinstance(base_url, str):
-        raise AsxError("The configured Asynx Base URL must be a string", code="invalid_base_url")
+        raise AsxError("服务地址配置格式不正确，请将 base_url 设置为完整的网址。", code="invalid_base_url")
     return validate_api_key(api_key), validate_base_url(base_url)
 
 
@@ -287,9 +287,8 @@ def legacy_installation_notice() -> dict[str, Any] | None:
         "code": "legacy_skill_installation",
         "paths": paths,
         "message": (
-            "发现可能残留的旧版 asx 入口。用户要求安装或升级时，先确认这些路径属于 Asynx，"
-            "等待旧版命令退出，将入口移到所有 Agent 的 skills 扫描目录之外备份，再继续安装。"
-            "符号链接只移动链接本身；保留密钥、任务数据和图片。其他情况下仅提醒用户，不移动文件。"
+            "发现旧版 asx 安装，可能导致 Agent 调用旧版本。可让 Agent 帮你确认并备份旧版后重新安装；"
+            "密钥、任务记录和已生成文件可继续保留。未确认前不会移动或删除旧版。"
         ),
     }
 
@@ -325,12 +324,16 @@ def _installation_info() -> list[dict[str, Any]]:
 
 def _permission_check(path: Path | None) -> tuple[bool, str]:
     if path is None or not path.exists():
-        return True, "No configuration file is currently loaded"
+        return True, "当前未加载配置文件。"
     if os.name == "nt":
-        return True, "File mode checks are not available on Windows"
+        return True, "Windows 不使用此项文件权限检查。"
     mode = stat.S_IMODE(path.stat().st_mode)
     secure = mode & (stat.S_IRWXG | stat.S_IRWXO) == 0
-    return secure, f"{path} mode is {mode:04o}"
+    return secure, (
+        "配置文件权限正常。"
+        if secure
+        else f"配置文件允许其他系统用户访问，请将权限限制为当前用户可读写：{path}"
+    )
 
 
 def doctor(*, verify: bool = False) -> dict[str, Any]:
@@ -347,30 +350,34 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
         {
             "name": "credentials",
             "ok": status["configured"] and status["key_valid"],
-            "message": f"Credential source: {status['credential_source']}",
+            "message": {
+                "environment": "正在使用环境变量中的 API Key。",
+                "config_file": "正在使用已保存的 API Key。",
+                "none": "尚未配置 API Key。",
+            }[status["credential_source"]],
         },
         {"name": "config_permissions", "ok": permission_ok, "message": permission_message},
         {
             "name": "base_url",
             "ok": status["base_url_valid"],
-            "message": "Base URL is valid"
+            "message": "服务地址格式正常。"
             if status["base_url_valid"]
-            else "Base URL is invalid",
+            else "服务地址格式不正确，请检查地址配置。",
         },
         {
             "name": "config_files",
             "ok": config_count_ok,
-            "message": "At most one configuration file was found"
+            "message": "配置文件检查正常。"
             if config_count_ok
-            else "Multiple configuration files were found",
+            else "发现多份配置文件，请确认当前使用的配置。",
             "details": {"paths": existing_configs},
         },
         {
             "name": "skill_versions",
             "ok": version_ok,
-            "message": "Installed skill copies use the same version"
+            "message": "已发现的 Skill 安装版本一致。"
             if version_ok
-            else "Installed skill copies use different versions",
+            else "发现不同版本的 Skill，请确认当前调用的位置。",
         },
     ]
     issues: list[dict[str, str]] = []
@@ -379,7 +386,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             {
                 "level": "error",
                 "code": "missing_api_key",
-                "message": f"Configure an LLMAPI API Key in a terminal with: {_configure_command()}",
+                "message": f"尚未配置 API Key，请在自己的终端运行：{_configure_command()}。不要将密钥发送到对话中。",
             }
         )
     elif not status["key_valid"]:
@@ -387,7 +394,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             {
                 "level": "error",
                 "code": "invalid_api_key",
-                "message": "The configured API key is empty or contains whitespace",
+                "message": "API Key 为空或包含空白字符，请在自己的终端重新配置完整密钥。",
             }
         )
     if not status["base_url_valid"]:
@@ -395,7 +402,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             {
                 "level": "error",
                 "code": "invalid_base_url",
-                "message": "The configured Asynx Base URL is invalid",
+                "message": "服务地址格式不正确，请检查 base_url 或 ASYNX_BASE_URL。",
             }
         )
     if not permission_ok:
@@ -411,7 +418,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             {
                 "level": "warning",
                 "code": "skill_version_mismatch",
-                "message": "Codex and Claude may be using different Asynx skill versions",
+                "message": "不同安装位置的 Asynx Skill 版本不一致，请确认当前使用的副本，并按需更新。",
             }
         )
     if not config_count_ok:
@@ -419,7 +426,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             {
                 "level": "warning",
                 "code": "multiple_config_files",
-                "message": "Multiple Asynx configuration files exist; the canonical file takes precedence",
+                "message": "发现多份 Asynx 配置文件，默认优先使用当前配置目录中的文件；请核对实际加载位置。",
             }
         )
 
@@ -442,17 +449,18 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             capable = [
                 model
                 for model in models
-                if {"image.generate", "image.edit"}.intersection(model.get("task_types", []))
+                if {"image.generate", "image.edit", "video.generate"}.intersection(model.get("task_types", []))
             ]
             if not capable:
                 raise AsxError(
-                    "No image models are currently available",
-                    code="no_image_models",
+                    "连接正常，但当前没有可用的图片或视频模型。请稍后重试或联系服务支持。",
+                    code="no_media_models",
                     exit_code=3,
                 )
             verification: dict[str, Any] = {
                 "ok": True,
-                "image_model_count": len(capable),
+                "image_model_count": sum(bool({"image.generate", "image.edit"}.intersection(model.get("task_types", []))) for model in capable),
+                "video_model_count": sum("video.generate" in model.get("task_types", []) for model in capable),
                 "request_id": request_id,
             }
         except AsxError as exc:
@@ -470,9 +478,9 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             {
                 "name": "api_verification",
                 "ok": verification["ok"],
-                "message": "Asynx API verification succeeded"
+                "message": "连接检查通过，已获取可用图片或视频模型；本次未提交生成任务。"
                 if verification["ok"]
-                else "Asynx API verification failed",
+                else "连接检查未通过，请查看具体问题并按提示处理。",
             }
         )
     return result
@@ -498,7 +506,6 @@ def configure(base_url_override: str | None = None) -> dict[str, Any]:
     if base_url == DEFAULT_BASE_URL:
         log(
             "还没有 API Key？请前往 https://llmapi.site/api-keys 创建 LLMAPI API Key。"
-            "旧版 asx- Key 仍可兼容。"
         )
     log("输入时不会显示字符，这是正常的。")
     existing_key = current.get("api_key") if isinstance(current.get("api_key"), str) else ""
@@ -512,7 +519,7 @@ def configure(base_url_override: str | None = None) -> dict[str, Any]:
     log("API Key 已保存，尚未验证连接。")
     if os.environ.get("ASYNX_API_KEY"):
         log("注意：当前设置了 ASYNX_API_KEY 环境变量，运行时会优先使用它；如需使用刚保存的密钥，请先移除或更新该环境变量。")
-    log("可回到 Agent 对话中继续请求生成图片，无需发送密钥。")
+    log("可回到 Agent 对话中继续使用 Asynx，无需发送密钥。")
     return {
         "ok": True,
         "configured": True,

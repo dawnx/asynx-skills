@@ -11,6 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import NoReturn
 
 ROOT = Path(__file__).resolve().parent
 SKILL_SOURCE = ROOT / "skills" / "asynx-image"
@@ -84,7 +85,7 @@ def _target_path(target: str, home: Path) -> Path:
         return home / ".agents" / "skills" / "asynx-image"
     if target == "claude":
         return home / ".claude" / "skills" / "asynx-image"
-    raise ValueError(f"Unknown target: {target}")
+    raise ValueError(f"不支持的安装目标：{target}。请使用 codex、claude 或 both。")
 
 
 def _install_dependencies(destination: Path) -> None:
@@ -121,7 +122,7 @@ def _check_legacy_installations(home: Path, targets: list[str]) -> None:
             "检测到旧版 asx，需移除旧入口后继续安装 asynx-image：\n"
             f"{paths}\n"
             "可以让 Agent 帮你确认并将旧入口移出 skills 目录备份，再继续安装。\n"
-            "请保留密钥、任务记录和生成图片，无需迁移这些数据，也不要仅将旧目录改名。"
+            "请保留密钥、任务记录和已生成文件，无需迁移这些数据，也不要仅将旧目录改名。"
         )
 
 
@@ -203,17 +204,22 @@ def _verify(client: ModuleType) -> int:
     capable = [
         model
         for model in models
-        if {"image.generate", "image.edit"}.intersection(model.get("task_types", []))
+        if {"image.generate", "image.edit", "video.generate"}.intersection(model.get("task_types", []))
     ]
     if not capable:
-        print("Skill 已安装，连接正常，但当前没有可用的图片模型。请稍后重试或联系服务管理员。", file=sys.stderr)
+        print("Skill 已安装，连接正常，但当前没有可用的图片或视频模型。请稍后重试或联系服务支持。", file=sys.stderr)
         return 1
-    print(f"连接检查通过，可访问 {len(capable)} 个图片模型。本次未生成图片，实际生图权限和余额尚未验证。")
+    print(f"连接检查通过，可访问 {len(capable)} 个图片或视频模型。本次未提交生成任务，实际生成权限和余额尚未验证。")
     return 0
 
 
+class _InstallerParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        self.exit(2, "安装参数无效，请运行 python3 install.py --help 查看用法。\n")
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="安装、更新或卸载 Asynx 图片 Agent Skill")
+    parser = _InstallerParser(description="安装、更新或卸载 Asynx Agent Skill")
     parser.add_argument(
         "--target",
         choices=("auto", "codex", "claude", "both"),
@@ -233,7 +239,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--uninstall",
         action="store_true",
-        help="卸载已安装的 skill，不删除 API Key 和批次数据",
+        help="卸载已安装的 Skill，保留密钥、任务记录和已生成文件",
     )
     parser.add_argument(
         "--yes",
@@ -254,12 +260,12 @@ def run(
     if args.uninstall:
         targets = _installed_targets(user_home) if args.target == "auto" else _resolve_targets(args.target, user_home)
         if not targets:
-            print("没有找到已安装的 asynx-image skill。")
+            print("没有找到由本安装器管理的 Asynx Skill。")
             return 0
         if not args.yes:
             if not sys.stdin.isatty():
-                raise RuntimeError("非交互卸载需要加 --yes")
-            print(f"将卸载：{', '.join(targets)}。API Key、批次数据库和生成图片不会删除。", file=sys.stderr)
+                raise RuntimeError("当前终端无法确认卸载。确认要卸载时，请在命令中添加 --yes；密钥、任务记录和已生成文件会保留。")
+            print(f"将卸载：{', '.join(targets)}。密钥、任务记录和已生成文件会保留。", file=sys.stderr)
             print("确认卸载？[y/N] ", end="", file=sys.stderr, flush=True)
             if input().strip().casefold() not in {"y", "yes"}:
                 print("已取消卸载。", file=sys.stderr)
@@ -316,7 +322,14 @@ def main() -> int:
         print("操作已中断。已完成的安装或配置步骤会保留，可以重新运行命令继续。", file=sys.stderr)
         return 130
     except Exception as exc:  # noqa: BLE001 - installer failures share one CLI error path
-        message = getattr(exc, "message", str(exc))
+        if isinstance(exc, PermissionError):
+            message = "没有权限访问安装目录或配置文件，请检查目录权限后重新运行命令。"
+        elif isinstance(exc, OSError):
+            message = "无法读写安装文件或启动所需程序，请检查目录权限、磁盘空间及 Python 和 pip 是否可用。"
+        elif isinstance(exc, RuntimeError) or hasattr(exc, "message"):
+            message = getattr(exc, "message", str(exc))
+        else:
+            message = "安装过程遇到异常，请重新运行安装命令；若仍失败，请联系支持人员。"
         print(f"未能完成操作：{message}", file=sys.stderr)
         return int(getattr(exc, "exit_code", 1))
 

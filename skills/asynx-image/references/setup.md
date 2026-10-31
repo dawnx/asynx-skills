@@ -35,11 +35,24 @@ python3 install.py --target both
 python3 install.py --uninstall
 ```
 
-支持 `--target codex|claude|both`；默认自动检测。Codex 安装到 `~/.agents/skills/asynx-image`，Claude Code 安装到 `~/.claude/skills/asynx-image`。Windows 使用用户主目录下相同相对路径。
+安装器支持 `--target codex|claude|both`；默认自动检测这两个目标。Codex 安装到 `~/.agents/skills/asynx-image`，Claude Code 安装到 `~/.claude/skills/asynx-image`。Windows 使用用户主目录下相同相对路径。其他支持 Agent Skills 并能运行 Python 脚本的 Agent 也可使用，按下节安装。
 
 `--skip-config` 跳过配置和验证；`--no-verify` 只跳过连接验证，不能据此宣称已可用。依赖安装在 Skill 的隔离目录中。非交互卸载需要 `--yes`，卸载保留密钥、任务记录和图片。
 
-其他 Agent 应使用其支持的 Skill 安装方式，不能假设本安装器能自动检测它们。
+### 其他 Agent
+
+通过所用 Agent 的 Skill 安装功能导入本仓库的 `skills/asynx-image`，或将整个目录放入其指定的 Skill 目录。保留 `SKILL.md`、`scripts`、`references` 等目录内容，安装后刷新 Skill 列表。
+
+在用户的终端中安装依赖并配置密钥，将 `<skill-dir>` 换成实际安装路径：
+
+```bash
+python3 -m pip install --target "<skill-dir>/scripts/vendor" "Pillow>=10.2,<13"
+python3 "<skill-dir>/scripts/asynx.py" configure
+```
+
+需要 Python 3.10+，并允许 Agent 执行脚本、访问所选素材与输出目录、连接 Asynx 服务。密钥由用户在终端输入。快捷调用和文件预览方式以宿主支持为准。
+
+通过其他工具安装的副本，使用原工具更新或卸载；手动安装的副本通过替换 Skill 目录更新，卸载时移除该目录，保留用户目录中的配置和任务数据。
 
 ## 更新与回滚
 

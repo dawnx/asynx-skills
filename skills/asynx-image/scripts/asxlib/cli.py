@@ -42,12 +42,25 @@ from .tasks import (
 )
 
 
+class _ArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        if message.startswith("the following arguments are required:"):
+            required = message.partition(":")[2].strip()
+            description = f"缺少必填参数或命令：{required}。"
+        elif message.startswith("argument "):
+            argument = message.partition(":")[0].removeprefix("argument ")
+            description = f"参数 {argument} 的值无效。"
+        else:
+            description = "命令中有无法识别或不完整的参数。"
+        raise AsxError(description + "请运行对应命令的 --help 查看用法。", code="invalid_arguments")
+
+
 def _add_image_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--model")
     parser.add_argument("--image-size")
     parser.add_argument("--aspect-ratio")
-    parser.add_argument("--quality", help=f"模型原生质量参数，默认 {DEFAULT_QUALITY}")
+    parser.add_argument("--quality", help=f"生成质量，默认 {DEFAULT_QUALITY}，可用值取决于模型")
     parser.add_argument("--count", type=int, default=1)
     parser.add_argument("--output-format", choices=("png", "jpeg", "webp"))
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
@@ -56,7 +69,7 @@ def _add_image_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--keep-reference-original",
         action="store_true",
-        help="保留符合限制的参考图原始编码，不进行 WebP 归一化",
+        help="保留参考图原始格式；文件仍需满足上传限制",
     )
 
 
@@ -68,21 +81,21 @@ def _add_batch_creation_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", help="模型名称或唯一片段")
     parser.add_argument("--image-size", help="图片尺寸档位")
     parser.add_argument("--aspect-ratio", help="宽高比")
-    parser.add_argument("--quality", help=f"模型原生质量参数，默认 {DEFAULT_QUALITY}")
-    parser.add_argument("--count", type=int, default=1, help="每个 Task 的输出数量")
+    parser.add_argument("--quality", help=f"生成质量，默认 {DEFAULT_QUALITY}，可用值取决于模型")
+    parser.add_argument("--count", type=int, default=1, help="每个图片任务的输出数量")
     parser.add_argument(
         "--output-format",
         choices=("png", "jpeg", "webp"),
         help="输出格式",
     )
-    parser.add_argument("--total", type=int, default=1, help="批次中的 Task 数量")
-    parser.add_argument("--output-dir", help="输出目录，默认 generated-images/<批次 ID>")
+    parser.add_argument("--total", type=int, default=1, help="批次中的任务数量")
+    parser.add_argument("--output-dir", help="结果保存目录，默认在 generated-images 下为批次创建子目录")
     parser.add_argument("--name", help="批次名称")
     parser.add_argument(
         "--limit",
         type=int,
         default=DEFAULT_BATCH_SUBMISSIONS_PER_POLL,
-        help="本次最多提交的 Task 数",
+        help="本次最多提交的任务数",
     )
     parser.add_argument("--reference", action="append", default=[], help="生成参考图，可重复")
     parser.add_argument("--image", action="append", default=[], help="编辑输入图，可重复")
@@ -91,19 +104,19 @@ def _add_batch_creation_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--keep-reference-original",
         action="store_true",
-        help="保留符合限制的参考图原始编码，不进行 WebP 归一化",
+        help="保留参考图原始格式；文件仍需满足上传限制",
     )
 
 
 def _add_batch_add_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("batch_id", nargs="?", help="批次 ID，省略时使用最近的活动批次")
-    parser.add_argument("--total", type=int, default=1, help="追加的 Task 数量")
+    parser.add_argument("--total", type=int, default=1, help="追加的任务数量")
     parser.add_argument("--prompt", help="新的提示词；省略时沿用批次设置")
     parser.add_argument("--model", help=argparse.SUPPRESS)
     parser.add_argument("--image-size", help="覆盖图片尺寸档位")
     parser.add_argument("--aspect-ratio", help="覆盖宽高比")
     parser.add_argument("--quality", help="覆盖质量参数")
-    parser.add_argument("--count", type=int, help="覆盖每个 Task 的输出数量")
+    parser.add_argument("--count", type=int, help="覆盖每个图片任务的输出数量")
     parser.add_argument(
         "--output-format", choices=("png", "jpeg", "webp"), help="覆盖输出格式"
     )
@@ -120,7 +133,7 @@ def _add_batch_add_options(parser: argparse.ArgumentParser) -> None:
         "--limit",
         type=int,
         default=DEFAULT_BATCH_SUBMISSIONS_PER_POLL,
-        help="本次最多提交的 Task 数",
+        help="本次最多提交的任务数",
     )
 
 
@@ -139,7 +152,7 @@ def _add_local_output_options(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_local_image_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    image = commands.add_parser("image", help="本地确定性图片处理，不调用 Asynx")
+    image = commands.add_parser("image", help="在本地处理图片，无需 API Key")
     image_commands = image.add_subparsers(dest="image_command", required=True)
 
     info = image_commands.add_parser("info", help="查看本地图片信息")
@@ -168,7 +181,7 @@ def _add_local_image_commands(commands: argparse._SubParsersAction[argparse.Argu
     slice_command.add_argument("--prefix", default="tile")
     slice_command.add_argument("--format", choices=("png", "jpeg", "jpg", "webp"))
 
-    sheet = image_commands.add_parser("contact-sheet", help="生成联系表")
+    sheet = image_commands.add_parser("contact-sheet", help="将多张图片排列为预览拼图")
     sheet.add_argument("inputs", nargs="+")
     _add_local_output_options(sheet)
     sheet.add_argument("--columns", type=int, default=4)
@@ -189,13 +202,13 @@ def _add_local_image_commands(commands: argparse._SubParsersAction[argparse.Argu
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="通过 Asynx 生成图片和视频")
+    result: argparse.ArgumentParser = _ArgumentParser(description="通过 Asynx 生成图片和视频")
     result.add_argument("--version", action="version", version=VERSION)
     commands = result.add_subparsers(dest="command", required=True)
     _add_local_image_commands(commands)
 
     configure_command = commands.add_parser(
-        "configure", help="安全保存 LLMAPI API Key（旧版 asx- Key 仍可用）"
+        "configure", help="在本机配置 API Key"
     )
     configure_command.add_argument(
         "--base-url",
@@ -204,10 +217,10 @@ def parser() -> argparse.ArgumentParser:
     update = commands.add_parser("update", help="检查、安装或回滚 Skill 更新")
     update_commands = update.add_subparsers(dest="update_command", required=True)
     update_commands.add_parser("status", help="离线查看版本、安装位置和最近检查结果")
-    check = update_commands.add_parser("check", help="检查稳定版更新，结果缓存 6 小时")
+    check = update_commands.add_parser("check", help="检查是否有新版")
     check.add_argument("--force", action="store_true", help="立即联网检查，忽略缓存")
     apply = update_commands.add_parser("apply", help="升级已安装副本，并保留旧版本备份")
-    apply.add_argument("--target", choices=("all", "current", "codex", "claude"), default="all", help="更新范围，默认所有已安装副本")
+    apply.add_argument("--target", choices=("all", "current", "codex", "claude"), default="all", help="更新范围，默认所有由本工具管理的已安装副本")
     apply.add_argument("--force", action="store_true", help="备份后覆盖安装目录中的本地改动")
     update_commands.add_parser("rollback", help="恢复最近一次更新的全部副本，或恢复中断的更新")
     config = commands.add_parser("config", help="查看本机 Asynx 配置")
@@ -218,10 +231,10 @@ def parser() -> argparse.ArgumentParser:
     doctor_command.add_argument(
         "--verify",
         action="store_true",
-        help="连接 Asynx 验证 LLMAPI API Key；默认诊断不会联网",
+        help="检查模型列表连接与密钥；不提交生成任务",
     )
-    doctor_command.add_argument("--updates", action="store_true", help="同时检查 Skill 更新，使用 6 小时缓存")
-    models = commands.add_parser("models", help="列出可用图片模型")
+    doctor_command.add_argument("--updates", action="store_true", help="同时检查 Skill 更新")
+    models = commands.add_parser("models", help="列出可用模型，默认查看图片模型")
     models.add_argument("--operation", choices=("all", "generate", "edit"), default="all")
     models.add_argument("--modality", choices=("image", "video", "all"), default="image")
 
@@ -232,15 +245,15 @@ def parser() -> argparse.ArgumentParser:
     edit = commands.add_parser("edit", help="编辑已有图片")
     _add_image_options(edit)
     edit.add_argument("--image", action="append", default=[])
-    edit.add_argument("--from-task", help="使用本机索引中指定 Task 的已下载图片")
+    edit.add_argument("--from-task", help="使用本机任务记录中指定任务的已下载图片")
     edit.add_argument("--mask")
 
-    video = commands.add_parser("video", help="通过 MiniMax-H3 生成视频")
+    video = commands.add_parser("video", help="生成视频")
     video_commands = video.add_subparsers(dest="video_command", required=True)
     video_generate = video_commands.add_parser("generate", help="生成并下载视频")
     _add_video_input_options(video_generate)
     video_generate.add_argument("--prompt", required=True)
-    video_generate.add_argument("--model", help="当前仅支持 MiniMax-H3")
+    video_generate.add_argument("--model", help="视频模型名称，省略时使用默认模型")
     video_generate.add_argument("--aspect-ratio", help="画幅比例，默认 16:9")
     video_generate.add_argument("--reference", action="append", default=[], help="参考图片路径或 URL，可重复")
     video_generate.add_argument("--from-task", help="将指定任务的单张本地图片用作首帧")
@@ -248,20 +261,20 @@ def parser() -> argparse.ArgumentParser:
     video_generate.add_argument("--idempotency-key")
     video_generate.add_argument("--detach", action="store_true")
 
-    status = commands.add_parser("status", help="查询一个 Task")
+    status = commands.add_parser("status", help="查询一个任务的最新状态")
     status.add_argument("task_id")
 
-    wait = commands.add_parser("wait", help="等待并下载一个 Task")
+    wait = commands.add_parser("wait", help="等待任务完成并下载结果")
     wait.add_argument("task_id")
     wait.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
 
-    history = commands.add_parser("history", help="查询历史 Task")
+    history = commands.add_parser("history", help="查询历史任务")
     history.add_argument("--status", choices=tuple(sorted(KNOWN_STATUSES)), help="按状态筛选")
     history.add_argument("--model", help="按模型筛选")
     history.add_argument("--limit", type=int, default=20, help="返回数量")
 
     recent = commands.add_parser("recent", help="查询本机已下载的生成结果")
-    recent.add_argument("--query", help="按 Task ID、Prompt、模型或文件名筛选")
+    recent.add_argument("--query", help="按任务 ID、提示词、模型或文件名筛选")
     recent.add_argument("--limit", type=int, default=20, help="返回数量")
     recent.add_argument("--latest", action="store_true", help="只返回最近一个结果")
     recent.add_argument("--modality", choices=("image", "video"), help="仅返回图片或视频")
@@ -271,7 +284,7 @@ def parser() -> argparse.ArgumentParser:
     task_list = task_commands.add_parser("list", help="列出本地任务")
     task_list.add_argument("--status", help="按本地状态筛选")
     task_list.add_argument("--limit", type=int, default=50, help="返回数量")
-    task_status = task_commands.add_parser("status", help="查看本地任务快照")
+    task_status = task_commands.add_parser("status", help="查看本地保存的任务状态")
     task_status.add_argument("task_id")
     task_status.add_argument("--refresh", action="store_true", help="查询最新进度并下载已完成结果，不提交任务")
     task_poll = task_commands.add_parser("poll", help="刷新一个或全部本地任务")
@@ -283,28 +296,28 @@ def parser() -> argparse.ArgumentParser:
     task_cancel = task_commands.add_parser("cancel", help="请求取消远端任务")
     task_cancel.add_argument("task_id")
 
-    asset = commands.add_parser("asset", help="查看本地 Asset")
+    asset = commands.add_parser("asset", help="查看本地结果文件")
     asset_commands = asset.add_subparsers(dest="asset_command", required=True)
-    asset_list = asset_commands.add_parser("list", help="列出任务输出 Asset")
+    asset_list = asset_commands.add_parser("list", help="列出任务的结果文件")
     asset_list.add_argument("task_id")
 
     batch = commands.add_parser("batch", help="管理可恢复的本地批次")
     batch_commands = batch.add_subparsers(dest="batch_command", required=True)
     create = batch_commands.add_parser("create", help="创建并启动批次")
     _add_batch_creation_options(create)
-    add = batch_commands.add_parser("add", help="向批次追加 Task")
+    add = batch_commands.add_parser("add", help="向批次追加任务")
     _add_batch_add_options(add)
 
-    poll = batch_commands.add_parser("poll", help="推进一次批次轮询")
+    poll = batch_commands.add_parser("poll", help="刷新批次进度并提交待生成项目")
     poll.add_argument("batch_id", nargs="?", help="批次 ID，省略时使用最近的活动批次")
     poll.add_argument(
         "--limit",
         type=int,
         default=DEFAULT_BATCH_SUBMISSIONS_PER_POLL,
-        help="本次最多提交的 Task 数",
+        help="本次最多提交的任务数",
     )
 
-    batch_wait = batch_commands.add_parser("wait", help="持续轮询批次直到完成")
+    batch_wait = batch_commands.add_parser("wait", help="继续提交批次项目并等待结果")
     batch_wait.add_argument("batch_id", nargs="?", help="批次 ID，省略时使用最近的活动批次")
     batch_wait.add_argument("--interval", type=float, default=10, help="轮询间隔秒数")
     batch_wait.add_argument("--max-wait", type=float, default=0, help="最多等待秒数，0 表示不限制")
@@ -312,14 +325,14 @@ def parser() -> argparse.ArgumentParser:
     batch_status = batch_commands.add_parser("status", help="查询批次状态")
     batch_status.add_argument("batch_id", nargs="?", help="批次 ID，省略时使用最近的活动批次")
     batch_status.add_argument("--refresh", action="store_true", help="刷新已提交任务并下载结果，不提交新任务")
-    batch_status.add_argument("--items", action="store_true", help="列出每个 Task")
+    batch_status.add_argument("--items", action="store_true", help="列出每个任务")
     batch_commands.add_parser("list", help="列出本机批次")
 
-    pause = batch_commands.add_parser("pause", help="暂停提交新 Task")
+    pause = batch_commands.add_parser("pause", help="暂停提交新任务，已提交任务继续执行")
     pause.add_argument("batch_id", nargs="?", help="批次 ID，省略时使用最近的活动批次")
     resume = batch_commands.add_parser("resume", help="恢复批次提交")
     resume.add_argument("batch_id", nargs="?", help="批次 ID，省略时使用最近的活动批次")
-    cancel = batch_commands.add_parser("cancel", help="取消批次中的 Task")
+    cancel = batch_commands.add_parser("cancel", help="请求取消批次任务，已开始的任务可能产生费用")
     cancel.add_argument("batch_id", nargs="?", help="批次 ID，省略时使用最近的活动批次")
     return result
 
@@ -420,17 +433,17 @@ def main(*, locked_root: Path | None = None) -> NoReturn:
     except KeyboardInterrupt:
         payload, exit_code = {
             "ok": False,
-            "error": {"code": "interrupted", "message": "Operation interrupted"},
+            "error": {"code": "interrupted", "message": "本次操作已中断，已提交的任务不会因此取消。可查询或恢复原任务，避免重复生成。"},
         }, 130
-    except (OSError, sqlite3.Error) as exc:
+    except (OSError, sqlite3.Error):
         payload, exit_code = AsxError(
-            f"本地状态读写失败：{exc}",
+            "无法读写本地文件或任务记录，请检查目录权限和剩余空间；若已提交任务，请先确认原任务状态。",
             code="state_io_error",
             exit_code=2,
         ).payload(), 2
-    except Exception as exc:  # noqa: BLE001 - CLI must always emit one JSON object
+    except Exception:  # noqa: BLE001 - CLI must always emit one JSON object
         payload, exit_code = AsxError(
-            f"操作失败：{exc}", code="unexpected_error", exit_code=2
+            "操作遇到异常，暂时无法完成。请保留任务 ID 并检查 Skill 版本，必要时联系支持；若已提交任务，请勿直接重复生成。", code="unexpected_error", exit_code=2
         ).payload(), 2
     legacy_notice = legacy_installation_notice()
     if legacy_notice:

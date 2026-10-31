@@ -1,10 +1,14 @@
 # Asynx Agent Skills
 
-在 Codex 或 Claude Code 中用自然语言生成、编辑图片，也可以批量追加任务、查询进度和继续上次的工作。支持本地缩放、裁剪、切图和格式转换。
+在支持 Agent Skills、能够运行 Python 脚本的 Agent 中，用自然语言生成图片、修改图片或创作视频。支持参考图、批量生成、进度查询和中断后继续，也可以在本地缩放、裁剪、切图和转换格式。
 
 ## 安装
 
-需要 Python 3.10+。远程生图还需要 [LLMAPI API Key](https://llmapi.site/api-keys)；本地图片工具无需密钥。旧版 `asx-` Key 仍可兼容。
+需要 Python 3.10+。生成图片或视频需要 [LLMAPI API Key](https://llmapi.site/api-keys)，本地图片处理无需密钥。
+
+### Codex / Claude Code
+
+可使用仓库自带的安装器：
 
 ```bash
 git clone https://github.com/dawnx/asynx-skills.git
@@ -14,9 +18,9 @@ python3 install.py
 
 Windows 将最后一行换成 `py install.py`。
 
-安装器会检测 Codex 和 Claude Code。需要指定目标时，使用 `--target codex`、`--target claude` 或 `--target both`。图片依赖安装在 Skill 内，不修改全局 Python 环境。
+安装器会检测 Codex 和 Claude Code，并引导你输入 API Key。请在终端中输入密钥，不要发送到聊天中。
 
-首次安装会引导输入 API Key，输入时不显示字符；请勿把密钥发到对话中。安装器随后检查模型目录连接，不生成图片；连接通过不代表已经验证实际生图权限和余额。再次安装会复用已有密钥。
+指定安装到某个 Agent 时，可使用 `python3 install.py --target codex`、`--target claude` 或 `--target both`。
 
 默认安装位置：
 
@@ -25,80 +29,67 @@ Windows 将最后一行换成 `py install.py`。
 | Codex | `.agents/skills/asynx-image` |
 | Claude Code | `.claude/skills/asynx-image` |
 
+### 其他 Agent
+
+使用所用 Agent 的 Skill 导入或安装功能，选择本仓库的 `skills/asynx-image` 目录，并保留其中的脚本和参考文档。也可以将整个目录放入该 Agent 的 Skill 目录，具体位置以其说明为准。
+
+运行时需要 Python 3.10+、Pillow，以及访问 Asynx 服务的网络权限。依赖安装和密钥配置见[其他 Agent 安装](skills/asynx-image/references/setup.md#其他-agent)。
+
 ## 开始使用
 
-重新打开会话或刷新 Skill 列表，然后直接描述需求：
+安装后，在对话中描述需求即可：
 
 - “生成一张机械键盘的产品图，横版。”
 - “把刚才那张键盘外壳换成深绿色，其他保持不变。”
-- “参考这张图片的风格，生成一张竖版人物卡牌。”
 - “把这张产品图作为首帧，生成 5 秒的环绕展示视频，伴随轻柔音乐。”
-- “批量生成 12 张，再追加 5 张。”
-- “查看刚才的任务进度。”
+- “生成 12 张不同配色的键盘图，先提交，稍后我再查进度。”
+- “继续上次的任务，完成后把结果给我。”
 - “把这张图片裁成正方形，再转成 WebP。”
 
-也可以显式调用：Codex 使用 `$asynx-image`，Claude Code 使用 `/asynx-image`。能否自动选中 Skill 取决于 Agent 的设置和请求内容。
+也可以明确告诉 Agent“使用 Asynx 生成图片”。快捷调用方式取决于所用 Agent，例如 Codex 输入 `$asynx-image`，Claude Code 输入 `/asynx-image`。安装后未显示时，重新打开会话或刷新 Skill 列表。
 
-单张生成默认等待并展示结果；要求后台提交时，会先返回受理状态。批量任务先返回进度，之后可查询、继续推进或要求等待完成。已提交的任务在远端执行；尚未提交的批次项目需要 Agent 继续轮询，Skill 本身不提供常驻后台服务。
+单个任务默认等待完成并交付文件；想稍后查看，可以说“先提交”。批量任务可以查询进度、暂停或继续；离开对话后，已提交的任务继续生成，剩余项目可在回来后让 Agent 继续提交。
 
-未指定模型时使用脚本固定默认模型，不随机切换。可以明确指定模型、比例或质量；新图用途明确时 Agent 会选择合适画幅，编辑本地图片默认保持原图比例。参考图默认由脚本压缩后上传，要求保留原始编码时请明确说明。
+图片支持指定模型、比例和质量，修改本地图片时默认保持原图比例。本地参考图会适当压缩后上传，需保留原始编码时请明确说明。
 
-查询进度不会提交新的生图任务。中断后可以继续原任务，下载失败也可单独补下载；批次结果会列出已完成图片和失败项目，不需要重新生成整个批次。
+视频可以指定时长、画幅、分辨率，并在描述中提出对白、音效或配乐要求。支持图片和首尾帧输入；视频、音频参考需提供 URL。详细参数见[视频操作](skills/asynx-image/references/video.md)。
 
-视频默认使用 MiniMax-H3、5 秒、720p、16:9，用户可指定时长、比例和分辨率（720p、1080p 或 2K）。对白、音效和配乐要求直接写在描述里。支持本地图片、首尾帧及 URL 视频/音频参考，暂不支持本地视频/音频上传或独立视频编辑；详见[视频操作](skills/asynx-image/references/video.md)。名称和安装目录仍为 `asynx-image`，无需迁移密钥或任务记录。
+等待中断或下载失败时，可以继续获取原结果，无需重新生成。取消已开始的任务仍可能产生费用。
 
 ## 密钥与配置
 
-配置保存在当前系统用户目录中，多份 Skill 默认共用：
+密钥保存在本机用户目录，多份安装共用配置：
 
 | 系统 | 配置文件 |
 | --- | --- |
 | macOS / Linux | `~/.config/asynx/config.json` |
 | Windows | `%APPDATA%\Asynx\config.json` |
 
-更换密钥时，在自己的终端运行已安装脚本。macOS / Linux 的 Codex 示例：
+更换密钥时，可以让 Agent 提供配置指引，再到自己的终端输入。macOS / Linux 的 Codex 示例：
 
 ```bash
 python3 ~/.agents/skills/asynx-image/scripts/asynx.py configure
 ```
 
-Claude Code 将路径中的 `.agents` 换成 `.claude`。Windows PowerShell 的 Codex 示例：
-
-```powershell
-py "$env:USERPROFILE\.agents\skills\asynx-image\scripts\asynx.py" configure
-```
-
-“已保存”不等于“连接已验证”，完成后可以回到对话继续使用。长期使用建议保存配置；`ASYNX_API_KEY` 环境变量会覆盖文件中的密钥，普通终端中的临时设置不会在重启后保留。
-
-遇到配置异常，可以让 Agent “检查 Asynx 配置”；详见[配置与排障](skills/asynx-image/references/setup.md#配置与诊断)。
+其他安装方式请换成实际安装目录中的 `scripts/asynx.py` 路径。Windows 命令、环境变量和连接排障见[配置与维护](skills/asynx-image/references/setup.md)。遇到问题也可以直接说“检查 Asynx 配置”，无需把密钥发给 Agent。
 
 ## 更新与卸载
 
-可以让 Agent 检查版本或执行升级。任务成功后最多每 6 小时联网检查一次稳定版，其余使用缓存；发现新版会继续提醒，只有你要求升级时才替换文件。更新服务不可用不会阻止使用当前版本。
+可以直接告诉 Agent：“检查 Asynx Skill 更新”或“升级 Asynx Skill”。有新版时会提示，只有你要求升级才会安装。升级保留密钥、任务记录和已生成文件。通过其他工具安装的副本，可使用原工具更新。手动更新、回滚和旧版安装处理见[更新说明](skills/asynx-image/references/setup.md#更新与回滚)。
 
-手动检查和升级，以 macOS / Linux 的 Codex 安装为例：
-
-```bash
-python3 ~/.agents/skills/asynx-image/scripts/asynx.py update check
-python3 ~/.agents/skills/asynx-image/scripts/asynx.py update apply
-```
-
-更新保留密钥、任务记录和图片。存在本地修改时会停止；不要未经检查强制覆盖。回滚、其他目标和关闭提示见[更新说明](skills/asynx-image/references/setup.md#更新与回滚)。
-
-旧版 `asx` 需要重新安装，不能只改目录名。可让 Agent 备份旧入口后安装新版，密钥和任务记录无需迁移；见[旧版迁移](skills/asynx-image/references/setup.md#旧版-asx-迁移)。
-
-卸载时，在克隆的仓库根目录运行：
+使用本仓库安装器安装的副本，卸载时在克隆的仓库根目录运行：
 
 ```bash
 python3 install.py --uninstall
 ```
 
-Windows 使用 `py`；非交互卸载加 `--yes`。卸载保留密钥、任务记录和生成图片。
+Windows 使用 `py install.py --uninstall`。其他方式安装的副本，通过对应 Agent 的 Skill 管理功能卸载，或移除其安装目录。卸载保留密钥、任务记录和已生成文件。
 
 ## 更多用法
 
 - [操作参考](skills/asynx-image/references/operations.md)：批量任务、本地图片工具、输入限制和中断恢复。
+- [视频操作](skills/asynx-image/references/video.md)：视频参数、参考素材和视频批次。
 - [模型与提示词](skills/asynx-image/references/model-prompting.md)：复杂编辑、多参考图及图文布局的提示词建议。
 - [配置与维护](skills/asynx-image/references/setup.md)：自托管地址、诊断、更新和迁移。
 
-需要自定义工作台或业务流程时，可以调用 Asynx 公开 API，或在自己的后端封装脚本。使用自己的数据库，不直接操作 Skill 的内部状态文件，也不要将密钥暴露到浏览器或项目中。CLI 的结构化输出供程序使用，普通对话无需阅读这些字段。
+需要接入自己的工作流或工作台时，可以调用公开 API 或封装脚本命令。请通过公开接口管理任务，不直接操作 Skill 的数据库；密钥由可信后端或本地程序保管。

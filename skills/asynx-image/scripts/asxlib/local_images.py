@@ -27,7 +27,7 @@ def _pillow() -> tuple[Any, Any, Any, Any, Any]:
         unidentified = importlib.import_module("PIL").UnidentifiedImageError
     except (ImportError, AttributeError) as exc:
         raise AsxError(
-            "本地图片处理需要 Pillow；请重新运行 install.py 安装运行依赖",
+            "缺少图片处理依赖 Pillow，请按安装说明补装依赖后重试。",
             code="pillow_not_installed",
         ) from exc
     image.MAX_IMAGE_PIXELS = MAX_SAFE_IMAGE_PIXELS
@@ -36,17 +36,17 @@ def _pillow() -> tuple[Any, Any, Any, Any, Any]:
 
 def _input_path(value: str) -> Path:
     if value.casefold().startswith(("http://", "https://", "data:")):
-        raise AsxError("本地图片工具只接受本地文件路径", code="local_image_requires_path")
+        raise AsxError("本地图片处理需要文件路径，请先将图片保存到本机。", code="local_image_requires_path")
     path = Path(value).expanduser()
     try:
         if not path.is_file():
             raise AsxError(f"图片文件不存在：{path}", code="image_not_found")
         if path.stat().st_size <= 0 or path.stat().st_size > MAX_REFERENCE_SOURCE_BYTES:
-            raise AsxError("图片超过 25 MB 本地输入限制", code="image_too_large")
+            raise AsxError("图片文件为空或超过 25 MB，请使用较小的有效图片。", code="image_too_large")
     except AsxError:
         raise
     except OSError as exc:
-        raise AsxError(f"无法读取图片文件：{path}", code="image_read_failed") from exc
+        raise AsxError(f"无法读取图片，请检查文件是否可访问：{path}", code="image_read_failed") from exc
     return path.resolve()
 
 
@@ -63,10 +63,10 @@ def _open_image(value: str, *, allow_animated: bool = False) -> tuple[Any, Path,
                 )
             frames = int(getattr(source, "n_frames", 1))
             if frames != 1 and not allow_animated:
-                raise AsxError("不支持动画或多帧图片", code="animated_image_not_supported")
+                raise AsxError("不支持动画或多帧图片，请选取一帧并保存为静态图片。", code="animated_image_not_supported")
             width, height = source.size
             if width <= 0 or height <= 0 or width * height > MAX_SAFE_IMAGE_PIXELS:
-                raise AsxError("图片分辨率超过安全限制", code="image_pixel_limit_exceeded")
+                raise AsxError("图片像素过多，无法处理；请降低分辨率后重试。", code="image_pixel_limit_exceeded")
             source.load()
             oriented = image_ops.exif_transpose(source)
             oriented.load()
@@ -74,9 +74,9 @@ def _open_image(value: str, *, allow_animated: bool = False) -> tuple[Any, Path,
     except AsxError:
         raise
     except (image.DecompressionBombError, image.DecompressionBombWarning) as exc:
-        raise AsxError("图片分辨率超过安全限制", code="image_pixel_limit_exceeded") from exc
+        raise AsxError("图片像素过多，无法处理；请降低分辨率后重试。", code="image_pixel_limit_exceeded") from exc
     except (unidentified, EOFError, OSError, SyntaxError, ValueError) as exc:
-        raise AsxError(f"图片文件无效：{path}", code="invalid_image_content") from exc
+        raise AsxError(f"无法解析图片，请确认文件可正常打开，或重新导出：{path}", code="invalid_image_content") from exc
 
 
 def _format(value: str | None, output: Path) -> tuple[str, str]:
@@ -93,7 +93,7 @@ def _ensure_parent(path: Path) -> None:
     try:
         path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     except OSError as exc:
-        raise AsxError(f"无法创建输出目录：{path.parent}", code="output_directory_failed") from exc
+        raise AsxError(f"无法创建输出目录，请检查目录权限或选择其他位置：{path.parent}", code="output_directory_failed") from exc
 
 
 def _save(
@@ -121,7 +121,7 @@ def _save(
             prepared.save(path, format=format_name)
         size = path.stat().st_size
     except OSError as exc:
-        raise AsxError(f"无法保存图片：{path}", code="image_write_failed") from exc
+        raise AsxError(f"无法保存图片，请检查写入权限和磁盘空间：{path}", code="image_write_failed") from exc
     return {"path": str(path), "format": format_name.lower(), "width": image.width, "height": image.height, "size_bytes": size}
 
 
@@ -142,9 +142,9 @@ def _image_info(value: str) -> dict[str, Any]:
 
 def _resize(value: str, output: str, width: int | None, height: int | None, output_format: str | None) -> dict[str, Any]:
     if width is None and height is None:
-        raise AsxError("resize 至少需要 --width 或 --height", code="invalid_resize")
+        raise AsxError("缩放图片时请指定宽度（--width）或高度（--height）。", code="invalid_resize")
     if width is not None and width <= 0 or height is not None and height <= 0:
-        raise AsxError("resize 的宽高必须为正整数", code="invalid_resize")
+        raise AsxError("缩放后的宽度和高度需为大于 0 的整数。", code="invalid_resize")
     image, _path, _format_name, _frames = _open_image(value)
     image_module, _chops, _color, _ops, _unidentified = _pillow()
     if width is None:
@@ -162,9 +162,9 @@ def _parse_box(value: str) -> tuple[int, int, int, int]:
     try:
         parts = [int(item.strip()) for item in value.split(",")]
     except ValueError as exc:
-        raise AsxError("裁剪框格式应为 left,top,right,bottom", code="invalid_crop_box") from exc
+        raise AsxError("请按左、上、右、下的顺序填写四个裁剪坐标，用英文逗号分隔。", code="invalid_crop_box") from exc
     if len(parts) != 4 or parts[2] <= parts[0] or parts[3] <= parts[1] or min(parts) < 0:
-        raise AsxError("裁剪框必须满足 0 <= left < right 且 0 <= top < bottom", code="invalid_crop_box")
+        raise AsxError("裁剪坐标不能为负数，且右边界需大于左边界、下边界需大于上边界。", code="invalid_crop_box")
     return parts[0], parts[1], parts[2], parts[3]
 
 
@@ -172,7 +172,7 @@ def _crop(value: str, output: str, box_value: str, output_format: str | None) ->
     image, _path, _format_name, _frames = _open_image(value)
     left, top, right, bottom = _parse_box(box_value)
     if right > image.width or bottom > image.height:
-        raise AsxError("裁剪框超出图片边界", code="invalid_crop_box")
+        raise AsxError("裁剪范围超出图片边界，请检查原图尺寸并调整坐标。", code="invalid_crop_box")
     result_image = image.crop((left, top, right, bottom))
     result = _save(result_image, output, output_format)
     result["source"] = str(_input_path(value))
@@ -182,7 +182,7 @@ def _crop(value: str, output: str, box_value: str, output_format: str | None) ->
 
 def _slice(value: str, output_dir: str, rows: int, columns: int, prefix: str, output_format: str | None) -> dict[str, Any]:
     if rows <= 0 or columns <= 0:
-        raise AsxError("切图的 rows 和 columns 必须为正整数", code="invalid_slice_grid")
+        raise AsxError("切图的行数和列数需为大于 0 的整数。", code="invalid_slice_grid")
     image, source, _format_name, _frames = _open_image(value)
     output_path = Path(output_dir).expanduser().resolve()
     _ensure_parent(output_path / "placeholder")
@@ -201,15 +201,15 @@ def _slice(value: str, output_dir: str, rows: int, columns: int, prefix: str, ou
 
 def _contact_sheet(values: list[str], output: str, columns: int, cell_width: int, cell_height: int, background: str, output_format: str | None) -> dict[str, Any]:
     if not values:
-        raise AsxError("contact-sheet 至少需要一张图片", code="missing_images")
+        raise AsxError("制作图片预览拼图需要至少一张图片，请提供输入图片。", code="missing_images")
     if columns <= 0 or cell_width <= 0 or cell_height <= 0:
-        raise AsxError("contact-sheet 的列数和单元格尺寸必须为正整数", code="invalid_contact_sheet")
+        raise AsxError("预览拼图的列数及每格宽高需为大于 0 的整数。", code="invalid_contact_sheet")
     image_module, _chops, image_color, _ops, _unidentified = _pillow()
     images = [_open_image(value)[0] for value in values]
     try:
         fill = image_color.getrgb(background)
     except ValueError as exc:
-        raise AsxError("联系表背景色无效", code="invalid_contact_sheet") from exc
+        raise AsxError("预览拼图的背景色无效，请使用颜色名称或十六进制色值（如 #ffffff）。", code="invalid_contact_sheet") from exc
     rows = math.ceil(len(images) / columns)
     sheet = image_module.new("RGB", (columns * cell_width, rows * cell_height), fill)
     for index, source in enumerate(images):
@@ -230,13 +230,13 @@ def _apply_mask(value: str, mask_value: str, output: str, output_format: str | N
     image, source, _format_name, _frames = _open_image(value)
     mask, mask_path, _mask_format, _mask_frames = _open_image(mask_value)
     if mask.size != image.size:
-        raise AsxError("Mask 尺寸必须与原图一致", code="invalid_image_mask")
+        raise AsxError("蒙版（Mask）的宽高需与原图一致，请调整蒙版尺寸。", code="invalid_image_mask")
     if "A" in mask.getbands() or "transparency" in mask.info:
         alpha = mask.convert("RGBA").getchannel("A")
     elif mask.mode in {"1", "L"}:
         alpha = mask.convert("L")
     else:
-        raise AsxError("Mask 必须是带透明通道的图片或灰度图片", code="invalid_image_mask")
+        raise AsxError("蒙版（Mask）需为带透明通道的图片或灰度图片，请重新导出。", code="invalid_image_mask")
     result_image = image.convert("RGBA")
     existing = result_image.getchannel("A")
     result_image.putalpha(image_chops.multiply(existing, alpha))

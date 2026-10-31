@@ -41,13 +41,13 @@ def attach_image_details(
         except (ImportError, OSError, EOFError, SyntaxError, ValueError, Warning):
             notices.append({
                 "code": "image_metadata_unavailable", "path": value,
-                "message": "无法读取结果图片的尺寸和格式，请检查该文件；任务记录和下载路径已保留。",
+                "message": "无法读取结果图片的尺寸和格式，文件路径已保留；请检查图片是否可正常打开。",
             })
             continue
         except image_module.DecompressionBombError:
             notices.append({
                 "code": "image_metadata_unavailable", "path": value,
-                "message": "结果图片超过安全像素限制，未读取尺寸和格式；任务记录和下载路径已保留。",
+                "message": "结果图片像素过多，未读取尺寸和格式；文件路径已保留，请使用图片查看工具检查。",
             })
             continue
         divisor = math.gcd(width, height)

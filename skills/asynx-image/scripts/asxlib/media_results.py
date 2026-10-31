@@ -27,7 +27,7 @@ def media_file_info(path: Path) -> dict[str, Any]:
     elif _is_mp4(header, size):
         kind, content_type, extension = "video", "video/mp4", "mp4"
     else:
-        raise AsxError("结果文件不是受支持的图片或 MP4 视频", code="unsupported_media_format")
+        raise AsxError("无法识别结果文件格式，目前支持 PNG、JPEG、WebP 图片和 MP4 视频。", code="unsupported_media_format")
     return {
         "kind": kind, "content_type": content_type, "extension": extension,
         "size_bytes": size, "sha256": digest.hexdigest(),
@@ -61,10 +61,10 @@ def attach_media_details(
     for value in files:
         try:
             info = media_file_info(Path(value))
-        except (OSError, AsxError) as exc:
+        except (OSError, AsxError):
             payload.setdefault("warnings", []).append({
                 "code": "media_metadata_unavailable", "path": value,
-                "message": f"无法读取结果文件信息，下载路径已保留：{exc}",
+                "message": "无法读取结果文件信息，下载路径已保留；请检查文件是否可正常打开。",
             })
             continue
         details = {"path": value, "kind": info["kind"], "content_type": info["content_type"], "size_bytes": info["size_bytes"]}

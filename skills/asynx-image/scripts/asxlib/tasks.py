@@ -22,7 +22,7 @@ from .constants import (
     TERMINAL_STATUSES,
     UTC,
 )
-from .errors import AsxError
+from .errors import AsxError, friendly_task_error
 from .image_results import requested_aspect_ratio
 from .images import (
     build_task,
@@ -58,6 +58,12 @@ from .state import (
 from .videos import body_from_video_args
 
 _SAFE_PATH_COMPONENT = re.compile(r"[^A-Za-z0-9._-]+")
+_STATUS_LABELS = {
+    "queued": "排队中", "running": "生成中", "delayed": "等待继续处理",
+    "canceling": "取消处理中", "succeeded": "生成完成", "failed": "生成未完成",
+    "timeout": "任务已超时", "canceled": "已取消",
+}
+_OPERATION_LABELS = {"image.generate": "图片生成", "image.edit": "图片编辑", "video.generate": "视频生成"}
 
 
 class TaskStatusClient(Protocol):
@@ -85,7 +91,7 @@ def wait_for_terminal(
 ) -> tuple[dict[str, Any], str | None]:
     task_id = task.get("id")
     if not isinstance(task_id, str):
-        raise AsxError("Task response is missing an ID", code="invalid_task_response")
+        raise AsxError("服务未返回任务 ID，暂时无法确认提交结果。请保留本地任务记录，使用任务恢复确认，避免重复生成。", code="invalid_task_response")
     original_task_type = task.get("task_type")
     deadline = parse_deadline(task.get("deadline_at"))
     client_deadline = (
@@ -100,18 +106,18 @@ def wait_for_terminal(
         status = task.get("status")
         if not isinstance(status, str) or status not in KNOWN_STATUSES:
             raise AsxError(
-                f"Task {task_id} 返回了未知状态",
+                "服务返回了无法识别的任务状态，请稍后查询原任务，避免重复生成。",
                 code="invalid_task_status",
                 task_id=task_id,
             )
         if status != last_status:
-            log(f"Task {task_id}：{status}")
+            log(f"任务 {task_id}：{_STATUS_LABELS[status]}")
             last_status = status
         if status in TERMINAL_STATUSES:
             return task, request_id
         if datetime.now(UTC) >= client_deadline:
             raise AsxError(
-                f"Stopped waiting for Task {task_id} after its execution deadline",
+                "本次等待已超时，但没有取消任务。请稍后查询或继续等待原任务，无需重新生成。",
                 code="client_wait_timeout",
                 exit_code=4,
                 task_id=task_id,
@@ -166,7 +172,7 @@ def download_assets(
     assets = result.get("assets") if isinstance(result, dict) else None
     if not isinstance(task_id, str) or not isinstance(assets, list) or not assets:
         raise AsxError(
-            "Succeeded Task did not contain downloadable Assets",
+            "任务显示已完成，但没有可下载的结果文件。请保留任务 ID 并联系服务支持。",
             code="missing_task_assets",
             task_id=task_id if isinstance(task_id, str) else None,
         )
@@ -188,7 +194,7 @@ def download_assets(
     for asset in assets:
         if not isinstance(asset, dict) or not isinstance(asset.get("index"), int):
             raise AsxError(
-                "Task contains an invalid Asset",
+                "服务返回的结果文件信息不完整，暂时无法下载。请查询原任务或联系服务支持。",
                 code="invalid_task_asset",
                 task_id=task_id,
             )
@@ -237,7 +243,7 @@ def download_assets(
             path.parent.mkdir(parents=True, exist_ok=True)
             os.replace(temporary, path)
         except OSError as exc:
-            raise AsxError(f"Cannot save generated media: {exc}", code="output_write_failed") from exc
+            raise AsxError("结果文件无法保存，请检查输出目录的写入权限和剩余空间，然后继续下载原任务。", code="output_write_failed") from exc
         finally:
             temporary.unlink(missing_ok=True)
         asset_metrics["save_seconds"] = time.perf_counter() - save_started
@@ -275,7 +281,7 @@ def index_downloaded_artifacts(
 ) -> dict[str, Any] | None:
     remote_id = task.get("id")
     if not isinstance(remote_id, str):
-        return {"code": "artifact_index_failed", "message": "结果缺少 Task ID，无法建立本地索引"}
+        return {"code": "artifact_index_failed", "message": "结果缺少任务 ID，无法加入本地历史记录。请保留已下载的文件。"}
     connection = connect_ledger_db()
     try:
         existing = get_ledger_task(connection, remote_task_id=remote_id)
@@ -323,10 +329,10 @@ def index_downloaded_artifacts(
                 state="available",
             )
         connection.commit()
-    except (OSError, sqlite3.Error, AsxError) as exc:
+    except (OSError, sqlite3.Error, AsxError):
         return {
             "code": "artifact_index_failed",
-            "message": f"本地结果索引写入失败，文件仍已保存：{exc}",
+            "message": "结果文件已保存，但未能加入本地历史记录。请保留文件路径，并检查本地目录的写入权限和剩余空间。",
         }
     finally:
         connection.close()
@@ -338,7 +344,7 @@ def _task_identifier_row(connection: sqlite3.Connection, identifier: str) -> dic
     if row is None:
         row = get_ledger_task(connection, remote_task_id=identifier)
     if row is None:
-        raise AsxError(f"本地 Task 不存在：{identifier}", code="task_not_found")
+        raise AsxError(f"本机没有找到任务 {identifier}，请检查任务 ID 或查询任务列表。", code="task_not_found")
     return row
 
 
@@ -363,6 +369,8 @@ def _local_task_payload(row: dict[str, Any]) -> dict[str, Any]:
         "error": row.get("error"),
     }
     if isinstance(remote, dict):
+        if payload.get("error") and payload["error"] == remote.get("error"):
+            payload["error"] = friendly_task_error(payload["error"], status=row.get("status"))
         for key in ("result_quality", "result", "deadline_at", "started_at", "finished_at"):
             if remote.get(key) is not None:
                 payload[key] = remote[key]
@@ -426,7 +434,7 @@ def _bind_submission(
 ) -> dict[str, Any]:
     remote_id = task.get("id")
     if not isinstance(remote_id, str):
-        raise AsxError("Task response is missing an ID", code="invalid_task_response")
+        raise AsxError("服务未返回任务 ID，暂时无法确认提交结果。请使用任务恢复确认，避免重复生成。", code="invalid_task_response")
     status = task.get("status") if isinstance(task.get("status"), str) else "queued"
     connection = connect_ledger_db()
     try:
@@ -469,7 +477,7 @@ def _remote_task_for_row(client: AsynxClient, row: dict[str, Any]) -> tuple[dict
     remote_id = row.get("remote_task_id")
     if not isinstance(remote_id, str):
         raise AsxError(
-            "该任务的提交尚未确认；恢复时请使用 task recover 并指定此任务 ID，不要重新生图。",
+            "该任务的提交尚未确认；请使用 task recover 并指定此任务 ID 确认原提交，不要重新生成。",
             code="task_not_submitted",
             task_id=str(row.get("local_id")),
             details={"next_action_args": ["task", "recover", str(row["local_id"])]},
@@ -496,7 +504,7 @@ def sync_local_task(
     task, request_id = _remote_task_for_row(client, row)
     status = task.get("status")
     if not isinstance(status, str) or status not in KNOWN_STATUSES:
-        raise AsxError("Asynx returned an unknown task status", code="invalid_task_status")
+        raise AsxError("服务返回了无法识别的任务状态，请稍后查询原任务，避免重复生成。", code="invalid_task_status")
     local_id = str(row["local_id"])
     previous_status = str(row.get("status"))
     local_status = (
@@ -512,7 +520,7 @@ def sync_local_task(
             local_id,
             status=local_status,
             remote=task,
-            error=task.get("error") if status in {"failed", "timeout", "canceled"} else None,
+            error=friendly_task_error(task.get("error"), status=status) if status in {"failed", "timeout", "canceled"} else None,
             billing=task.get("billing"),
             last_polled=utc_now(),
         )
@@ -621,7 +629,7 @@ def recover_tasks(
                     continue
                 body = row.get("request")
                 if not isinstance(body, dict):
-                    raise AsxError("本地请求体损坏，无法恢复", code="invalid_task_state")
+                    raise AsxError("本地提交记录不完整，暂时无法恢复。请保留记录并联系支持确认原任务，避免重复生成。", code="invalid_task_state")
                 task, request_id = client.submit(body, str(row["idempotency_key"]))
                 row = _bind_submission(client, str(row["local_id"]), task, request_id)
             synced, _code = sync_local_task(client, str(row["local_id"]))
@@ -734,7 +742,7 @@ def cancel_local_task(client: AsynxClient, identifier: str) -> tuple[dict[str, A
             status=local_status,
             remote=task,
             billing=task.get("billing"),
-            error=task.get("error") if local_status in TERMINAL_STATUSES else None,
+            error=friendly_task_error(task.get("error"), status=local_status) if local_status in TERMINAL_STATUSES and local_status != "succeeded" else None,
             last_polled=utc_now(),
         )
         append_event(
@@ -749,7 +757,7 @@ def cancel_local_task(client: AsynxClient, identifier: str) -> tuple[dict[str, A
     payload = local_task_status(local_id)
     if local_status not in TERMINAL_STATUSES:
         payload["cancel_requested"] = True
-        payload["warning"] = "上游取消可能仍在处理，已开始的任务可能继续执行并计费"
+        payload["warning"] = "取消请求仍在处理中，已开始的任务可能继续执行并计费。请稍后查询最终状态。"
     return payload, 0
 
 
@@ -763,7 +771,7 @@ def task_payload(
 ) -> dict[str, Any]:
     status = task.get("status")
     if not isinstance(status, str) or status not in KNOWN_STATUSES:
-        raise AsxError("Asynx 返回了未知的任务状态", code="invalid_task_status", task_id=task.get("id"))
+        raise AsxError("服务返回了无法识别的任务状态，请稍后查询原任务，避免重复生成。", code="invalid_task_status", task_id=task.get("id"))
     payload: dict[str, Any] = {
         "ok": status == "succeeded" or status not in TERMINAL_STATUSES,
         "task_id": task.get("id"),
@@ -781,10 +789,7 @@ def task_payload(
         attach_media_details(payload, files, expected_ratio=expected_ratio or requested_aspect_ratio(task), task=task)
     if status in TERMINAL_STATUSES and status != "succeeded":
         payload["ok"] = False
-        payload["error"] = task.get("error") or {
-            "code": f"task_{status}",
-            "message": f"Task ended with status {status}",
-        }
+        payload["error"] = friendly_task_error(task.get("error"), status=status)
     if files is None:
         _task_followup(payload)
     return {key: value for key, value in payload.items() if value is not None}
@@ -809,8 +814,8 @@ def _download_task_result(
         )
     except AsxError as exc:
         download_error = exc.payload()["error"]
-    except (OSError, sqlite3.Error) as exc:
-        download_error = {"code": "output_write_failed", "message": f"结果保存失败：{exc}"}
+    except (OSError, sqlite3.Error):
+        download_error = {"code": "output_write_failed", "message": "结果保存未完成，请检查目录写入权限和剩余空间，再继续下载原任务。"}
     payload = task_payload(
         task, request_id, files=files, local_id=local_id, expected_ratio=expected_ratio,
     )
@@ -838,19 +843,19 @@ def _update_local_snapshot(
 ) -> None:
     status = task.get("status")
     if not isinstance(status, str):
-        raise AsxError("Asynx returned an unknown task status", code="invalid_task_status")
+        raise AsxError("服务返回了无法识别的任务状态，请稍后查询原任务，避免重复生成。", code="invalid_task_status")
     connection = connect_ledger_db()
     try:
         current = get_ledger_task(connection, local_task_id=local_id)
         if current is None:
-            raise AsxError(f"本地 Task 不存在：{local_id}", code="task_not_found")
+            raise AsxError(f"本机没有找到任务 {local_id}，请检查任务 ID 或查询任务列表。", code="task_not_found")
         previous = str(current.get("status"))
         update_task(
             connection,
             local_id,
             status=status,
             remote=task,
-            error=task.get("error") if status in {"failed", "timeout", "canceled"} else None,
+            error=friendly_task_error(task.get("error"), status=status) if status in {"failed", "timeout", "canceled"} else None,
             billing=task.get("billing"),
             last_polled=utc_now(),
         )
@@ -871,13 +876,13 @@ def run_submission(
 ) -> tuple[dict[str, Any], int]:
     started_at = time.perf_counter()
     initial_delay = initial_poll_delay_seconds() if not args.detach else 0.0
-    log(f"正在准备 {task_type} 请求")
+    log(f"正在准备{_OPERATION_LABELS[task_type]}……")
     references = args.reference if task_type in {"image.generate", "video.generate"} else args.image
     from_task = getattr(args, "from_task", None)
     if task_type == "image.edit" and from_task:
         if references:
             raise AsxError(
-                "Use either --image or --from-task, not both", code="conflicting_edit_inputs"
+                "请通过 --image 选择图片，或通过 --from-task 使用已有任务的结果，两者不能同时使用。", code="conflicting_edit_inputs"
             )
         connection = connect_ledger_db()
         try:
@@ -933,8 +938,7 @@ def run_submission(
     )
     local_id = str(local_row["local_id"])
     output_dir = str(local_row.get("output_dir") or args.output_dir)
-    log(f"提交 {task_type}，模型：{model}")
-    log(f"幂等键：{idempotency_key}")
+    log(f"正在提交{_OPERATION_LABELS[task_type]}任务……")
     submitted_at = time.perf_counter()
     try:
         if local_row.get("remote_task_id"):
@@ -1042,8 +1046,13 @@ def history_payload(
     data, request_id = client.list_tasks(status=status, model=model, limit=limit)
     items = data.get("items")
     if not isinstance(items, list):
-        raise AsxError("Task history response is invalid", code="invalid_api_response")
-    payload: dict[str, Any] = {"ok": True, "tasks": items}
+        raise AsxError("暂时无法读取任务历史，请稍后重试；若持续出现，请联系服务支持。", code="invalid_api_response")
+    readable_items = [
+        {**item, "error": friendly_task_error(item["error"], status=item.get("status"))}
+        if isinstance(item, dict) and item.get("error") else item
+        for item in items
+    ]
+    payload: dict[str, Any] = {"ok": True, "tasks": readable_items}
     next_cursor = data.get("next_cursor")
     if next_cursor:
         payload["next_cursor"] = next_cursor

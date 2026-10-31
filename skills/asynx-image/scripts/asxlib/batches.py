@@ -19,7 +19,7 @@ from .constants import (
     MAX_BATCH_ITEMS,
     UTC,
 )
-from .errors import AsxError
+from .errors import AsxError, friendly_task_error
 from .image_results import requested_aspect_ratio
 from .images import build_task, task_input_warnings
 from .media_results import attach_media_details
@@ -144,7 +144,7 @@ def batch_summary(connection: sqlite3.Connection, batch: sqlite3.Row) -> dict[st
             else {}
         ),
         **(
-            {"action_required": "查看 batch status --items，检查失败、超时或取消的项目"}
+            {"action_required": "请查看批次明细，检查失败、超时或取消的项目。"}
             if unsuccessful and batch["status"] != "paused" else {}
         ),
     }
@@ -168,7 +168,10 @@ def get_batch(connection: sqlite3.Connection, batch_id: str | None) -> sqlite3.R
             "SELECT * FROM batches ORDER BY updated_at DESC LIMIT 1"
         ).fetchone()
     if row is None:
-        raise AsxError(f"Batch not found: {batch_id or 'active batch'}", code="batch_not_found")
+        raise AsxError(
+            f"未找到批次：{batch_id}。请核对批次编号。" if batch_id else "暂无可用批次，请先创建一个批次。",
+            code="batch_not_found",
+        )
     return cast(sqlite3.Row, row)
 
 
@@ -176,9 +179,9 @@ def _template(batch: sqlite3.Row) -> dict[str, Any]:
     try:
         body = json.loads(batch["template_json"])
     except json.JSONDecodeError as exc:
-        raise AsxError("Batch template is corrupted", code="invalid_batch_state") from exc
+        raise AsxError("批次设置无法读取，请保留现有记录并联系支持。", code="invalid_batch_state") from exc
     if not isinstance(body, dict):
-        raise AsxError("Batch template is invalid", code="invalid_batch_state")
+        raise AsxError("批次设置不完整，无法继续操作；请保留现有记录并联系支持。", code="invalid_batch_state")
     return body
 
 
@@ -240,7 +243,7 @@ def create_batch(
 ) -> dict[str, Any]:
     if not 1 <= total <= MAX_BATCH_ITEMS:
         raise AsxError(
-            f"Batch size must be between 1 and {MAX_BATCH_ITEMS}", code="invalid_batch_size"
+            f"批次数量应为 1–{MAX_BATCH_ITEMS}，请调整 --total。", code="invalid_batch_size"
         )
     if operation == "video.generate":
         _reject_image_options(image_size, quality, count, output_format, mask)
@@ -302,7 +305,7 @@ def create_batch(
     except sqlite3.Error as exc:
         connection.rollback()
         raise AsxError(
-            f"Cannot create local batch state: {exc}", code="batch_state_write_failed"
+            "批次记录未能保存，请检查数据目录的写入权限和磁盘空间。", code="batch_state_write_failed"
         ) from exc
     finally:
         connection.close()
@@ -337,7 +340,7 @@ def add_to_batch(
 ) -> dict[str, Any]:
     if not 1 <= total <= MAX_BATCH_ITEMS:
         raise AsxError(
-            f"Added item count must be between 1 and {MAX_BATCH_ITEMS}",
+            f"追加数量应为 1–{MAX_BATCH_ITEMS}，请调整 --total。",
             code="invalid_batch_size",
         )
     connection = connect_db()
@@ -345,7 +348,7 @@ def add_to_batch(
         batch = get_batch(connection, batch_id)
         if batch["status"] not in {"active", "paused"}:
             raise AsxError(
-                "Cannot append to a completed or canceled batch", code="batch_not_appendable"
+                "此批次已结束或取消，不能追加任务；请创建新批次。", code="batch_not_appendable"
             )
         body = _template(batch)
         has_overrides = any(
@@ -394,7 +397,7 @@ def add_to_batch(
                 raise AsxError("图片批次不支持视频参数。", code="conflicting_batch_options")
             input_value = body.get("input")
             if not isinstance(input_value, dict):
-                raise AsxError("Batch template has invalid input", code="invalid_batch_state")
+                raise AsxError("批次输入设置无法读取，请保留现有记录并联系支持。", code="invalid_batch_state")
             existing_references = (
                 input_value.get("reference_images")
                 if batch["operation"] == "generate"
@@ -404,7 +407,7 @@ def add_to_batch(
                 isinstance(item, str) for item in existing_references
             ):
                 raise AsxError(
-                    "Batch template has invalid image inputs", code="invalid_batch_state"
+                    "批次中的参考图片记录无效，无法继续操作；请保留现有记录并联系支持。", code="invalid_batch_state"
                 )
             body, _selected_model, _request_id = build_task(
                 client,
@@ -461,7 +464,7 @@ def add_to_batch(
     except sqlite3.Error as exc:
         connection.rollback()
         raise AsxError(
-            f"Cannot append to local batch state: {exc}", code="batch_state_write_failed"
+            "追加任务未能保存，请检查数据目录的写入权限和磁盘空间。", code="batch_state_write_failed"
         ) from exc
     finally:
         connection.close()
@@ -476,6 +479,16 @@ def list_batches() -> dict[str, Any]:
         connection.close()
 
 
+def _item_error(row: sqlite3.Row) -> dict[str, Any] | None:
+    error = json.loads(row["error_json"]) if row["error_json"] else None
+    remote = json.loads(row["remote_json"]) if row["remote_json"] else {}
+    # Older records may contain the original remote error.  Local download and
+    # state errors already have their own actionable messages.
+    if error is not None and remote.get("error") == error:
+        return friendly_task_error(error, status=row["status"])
+    return cast(dict[str, Any] | None, error)
+
+
 def batch_status(batch_id: str | None, *, include_items: bool = False) -> dict[str, Any]:
     connection = connect_db()
     try:
@@ -484,8 +497,9 @@ def batch_status(batch_id: str | None, *, include_items: bool = False) -> dict[s
         _attach_batch_results(connection, batch, summary)
         if include_items:
             items = connection.execute(
-                "SELECT sequence, status, task_id, files_json, error_json, updated_at "
-                "FROM batch_items WHERE batch_id = ? ORDER BY sequence LIMIT 1000",
+                "SELECT i.sequence, i.status, i.task_id, i.files_json, i.error_json, i.updated_at, t.remote_json "
+                "FROM batch_items i LEFT JOIN tasks t ON t.idempotency_key = i.idempotency_key "
+                "WHERE i.batch_id = ? ORDER BY i.sequence LIMIT 1000",
                 (batch["id"],),
             ).fetchall()
             summary["items"] = [
@@ -494,7 +508,7 @@ def batch_status(batch_id: str | None, *, include_items: bool = False) -> dict[s
                     "status": row["status"],
                     "task_id": row["task_id"],
                     "files": json.loads(row["files_json"]) if row["files_json"] else [],
-                    "error": json.loads(row["error_json"]) if row["error_json"] else None,
+                    "error": _item_error(row),
                     "updated_at": row["updated_at"],
                 }
                 for row in items
@@ -533,7 +547,7 @@ def _attach_batch_results(
     template_ratio = requested_aspect_ratio(_template(batch))
     for row in rows:
         identity = {"sequence": row["sequence"], "task_id": row["task_id"]}
-        error = json.loads(row["error_json"]) if row["error_json"] else None
+        error = _item_error(row)
         if row["status"] in {"failed", "timeout", "canceled"}:
             failures.append({**identity, "status": row["status"], "error": error})
         stored_files = json.loads(row["files_json"]) if row["files_json"] else []
@@ -581,7 +595,7 @@ def _attach_batch_results(
     if failures:
         paused_notice = summary.get("action_required", "") if batch["status"] == "paused" else ""
         summary["action_required"] = (
-            paused_notice + "查看 failed_items 中的失败、超时或取消项；重新生成可能产生费用"
+            paused_notice + "请检查未成功的项目；重新生成可能产生费用。"
         )
     if warnings:
         summary.setdefault("warnings", []).extend(warnings)
@@ -608,7 +622,7 @@ def _update_item(
     error: dict[str, Any] | None = None,
 ) -> None:
     if status not in LOCAL_ITEM_STATUSES:
-        raise AsxError(f"Invalid local batch item status: {status}", code="invalid_batch_state")
+        raise AsxError("批次进度记录异常，无法更新；请保留现有记录并联系支持。", code="invalid_batch_state")
     connection.execute(
         "UPDATE batch_items SET status = ?, task_id = COALESCE(?, task_id), "
         "request_id = COALESCE(?, request_id), files_json = COALESCE(?, files_json), "
@@ -657,7 +671,7 @@ def poll_batch(
     _include_results: bool = True,
 ) -> dict[str, Any]:
     if not 1 <= submissions_limit <= 50:
-        raise AsxError("Submission limit must be between 1 and 50", code="invalid_submission_limit")
+        raise AsxError("单次提交数量应为 1–50，请调整 --limit。", code="invalid_submission_limit")
     connection = connect_db()
     try:
         batch = get_batch(connection, batch_id)
@@ -751,7 +765,7 @@ def poll_batch(
                 submitted_task_id = task.get("id")
                 status = task.get("status") if isinstance(task.get("status"), str) else "queued"
                 if not isinstance(submitted_task_id, str):
-                    raise AsxError("Task response is missing an ID", code="invalid_task_response")
+                    raise AsxError("服务未返回任务编号，无法确认提交结果；请勿重复生成。", code="invalid_task_response")
                 state_task = get_state_task(connection, local_task_id=local_task_id)
                 if state_task is not None:
                     previous_state = str(state_task.get("status"))
@@ -776,7 +790,7 @@ def poll_batch(
                     status=status if status in LOCAL_ITEM_STATUSES else "submitted",
                     task_id=submitted_task_id,
                     request_id=request_id,
-                    error=task.get("error") if status in {"failed", "timeout", "canceled"} else None,
+                    error=friendly_task_error(task.get("error"), status=status) if status in {"failed", "timeout", "canceled"} else None,
                 )
                 connection.commit()
                 submitted += 1
@@ -793,7 +807,7 @@ def poll_batch(
                     error=exc.payload().get("error"),
                 )
                 connection.commit()
-                log(f"批次 {batch['id']} 第 {item['sequence']} 项暂未提交：{exc.message}")
+                log(f"批次 {batch['id']} 第 {item['sequence']} 项提交遇到问题：{exc.message}")
 
         remote_items = connection.execute(
             "SELECT * FROM batch_items WHERE batch_id = ? AND status IN "
@@ -847,7 +861,7 @@ def poll_batch(
                     "sequence": item["sequence"], "task_id": remote_task_id,
                     "error": {
                         "code": "invalid_task_status",
-                        "message": "Asynx returned an unknown task status",
+                        "message": "暂时无法识别服务返回的任务进度，请稍后刷新原任务。",
                     },
                 })
                 _update_item(
@@ -857,7 +871,7 @@ def poll_batch(
                     request_id=request_id,
                     error={
                         "code": "invalid_task_status",
-                        "message": "Asynx returned an unknown task status",
+                        "message": "暂时无法识别服务返回的任务进度，请稍后刷新原任务。",
                     },
                 )
                 connection.commit()
@@ -870,7 +884,7 @@ def poll_batch(
                     status=status,
                     remote=task,
                     billing=task.get("billing"),
-                    error=task.get("error") if status in {"failed", "timeout", "canceled"} else None,
+                    error=friendly_task_error(task.get("error"), status=status) if status in {"failed", "timeout", "canceled"} else None,
                     last_polled=utc_now(),
                 )
                 if previous_state != status:
@@ -923,7 +937,7 @@ def poll_batch(
                 request_id=request_id,
                 files=files,
                 error=(
-                    task.get("error")
+                    friendly_task_error(task.get("error"), status=status)
                     if status in {"failed", "timeout", "canceled"}
                     else None
                 ),
@@ -962,7 +976,7 @@ def set_batch_paused(batch_id: str | None, paused: bool) -> dict[str, Any]:
     try:
         batch = get_batch(connection, batch_id)
         if batch["status"] in {"completed", "canceled"}:
-            raise AsxError("The batch has already finished", code="batch_finished")
+            raise AsxError("此批次已结束或取消，不能暂停或继续；需要更多结果时请创建新批次。", code="batch_finished")
         status = "paused" if paused else "active"
         connection.execute(
             "UPDATE batches SET status = ?, updated_at = ? WHERE id = ?",
@@ -1026,7 +1040,7 @@ def cancel_batch(client: AsynxClient, batch_id: str | None) -> dict[str, Any]:
         payload: dict[str, Any] = {"ok": True, "batch": summary}
         if summary["status"] != "canceled":
             payload["cancel_requested"] = True
-            payload["warning"] = "上游取消可能仍在处理，已开始的任务可能继续执行并计费"
+            payload["warning"] = "取消请求仍可能在处理中，已开始的任务可能继续执行并产生费用。"
         else:
             payload["finished"] = True
         return payload
@@ -1043,10 +1057,10 @@ def wait_for_batch(
 ) -> dict[str, Any]:
     if interval < 1 or interval > 300:
         raise AsxError(
-            "Polling interval must be between 1 and 300 seconds", code="invalid_poll_interval"
+            "查询间隔应为 1–300 秒，请调整 --interval。", code="invalid_poll_interval"
         )
     if max_wait < 0:
-        raise AsxError("Maximum wait time cannot be negative", code="invalid_max_wait")
+        raise AsxError("最长等待时间不能为负数；--max-wait 设为 0 表示不限时。", code="invalid_max_wait")
     started = time.monotonic()
     while True:
         result = poll_batch(client, batch_id, _include_results=False)
@@ -1072,7 +1086,7 @@ def execute_batch(
         refresh_errors: list[dict[str, Any]] = []
         if args.refresh:
             if client is None:
-                raise AsxError("查询批次需要 API Key", code="missing_api_key")
+                raise AsxError("尚未配置 API Key，无法查询最新进度；请在终端运行 configure 配置密钥。", code="missing_api_key")
             # Status reads may download existing results, but never create paid tasks.
             refreshed = poll_batch(client, args.batch_id, _refresh_only=True, _include_results=False)
             refresh_warnings = refreshed["batch"].get("warnings", [])
@@ -1090,7 +1104,7 @@ def execute_batch(
     if action in {"pause", "resume"}:
         return set_batch_paused(args.batch_id, paused=action == "pause"), 0
     if client is None:
-        raise AsxError("此批次操作需要 API Key", code="missing_api_key")
+        raise AsxError("尚未配置 API Key，无法执行此操作；请在终端运行 configure 配置密钥。", code="missing_api_key")
     if action == "poll":
         result = poll_batch(client, args.batch_id, submissions_limit=args.limit)
         return result, 0 if result["ok"] else 4

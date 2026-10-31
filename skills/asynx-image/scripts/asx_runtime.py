@@ -62,7 +62,7 @@ def file_lock(path: Path, *, exclusive: bool = True) -> Iterator[None]:
                 error = ctypes.get_last_error()
                 if error == 33:  # ERROR_LOCK_VIOLATION
                     raise LockBusyError(
-                        errno.EAGAIN, "Skill lock is already held", str(path)
+                        errno.EAGAIN, "Skill 正在使用或更新中，请稍后重试。", str(path)
                     )
                 raise ctypes.WinError(error)
             try:
@@ -77,7 +77,7 @@ def file_lock(path: Path, *, exclusive: bool = True) -> Iterator[None]:
             except OSError as exc:
                 if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
                     raise LockBusyError(
-                        errno.EAGAIN, "Skill lock is already held", str(path)
+                        errno.EAGAIN, "Skill 正在使用或更新中，请稍后重试。", str(path)
                     ) from exc
                 raise
             try:

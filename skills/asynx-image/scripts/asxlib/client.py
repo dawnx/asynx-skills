@@ -22,7 +22,7 @@ from .constants import (
     TRANSIENT_HTTP_STATUSES,
     VERSION,
 )
-from .errors import AsxError
+from .errors import AsxError, service_error_message
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -42,9 +42,9 @@ def _decode_json(raw: bytes, *, context: str) -> dict[str, Any]:
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise AsxError(f"{context} returned invalid JSON", code="invalid_api_response") from exc
+        raise AsxError("服务返回了无法识别的内容，请稍后查询原任务；若持续出现，请联系服务支持。", code="invalid_api_response") from exc
     if not isinstance(payload, dict):
-        raise AsxError(f"{context} returned a non-object JSON response", code="invalid_api_response")
+        raise AsxError("服务返回的内容格式不正确，请稍后查询原任务；若持续出现，请联系服务支持。", code="invalid_api_response")
     return payload
 
 
@@ -58,7 +58,7 @@ def _read_limited(response: Any, *, limit: int, context: str) -> bytes:
             declared_length = None
         if declared_length is not None and declared_length > limit:
             raise AsxError(
-                f"{context} response exceeds the {limit} byte limit",
+                "服务返回的内容过大，无法接收。请保留任务 ID 并联系服务支持。",
                 code="response_too_large",
             )
 
@@ -70,7 +70,7 @@ def _read_limited(response: Any, *, limit: int, context: str) -> bytes:
         chunks.extend(chunk)
         if len(chunks) > limit:
             raise AsxError(
-                f"{context} response exceeds the {limit} byte limit",
+                "服务返回的内容过大，无法接收。请保留任务 ID 并联系服务支持。",
                 code="response_too_large",
             )
     raise AssertionError("unreachable")
@@ -84,14 +84,14 @@ def _api_error(status: int, raw: bytes, headers: Any) -> AsxError:
         payload = {}
     if isinstance(payload, dict):
         code = str(payload.get("code") or f"http_{status}")
-        message = str(payload.get("message") or f"Asynx API returned HTTP {status}")
+        message = service_error_message(code, http_status=status, message=payload.get("message"))
         request_id = payload.get("request_id") or request_id
         data = payload.get("data")
         task_id = data.get("task_id") if isinstance(data, dict) else None
         details = data.get("details") if isinstance(data, dict) else None
     else:
         code = f"http_{status}"
-        message = f"Asynx API returned HTTP {status}"
+        message = service_error_message(code, http_status=status)
         task_id = None
         details = None
     return AsxError(
@@ -125,7 +125,7 @@ def _validate_asset_url(
     value: str, *, redirect: bool = False, allow_local: bool = False
 ) -> str:
     code = "invalid_asset_redirect" if redirect else "invalid_asset_url"
-    message = "Asset redirect URL is invalid" if redirect else "Asset download URL is invalid"
+    message = "结果文件的跳转地址无效，请查询原任务后重新下载。" if redirect else "结果文件的下载地址无效，请查询原任务后重新下载。"
     if value != value.strip() or any(char.isspace() for char in value):
         raise AsxError(message, code=code)
     try:
@@ -148,13 +148,13 @@ def _validate_asset_url(
     if address is not None and (
         address.is_private or address.is_loopback or address.is_link_local
     ) and not allow_local:
-        raise AsxError("Asset download URL points to a private network", code=code)
+        raise AsxError("结果下载地址指向本地或内网，已停止下载。请检查服务配置或联系服务支持。", code=code)
     return value
 
 
 def _validate_api_redirect(value: str, *, base_url: str) -> str:
     """Validate and constrain API redirects to the configured origin."""
-    message = "Asynx API redirect is invalid"
+    message = "服务返回的跳转地址无效，请检查服务地址或联系服务支持。"
     if value != value.strip() or any(char.isspace() for char in value):
         raise AsxError(message, code="invalid_api_redirect")
     try:
@@ -172,7 +172,7 @@ def _validate_api_redirect(value: str, *, base_url: str) -> str:
         raise AsxError(message, code="invalid_api_redirect")
     if _origin(value) != _origin(base_url):
         raise AsxError(
-            "Asynx API redirects must remain on the configured origin",
+            "服务要求跳转到其他站点，已停止请求以保护密钥。请检查服务地址或联系服务支持。",
             code="invalid_api_redirect",
         )
     return value
@@ -228,7 +228,7 @@ class AsynxClient:
                         location = exc.headers.get("Location")
                         if not location:
                             raise AsxError(
-                                "Asynx API redirect is missing Location",
+                                "服务未提供有效的跳转地址，请检查服务地址或联系服务支持。",
                                 code="invalid_api_redirect",
                             ) from exc
                         url = _validate_api_redirect(
@@ -252,7 +252,7 @@ class AsynxClient:
                         time.sleep(_retry_after(None, attempt))
                         continue
                     raise AsxError(
-                        f"Cannot reach the Asynx API: {exc}",
+                        "暂时无法连接 Asynx，请检查网络和服务地址。若已提交任务，请先查询原任务，避免重复生成。",
                         code="network_error",
                         exit_code=3,
                     ) from exc
@@ -263,18 +263,18 @@ class AsynxClient:
                     raise _api_error(status, raw, response_headers)
                 data = payload.get("data")
                 if not isinstance(data, dict):
-                    raise AsxError("Asynx API response is missing data", code="invalid_api_response")
+                    raise AsxError("服务未返回完整内容，请稍后查询原任务；若持续出现，请联系服务支持。", code="invalid_api_response")
                 return data, request_id if isinstance(request_id, str) else None
             if redirected:
                 continue
             raise AssertionError("unreachable")
-        raise AsxError("Asynx API redirect limit exceeded", code="invalid_api_redirect")
+        raise AsxError("服务反复跳转，已停止请求。请检查服务地址或联系服务支持。", code="invalid_api_redirect")
 
     def models(self) -> tuple[list[dict[str, Any]], str | None]:
         data, request_id = self.request_json("GET", "/v1/tasks/models", retry_safe=True)
         items = data.get("items")
         if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
-            raise AsxError("Model catalog is invalid", code="invalid_model_catalog")
+            raise AsxError("暂时无法读取可用模型列表，请稍后重试；若持续出现，请联系服务支持。", code="invalid_model_catalog")
         media_models = [item for item in items if item.get("modality") in {"image", "video"}]
         return media_models, request_id
 
@@ -360,7 +360,7 @@ class AsynxClient:
                         location = exc.headers.get("Location")
                         if not location:
                             raise AsxError(
-                                "Asset redirect is missing Location",
+                                "结果文件缺少有效的下载地址，请查询原任务后重新下载。",
                                 code="invalid_asset_redirect",
                             ) from exc
                         next_url = urljoin(url, location)
@@ -388,7 +388,7 @@ class AsynxClient:
                         time.sleep(_retry_after(None, attempt))
                         continue
                     raise AsxError(
-                        f"Cannot download the Asynx Asset: {exc}",
+                        "结果文件暂时无法下载，请检查网络后继续下载原任务，无需重新生成。",
                         code="asset_download_failed",
                         exit_code=3,
                         task_id=task_id,
@@ -396,7 +396,7 @@ class AsynxClient:
             else:
                 raise AssertionError("unreachable")
             continue
-        raise AsxError("Asset download exceeded the redirect limit", code="asset_redirect_limit")
+        raise AsxError("结果下载地址反复跳转，已停止下载。请查询原任务后重新下载，或联系服务支持。", code="asset_redirect_limit")
 
     def asset_to_file(
         self,
@@ -439,11 +439,11 @@ class AsynxClient:
                                 try:
                                     declared = int(raw_length)
                                 except ValueError as exc:
-                                    raise AsxError("下载响应的文件大小无效", code="invalid_asset_response") from exc
+                                    raise AsxError("下载服务返回的文件大小无效，请查询原任务后重新下载。", code="invalid_asset_response") from exc
                                 if declared < 0:
-                                    raise AsxError("下载响应的文件大小无效", code="invalid_asset_response")
+                                    raise AsxError("下载服务返回的文件大小无效，请查询原任务后重新下载。", code="invalid_asset_response")
                                 if declared > max_bytes:
-                                    raise AsxError("结果文件超过下载大小上限", code="response_too_large")
+                                    raise AsxError("结果文件超过本地下载大小上限，请联系服务支持获取文件。", code="response_too_large")
                             total = 0
                             # A retry starts from byte zero, never appends a partial response.
                             with destination.open("wb") as target:
@@ -453,7 +453,7 @@ class AsynxClient:
                                         break
                                     total += len(chunk)
                                     if total > max_bytes:
-                                        raise AsxError("结果文件超过下载大小上限", code="response_too_large")
+                                        raise AsxError("结果文件超过本地下载大小上限，请联系服务支持获取文件。", code="response_too_large")
                                     target.write(chunk)
                             if declared is not None and total != declared:
                                 raise OSError("下载响应提前结束，文件尚未完整传输")
@@ -472,7 +472,7 @@ class AsynxClient:
                             location = exc.headers.get("Location")
                             exc.close()
                             if not location:
-                                raise AsxError("Asset redirect is missing Location", code="invalid_asset_redirect") from exc
+                                raise AsxError("结果文件缺少有效的下载地址，请查询原任务后重新下载。", code="invalid_asset_redirect") from exc
                             url = _validate_asset_url(urljoin(url, location), redirect=True, allow_local=allow_local)
                             break
                         try:
@@ -488,11 +488,11 @@ class AsynxClient:
                             time.sleep(_retry_after(None, attempt))
                             continue
                         raise AsxError(
-                            f"结果文件下载未完成：{exc}", code="asset_download_failed", exit_code=3, task_id=task_id,
+                            "结果文件下载未完成，请检查网络后继续下载原任务，无需重新生成。", code="asset_download_failed", exit_code=3, task_id=task_id,
                         ) from exc
                 else:
                     raise AssertionError("unreachable")
-            raise AsxError("Asset download exceeded the redirect limit", code="asset_redirect_limit")
+            raise AsxError("结果下载地址反复跳转，已停止下载。请查询原任务后重新下载，或联系服务支持。", code="asset_redirect_limit")
         finally:
             if not complete:
                 destination.unlink(missing_ok=True)

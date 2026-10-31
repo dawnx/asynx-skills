@@ -38,7 +38,7 @@ _WINDOWS_RESERVED = {
 
 def version_tuple(value: str) -> tuple[int, ...]:
     if not _VERSION.fullmatch(value):
-        raise AsxError("更新版本号无效，仅支持稳定版本", code="invalid_update_version")
+        raise AsxError("更新版本号无效，请选择已发布的稳定版本。", code="invalid_update_version")
     return tuple(int(part) for part in value.split("."))
 
 
@@ -65,7 +65,7 @@ def read_json(path: Path) -> dict[str, Any]:
         return data
     except (OSError, ValueError, TypeError) as exc:
         raise AsxError(
-            f"无法读取更新记录：{path}", code="invalid_update_metadata"
+            f"无法读取更新记录，请检查文件是否完整且可访问，或联系支持人员：{path}", code="invalid_update_metadata"
         ) from exc
 
 
@@ -110,7 +110,7 @@ def inventory(root: Path) -> dict[str, str]:
 def record_install(root: Path, *, files: dict[str, str] | None = None) -> None:
     version = read_version(root)
     if version is None:
-        raise AsxError("安装包缺少版本信息", code="invalid_update_package")
+        raise AsxError("安装包缺少版本信息，请重新下载安装包。", code="invalid_update_package")
     version_tuple(version)
     write_json(
         root / RECEIPT,
@@ -143,10 +143,10 @@ def installation_problem(root: Path) -> str | None:
 
 def extract_package(archive: Path, destination: Path, manifest: dict[str, Any]) -> Path:
     if archive.stat().st_size > MAX_PACKAGE_BYTES:
-        raise AsxError("更新包超过大小限制", code="invalid_update_package")
+        raise AsxError("更新包超过允许的大小，已停止安装。请通过原安装方式更新。", code="invalid_update_package")
     if hashlib.sha256(archive.read_bytes()).hexdigest() != manifest["sha256"]:
         raise AsxError(
-            "更新包校验失败，现有安装未修改", code="update_checksum_mismatch"
+            "更新包校验失败，现有安装未修改。请重新下载或稍后重试。", code="update_checksum_mismatch"
         )
     try:
         with zipfile.ZipFile(archive) as package:
@@ -200,18 +200,18 @@ def extract_package(archive: Path, destination: Path, manifest: dict[str, Any]) 
                     shutil.copyfileobj(source, output)
     except (zipfile.BadZipFile, RuntimeError, OSError, ValueError) as exc:
         raise AsxError(
-            "更新包内容无效，现有安装未修改", code="invalid_update_package"
+            "更新包无法使用，现有安装未修改。请重新下载或联系支持人员。", code="invalid_update_package"
         ) from exc
     root = destination / "asynx-image"
     if read_version(root) != manifest["version"]:
-        raise AsxError("更新包版本与发布信息不一致", code="invalid_update_package")
+        raise AsxError("更新包版本与发布信息不一致，请重新下载或联系支持人员。", code="invalid_update_package")
     required = (
         root / "SKILL.md",
         root / "scripts" / "asynx.py",
         root / "scripts" / "asx_runtime.py",
     )
     if not all(path.is_file() for path in required):
-        raise AsxError("更新包不完整", code="invalid_update_package")
+        raise AsxError("更新包缺少必要文件，请重新下载或联系支持人员。", code="invalid_update_package")
     return root
 
 
@@ -227,7 +227,7 @@ def validate_manifest(value: Any, version: str) -> dict[str, Any]:
         or not isinstance(value.get("python_min"), str)
         or not re.fullmatch(r"3\.\d{1,2}", value["python_min"])
     ):
-        raise AsxError("发布信息无效", code="invalid_update_manifest")
+        raise AsxError("更新服务返回的安装信息无效，请稍后重试或联系支持人员。", code="invalid_update_manifest")
     return value
 
 
@@ -256,7 +256,7 @@ def prepare_dependencies(stage: Path, previous: Path) -> None:
         )
         if result.returncode:
             raise AsxError(
-                "图片依赖安装失败，现有安装未修改", code="update_dependencies_failed"
+                "图片处理组件安装失败，现有安装未修改。请检查网络及 Python 的 pip 是否可用后重试。", code="update_dependencies_failed"
             )
     check = subprocess.run(
         [
@@ -278,7 +278,7 @@ def prepare_dependencies(stage: Path, previous: Path) -> None:
     )
     if check.returncode:
         raise AsxError(
-            "图片依赖检查失败，请重新运行安装器", code="update_dependencies_failed"
+            "图片处理组件无法正常使用，请通过原安装方式重新安装。", code="update_dependencies_failed"
         )
 
 
@@ -302,7 +302,7 @@ def smoke_test(stage: Path, version: str) -> None:
     )
     if result.returncode or result.stdout.strip() != version:
         raise AsxError(
-            "新版本启动检查失败，现有安装未修改", code="update_validation_failed"
+            "新版本无法正常启动，现有安装未修改。请稍后重试或联系支持人员。", code="update_validation_failed"
         )
 
 
@@ -311,12 +311,12 @@ def _validated_entries(
 ) -> list[dict[str, Any]]:
     entries = journal.get("entries")
     if not isinstance(entries, list) or not entries:
-        raise AsxError("更新恢复记录无效", code="invalid_update_metadata")
+        raise AsxError("更新恢复记录无法使用，请保留现有文件并联系支持人员。", code="invalid_update_metadata")
     known = {str(path) for path in allowed}
     used: set[str] = set()
     for entry in entries:
         if not isinstance(entry, dict) or entry.get("target") not in known:
-            raise AsxError("更新恢复目标不在安装列表中", code="invalid_update_metadata")
+            raise AsxError("无法确认要恢复的安装位置，请保留现有文件并联系支持人员。", code="invalid_update_metadata")
         target = Path(entry["target"])
         work = Path(str(entry.get("work", "")))
         if (
@@ -327,7 +327,7 @@ def _validated_entries(
             or target.is_symlink()
             or target.absolute() != target.resolve()
         ):
-            raise AsxError("更新恢复路径无效", code="invalid_update_metadata")
+            raise AsxError("更新恢复位置异常，已停止恢复。请保留现有文件并联系支持人员。", code="invalid_update_metadata")
         used.add(str(target))
     return entries
 
@@ -353,17 +353,17 @@ def restore_transaction(
             and inventory(backup) != entry["before"]
         ):
             raise AsxError(
-                "旧版本备份已有改动，无法自动恢复", code="update_backup_changed"
+                "旧版本备份已有改动，无法自动恢复。请先保留备份，再联系支持人员协助处理。", code="update_backup_changed"
             )
     if explicit:
         for entry in entries:
             target = Path(entry["target"])
             if installation_problem(target) is not None:
                 raise AsxError(
-                    "安装文件已有本地改动，无法直接回滚", code="local_changes"
+                    "Skill 文件有本地修改，无法直接回滚。请先备份并确认这些改动。", code="local_changes"
                 )
             if not (Path(entry["work"]) / "backup").is_dir():
-                raise AsxError("旧版本备份已不存在", code="update_backup_missing")
+                raise AsxError("找不到旧版本备份，无法回滚。请通过原安装方式安装所需版本。", code="update_backup_missing")
     # Persist rollback intent too: a killed rollback must be resumable without requiring consumed backups.
     journal["status"] = "rolling_back"
     write_json(journal_path, journal)
@@ -376,7 +376,7 @@ def restore_transaction(
             if backup.is_symlink() or (
                 (work / "discarded").exists() and target.exists()
             ):
-                raise AsxError("恢复目录需要人工检查", code="update_rollback_failed")
+                raise AsxError("恢复目录状态异常，无法自动继续。请保留现有文件并联系支持人员。", code="update_rollback_failed")
             if target.exists():
                 target.rename(work / "discarded")
             backup.rename(target)
@@ -404,7 +404,7 @@ def replace_installations(
                 raise AsxError(
                     "安装来源无法确认，请使用原安装器更新"
                     if problem != "local_changes"
-                    else "安装文件有本地改动；保留改动，或使用 --force 备份后替换",
+                    else "Skill 文件有本地修改，已停止更新。请先备份并确认是否替换，再决定是否使用 --force。",
                     code=problem,
                     details={"path": str(target)},
                 )
@@ -424,7 +424,7 @@ def replace_installations(
         # An edit while downloads/dependencies were being prepared must not be overwritten.
         if any(inventory(Path(e["target"])) != e["before"] for e in entries):
             raise AsxError(
-                "更新准备期间安装文件发生变化，请重新检查", code="local_changes"
+                "更新期间 Skill 文件被修改，已停止更新以保留改动。请确认改动后重试。", code="local_changes"
             )
         journal: dict[str, Any] = {
             "schema": 1,

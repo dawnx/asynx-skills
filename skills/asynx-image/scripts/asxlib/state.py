@@ -94,13 +94,13 @@ def _json(value: Any) -> str:
         try:
             parsed = json.loads(value)
         except json.JSONDecodeError as exc:
-            raise AsxError("State JSON value is invalid", code="invalid_state_json") from exc
+            raise AsxError("本地任务记录无法读取，请保留现有数据并联系支持。", code="invalid_state_json") from exc
         return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     try:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     except (TypeError, ValueError) as exc:
         raise AsxError(
-            f"State value cannot be serialized as JSON: {exc}", code="invalid_state_json"
+            "本地任务记录无法保存，请保留现有数据并联系支持。", code="invalid_state_json"
         ) from exc
 
 
@@ -181,8 +181,9 @@ def init_schema(connection: sqlite3.Connection) -> None:
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
     if version > SCHEMA_VERSION:
         raise AsxError(
-            f"State database schema {version} is newer than supported version {SCHEMA_VERSION}",
+            "本地任务记录由较新版本创建，请升级 Skill 后重试。",
             code="unsupported_state_schema",
+            details={"stored_version": version, "supported_version": SCHEMA_VERSION},
         )
 
 
@@ -271,7 +272,7 @@ def init_schema(connection: sqlite3.Connection) -> None:
     }
     required = {"tasks", "assets", "task_events"}
     if not required.issubset(actual):
-        raise AsxError("State database schema is incomplete", code="invalid_state_schema")
+        raise AsxError("本地任务记录不完整，请保留现有数据并联系支持。", code="invalid_state_schema")
 
 
 def ensure_batch_schema(connection: sqlite3.Connection) -> None:
@@ -340,7 +341,7 @@ def create_task_intent(
 
     if not operation.strip() or not model.strip() or not idempotency_key.strip():
         raise AsxError(
-            "Task intent requires operation, model, and idempotency key",
+            "任务信息不完整，无法保存；请检查操作参数。",
             code="invalid_task_intent",
         )
     if (request is None) == (request_json is None):
@@ -358,7 +359,7 @@ def create_task_intent(
             or existing["model"] != model
         ):
             raise AsxError(
-                "Idempotency key is already associated with a different task intent",
+                "此请求标识已用于其他任务，请使用原任务记录继续操作。",
                 code="idempotency_conflict",
                 details={"local_id": existing["local_id"]},
             )
@@ -391,10 +392,10 @@ def create_task_intent(
         ).fetchone()
         if raced is not None and raced["request_json"] == serialized_request:
             return _row_dict(raced)
-        raise AsxError(f"Cannot create task intent: {exc}", code="task_state_conflict") from exc
+        raise AsxError("本地任务记录发生冲突，无法保存；请先查看已有任务。", code="task_state_conflict") from exc
     row = connection.execute("SELECT * FROM tasks WHERE local_id = ?", (candidate_id,)).fetchone()
     if row is None:
-        raise AsxError("Task intent was not persisted", code="task_state_write_failed")
+        raise AsxError("本地任务记录未能保存，请检查数据目录的写入权限和磁盘空间。", code="task_state_write_failed")
     return _row_dict(row)
 
 
@@ -475,7 +476,7 @@ def bind_remote_task(
     last_polled: str | None = None,
 ) -> dict[str, Any]:
     if not remote_task_id.strip():
-        raise AsxError("Remote Task ID is empty", code="invalid_task_response")
+        raise AsxError("服务未返回任务编号，无法关联本地记录；请勿重复提交生成请求。", code="invalid_task_response")
     fields: dict[str, Any] = {"remote_task_id": remote_task_id}
     if remote is not None and remote_json is not None:
         raise ValueError("provide at most one remote or remote_json")
@@ -491,7 +492,7 @@ def bind_remote_task(
         result = update_task(connection, local_task_id, **fields)
     except sqlite3.IntegrityError as exc:
         raise AsxError(
-            f"Remote Task ID is already bound: {remote_task_id}",
+            f"任务 {remote_task_id} 已关联其他本地记录，请先查询该任务。",
             code="task_state_conflict",
         ) from exc
     append_event(connection, local_task_id, "remote_bound", {"remote_task_id": remote_task_id})
@@ -524,10 +525,10 @@ def update_task(
     values.append(local_task_id)
     cursor = connection.execute(f"UPDATE tasks SET {assignments} WHERE local_id = ?", (*values,))
     if cursor.rowcount != 1:
-        raise AsxError(f"Task not found: {local_task_id}", code="task_not_found")
+        raise AsxError(f"未找到本地任务：{local_task_id}。请核对任务编号。", code="task_not_found")
     row = connection.execute("SELECT * FROM tasks WHERE local_id = ?", (local_task_id,)).fetchone()
     if row is None:
-        raise AsxError(f"Task not found: {local_task_id}", code="task_not_found")
+        raise AsxError(f"未找到本地任务：{local_task_id}。请核对任务编号。", code="task_not_found")
     return _row_dict(row)
 
 
@@ -540,9 +541,9 @@ def append_event(
     created_at: str | None = None,
 ) -> dict[str, Any]:
     if not event_type.strip():
-        raise AsxError("Task event type is empty", code="invalid_task_event")
+        raise AsxError("任务变更记录不完整，无法保存；请保留现有数据并联系支持。", code="invalid_task_event")
     if get_task(connection, local_task_id) is None:
-        raise AsxError(f"Task not found: {local_task_id}", code="task_not_found")
+        raise AsxError(f"未找到本地任务：{local_task_id}。请核对任务编号。", code="task_not_found")
     timestamp = _timestamp(created_at)
     payload_json = _json(payload) if payload is not None else None
     cursor = connection.execute(
@@ -575,9 +576,9 @@ def upsert_asset(
     created_at: str | None = None,
 ) -> dict[str, Any]:
     if remote_index < 0:
-        raise AsxError("Asset index must be non-negative", code="invalid_asset")
+        raise AsxError("结果文件编号无效，无法保存记录。", code="invalid_asset")
     if get_task(connection, local_task_id) is None:
-        raise AsxError(f"Task not found: {local_task_id}", code="task_not_found")
+        raise AsxError(f"未找到本地任务：{local_task_id}。请核对任务编号。", code="task_not_found")
     now = _timestamp(created_at)
     stable_id = artifact_id or _asset_id(local_task_id, remote_index)
     byte_count = size_bytes if size_bytes is not None else bytes
@@ -609,7 +610,7 @@ def upsert_asset(
         (local_task_id, remote_index),
     ).fetchone()
     if row is None:
-        raise AsxError("Asset was not persisted", code="asset_state_write_failed")
+        raise AsxError("结果文件记录未能保存，请检查数据目录的写入权限和磁盘空间。", code="asset_state_write_failed")
     return dict(zip(row.keys(), tuple(row)))
 
 
@@ -641,12 +642,12 @@ def task_paths(
     if task is None:
         task = get_task(connection, remote_task_id=local_task_id)
     if task is None:
-        raise AsxError(f"Task not found: {local_task_id}", code="task_not_found")
+        raise AsxError(f"未找到本地任务：{local_task_id}。请核对任务编号。", code="task_not_found")
     local_id = str(task["local_id"])
     assets = list_assets(connection, local_id)
     if not assets:
         raise AsxError(
-            f"No locally indexed assets for Task {local_task_id}",
+            f"任务 {local_task_id} 暂无本地结果文件；请先等待任务完成并下载。",
             code="asset_not_found",
             task_id=local_task_id,
         )
@@ -659,7 +660,7 @@ def task_paths(
             continue
         if not include_missing and not Path(path).is_file():
             raise AsxError(
-                f"Indexed asset file is missing: {path}",
+                f"原结果文件已不在本地：{path}。请重新下载原任务结果。",
                 code="asset_file_missing",
                 details={"local_task_id": local_task_id, "path": path},
             )
