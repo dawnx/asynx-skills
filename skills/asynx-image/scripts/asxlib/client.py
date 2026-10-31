@@ -4,6 +4,8 @@ import ipaddress
 import json
 import random
 import time
+from http.client import IncompleteRead
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urljoin, urlsplit
@@ -273,8 +275,8 @@ class AsynxClient:
         items = data.get("items")
         if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
             raise AsxError("Model catalog is invalid", code="invalid_model_catalog")
-        image_models = [item for item in items if item.get("modality") == "image"]
-        return image_models, request_id
+        media_models = [item for item in items if item.get("modality") in {"image", "video"}]
+        return media_models, request_id
 
     def submit(
         self, body: dict[str, Any], idempotency_key: str
@@ -395,3 +397,102 @@ class AsynxClient:
                 raise AssertionError("unreachable")
             continue
         raise AsxError("Asset download exceeded the redirect limit", code="asset_redirect_limit")
+
+    def asset_to_file(
+        self,
+        task_id: str,
+        index: int,
+        destination: Path,
+        download_url: str | None = None,
+        *,
+        metrics: dict[str, Any] | None = None,
+        max_bytes: int = 512 * 1024 * 1024,
+    ) -> str | None:
+        """Stream into a caller-owned temporary file; publication is the caller's job."""
+        from .media_results import media_file_info
+
+        if max_bytes <= 0:
+            raise AsxError("下载大小上限必须为正数", code="invalid_download_limit")
+        allow_local = urlsplit(self.base_url).hostname in {"localhost", "127.0.0.1", "::1"}
+        url = (
+            self._url(f"/v1/tasks/{quote(task_id, safe='')}/assets/{index}")
+            if download_url is None
+            else _validate_asset_url(download_url, allow_local=allow_local)
+        )
+        if metrics is not None:
+            metrics.update(source="download_url" if download_url else "asset_endpoint", download_url=download_url)
+        opener = build_opener(_NoRedirect())
+        complete = False
+        try:
+            for _redirect in range(MAX_REDIRECTS + 1):
+                headers = {"User-Agent": f"asx-skill/{VERSION}"}
+                if _origin(url) == _origin(self.base_url):
+                    headers["Authorization"] = f"Bearer {self.api_key}"
+                for attempt in range(MAX_HTTP_ATTEMPTS):
+                    request_started = time.perf_counter()
+                    try:
+                        with opener.open(Request(url, headers=headers, method="GET"), timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
+                            response_started = time.perf_counter()
+                            declared: int | None = None
+                            raw_length = response.headers.get("Content-Length")
+                            if raw_length is not None:
+                                try:
+                                    declared = int(raw_length)
+                                except ValueError as exc:
+                                    raise AsxError("下载响应的文件大小无效", code="invalid_asset_response") from exc
+                                if declared < 0:
+                                    raise AsxError("下载响应的文件大小无效", code="invalid_asset_response")
+                                if declared > max_bytes:
+                                    raise AsxError("结果文件超过下载大小上限", code="response_too_large")
+                            total = 0
+                            # A retry starts from byte zero, never appends a partial response.
+                            with destination.open("wb") as target:
+                                while True:
+                                    chunk = response.read(min(64 * 1024, max_bytes + 1 - total))
+                                    if not chunk:
+                                        break
+                                    total += len(chunk)
+                                    if total > max_bytes:
+                                        raise AsxError("结果文件超过下载大小上限", code="response_too_large")
+                                    target.write(chunk)
+                            if declared is not None and total != declared:
+                                raise OSError("下载响应提前结束，文件尚未完整传输")
+                            media_file_info(destination)
+                            if metrics is not None:
+                                metrics.update(
+                                    ttfb_seconds=response_started - request_started,
+                                    transfer_seconds=time.perf_counter() - response_started,
+                                    bytes=total,
+                                )
+                            complete = True
+                            content_type = response.headers.get("Content-Type")
+                            return content_type if isinstance(content_type, str) else None
+                    except HTTPError as exc:
+                        if exc.code in {301, 302, 303, 307, 308}:
+                            location = exc.headers.get("Location")
+                            exc.close()
+                            if not location:
+                                raise AsxError("Asset redirect is missing Location", code="invalid_asset_redirect") from exc
+                            url = _validate_asset_url(urljoin(url, location), redirect=True, allow_local=allow_local)
+                            break
+                        try:
+                            raw = _read_limited(exc, limit=MAX_API_RESPONSE_BYTES, context="Asset error")
+                        finally:
+                            exc.close()
+                        if exc.code in TRANSIENT_HTTP_STATUSES and attempt + 1 < MAX_HTTP_ATTEMPTS:
+                            time.sleep(_retry_after(exc.headers, attempt))
+                            continue
+                        raise _api_error(exc.code, raw, exc.headers) from exc
+                    except (URLError, TimeoutError, OSError, IncompleteRead) as exc:
+                        if attempt + 1 < MAX_HTTP_ATTEMPTS:
+                            time.sleep(_retry_after(None, attempt))
+                            continue
+                        raise AsxError(
+                            f"结果文件下载未完成：{exc}", code="asset_download_failed", exit_code=3, task_id=task_id,
+                        ) from exc
+                else:
+                    raise AssertionError("unreachable")
+            raise AsxError("Asset download exceeded the redirect limit", code="asset_redirect_limit")
+        finally:
+            if not complete:
+                destination.unlink(missing_ok=True)

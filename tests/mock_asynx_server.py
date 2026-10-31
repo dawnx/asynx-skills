@@ -17,6 +17,8 @@ SUNBURST_QUALITIES = ("low", "medium", "high", "xhigh", "max", "auto")
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+# A small MP4 container fixture for transport tests, not a playable movie.
+MP4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isommp42" + b"\x00\x00\x00\x0cmdatTEST"
 
 
 def _model(name: str, *, mask: bool) -> dict[str, Any]:
@@ -152,15 +154,16 @@ def _public_task(task: dict[str, Any], base_url: str) -> dict[str, Any]:
         },
     }
     if status == "succeeded":
+        video = task["task_type"] == "video.generate"
         response["result_quality"] = "expected"
         response["result"] = {
             "assets": [
                 {
                     "index": 0,
                     "id": f"asset_{task['id']}",
-                    "kind": "image",
-                    "content_type": "image/png",
-                    "size_bytes": len(PNG),
+                    "kind": "video" if video else "image",
+                    "content_type": "video/mp4" if video else "image/png",
+                    "size_bytes": len(MP4) if video else len(PNG),
                     "width": 1,
                     "height": 1,
                     "download_url": f"{base_url}/v1/tasks/{task['id']}/assets/0",
@@ -282,10 +285,12 @@ class MockHandler(BaseHTTPRequestHandler):
                     self._error(409, "task_not_succeeded", "Task 尚未成功")
                     return
                 self.send_response(200)
-                self.send_header("Content-Type", "image/png")
-                self.send_header("Content-Length", str(len(PNG)))
+                video = task["task_type"] == "video.generate"
+                content = MP4 if video else PNG
+                self.send_header("Content-Type", "video/mp4" if video else "image/png")
+                self.send_header("Content-Length", str(len(content)))
                 self.end_headers()
-                self.wfile.write(PNG)
+                self.wfile.write(content)
                 return
             self._ok(_public_task(task, self.base_url))
             return

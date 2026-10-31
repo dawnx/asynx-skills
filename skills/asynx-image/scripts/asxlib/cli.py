@@ -62,7 +62,7 @@ def _add_image_options(parser: argparse.ArgumentParser) -> None:
 
 def _add_batch_creation_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--operation", choices=("generate", "edit"), default="generate", help="批次类型"
+        "--operation", choices=("generate", "edit", "video.generate"), default="generate", help="批次类型"
     )
     parser.add_argument("--prompt", required=True, help="提示词或编辑指令")
     parser.add_argument("--model", help="模型名称或唯一片段")
@@ -87,6 +87,7 @@ def _add_batch_creation_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--reference", action="append", default=[], help="生成参考图，可重复")
     parser.add_argument("--image", action="append", default=[], help="编辑输入图，可重复")
     parser.add_argument("--mask", help="编辑 Mask 图片")
+    _add_video_input_options(parser)
     parser.add_argument(
         "--keep-reference-original",
         action="store_true",
@@ -109,6 +110,7 @@ def _add_batch_add_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--reference", action="append", help="生成参考图，可重复")
     parser.add_argument("--image", action="append", help="编辑输入图，可重复")
     parser.add_argument("--mask", help="覆盖编辑 Mask 图片")
+    _add_video_input_options(parser)
     parser.add_argument(
         "--keep-reference-original",
         action="store_true",
@@ -120,6 +122,15 @@ def _add_batch_add_options(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_BATCH_SUBMISSIONS_PER_POLL,
         help="本次最多提交的 Task 数",
     )
+
+
+def _add_video_input_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--duration", type=float, help="视频秒数，未指定时使用 5 秒")
+    parser.add_argument("--resolution", help="视频分辨率：720p、1080p 或 2K，默认 720p")
+    parser.add_argument("--first-frame", help="首帧图片路径或 URL")
+    parser.add_argument("--last-frame", help="尾帧图片路径或 URL，需同时提供首帧")
+    parser.add_argument("--reference-video", action="append", help="参考视频 HTTP(S) URL，可重复")
+    parser.add_argument("--reference-audio", action="append", help="参考音频 HTTP(S) URL，可重复")
 
 
 def _add_local_output_options(parser: argparse.ArgumentParser) -> None:
@@ -178,7 +189,7 @@ def _add_local_image_commands(commands: argparse._SubParsersAction[argparse.Argu
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="通过 Asynx 生成和编辑图片")
+    result = argparse.ArgumentParser(description="通过 Asynx 生成图片和视频")
     result.add_argument("--version", action="version", version=VERSION)
     commands = result.add_subparsers(dest="command", required=True)
     _add_local_image_commands(commands)
@@ -212,6 +223,7 @@ def parser() -> argparse.ArgumentParser:
     doctor_command.add_argument("--updates", action="store_true", help="同时检查 Skill 更新，使用 6 小时缓存")
     models = commands.add_parser("models", help="列出可用图片模型")
     models.add_argument("--operation", choices=("all", "generate", "edit"), default="all")
+    models.add_argument("--modality", choices=("image", "video", "all"), default="image")
 
     generate = commands.add_parser("generate", help="生成一张或多张图片")
     _add_image_options(generate)
@@ -222,6 +234,19 @@ def parser() -> argparse.ArgumentParser:
     edit.add_argument("--image", action="append", default=[])
     edit.add_argument("--from-task", help="使用本机索引中指定 Task 的已下载图片")
     edit.add_argument("--mask")
+
+    video = commands.add_parser("video", help="通过 MiniMax-H3 生成视频")
+    video_commands = video.add_subparsers(dest="video_command", required=True)
+    video_generate = video_commands.add_parser("generate", help="生成并下载视频")
+    _add_video_input_options(video_generate)
+    video_generate.add_argument("--prompt", required=True)
+    video_generate.add_argument("--model", help="当前仅支持 MiniMax-H3")
+    video_generate.add_argument("--aspect-ratio", help="画幅比例，默认 16:9")
+    video_generate.add_argument("--reference", action="append", default=[], help="参考图片路径或 URL，可重复")
+    video_generate.add_argument("--from-task", help="将指定任务的单张本地图片用作首帧")
+    video_generate.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
+    video_generate.add_argument("--idempotency-key")
+    video_generate.add_argument("--detach", action="store_true")
 
     status = commands.add_parser("status", help="查询一个 Task")
     status.add_argument("task_id")
@@ -239,6 +264,7 @@ def parser() -> argparse.ArgumentParser:
     recent.add_argument("--query", help="按 Task ID、Prompt、模型或文件名筛选")
     recent.add_argument("--limit", type=int, default=20, help="返回数量")
     recent.add_argument("--latest", action="store_true", help="只返回最近一个结果")
+    recent.add_argument("--modality", choices=("image", "video"), help="仅返回图片或视频")
 
     task = commands.add_parser("task", help="管理本地任务记录")
     task_commands = task.add_subparsers(dest="task_command", required=True)
@@ -329,7 +355,7 @@ def execute(args: argparse.Namespace, *, locked_root: Path | None = None) -> tup
             payload["updates"] = update_check()
         return payload, 0 if payload["ok"] else 2
     if args.command == "recent":
-        return recent_payload(args.query, args.limit, latest=args.latest), 0
+        return recent_payload(args.query, args.limit, latest=args.latest, modality=args.modality), 0
     if args.command == "task":
         if args.task_command == "list":
             return local_tasks_payload(status=args.status, limit=args.limit), 0
@@ -356,7 +382,9 @@ def execute(args: argparse.Namespace, *, locked_root: Path | None = None) -> tup
         return execute_batch(None, args)
     client = _client()
     if args.command == "models":
-        return models_payload(client, args.operation), 0
+        return models_payload(client, args.operation, modality=args.modality), 0
+    if args.command == "video":
+        return run_submission(client, args, "video.generate")
     if args.command == "generate":
         return run_submission(client, args, "image.generate")
     if args.command == "edit":
@@ -379,7 +407,7 @@ def main(*, locked_root: Path | None = None) -> NoReturn:
         args = parser().parse_args()
         payload, exit_code = execute(args, locked_root=locked_root)
         if exit_code == 0 and payload.get("ok") and (
-            (args.command in {"generate", "edit", "wait"} and payload.get("status") == "succeeded")
+            (args.command in {"generate", "edit", "video", "wait"} and payload.get("status") == "succeeded")
             or (args.command == "batch" and payload.get("batch", {}).get("status") == "completed")
         ):
             from .updates import automatic_update_notice

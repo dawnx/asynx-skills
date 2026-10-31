@@ -23,7 +23,7 @@ from .constants import (
     UTC,
 )
 from .errors import AsxError
-from .image_results import attach_image_details, requested_aspect_ratio
+from .image_results import requested_aspect_ratio
 from .images import (
     build_task,
     cache_models,
@@ -31,6 +31,7 @@ from .images import (
     task_input_warnings,
     validate_idempotency_key,
 )
+from .media_results import attach_media_details, media_file_info
 from .output import log
 from .state import (
     append_event,
@@ -54,6 +55,7 @@ from .state import (
 from .state import (
     task_paths as ledger_task_paths,
 )
+from .videos import body_from_video_args
 
 _SAFE_PATH_COMPONENT = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -79,16 +81,19 @@ def wait_for_terminal(
     *,
     sleep: Callable[[float], None] = time.sleep,
     initial_delay: float = MAX_TASK_POLL_DELAY_SECONDS,
+    poll_interval: float | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     task_id = task.get("id")
     if not isinstance(task_id, str):
         raise AsxError("Task response is missing an ID", code="invalid_task_response")
+    original_task_type = task.get("task_type")
     deadline = parse_deadline(task.get("deadline_at"))
     client_deadline = (
         deadline + timedelta(seconds=30)
         if deadline
-        else datetime.now(UTC) + timedelta(minutes=20)
+        else datetime.now(UTC) + timedelta(minutes=65 if str(task.get("task_type", "")).startswith("video.") else 20)
     )
+    interval = poll_interval or (10.0 if str(task.get("task_type", "")).startswith("video.") else MAX_TASK_POLL_DELAY_SECONDS)
     delay = initial_delay
     last_status: str | None = None
     while True:
@@ -114,9 +119,11 @@ def wait_for_terminal(
                 details={"next_action_args": ["wait", task_id]},
             )
         sleep(delay)
-        delay = MAX_TASK_POLL_DELAY_SECONDS + random.uniform(0.0, MAX_TASK_POLL_DELAY_SECONDS * 0.15)
+        delay = interval + random.uniform(0.0, interval * 0.15)
         try:
             task, request_id = client.task(task_id)
+            if original_task_type:
+                task.setdefault("task_type", original_task_type)
         except AsxError as exc:
             exc.task_id = task_id
             if exc.details is None:
@@ -166,6 +173,8 @@ def download_assets(
     directory = Path(output_dir).expanduser().resolve()
     directory.mkdir(parents=True, exist_ok=True)
     files: list[str] = completed_files if completed_files is not None else []
+    is_video_task = str(task.get("task_type", "")).startswith("video.")
+    has_video = False
     cached_assets: dict[int, dict[str, Any]] = {}
     if local_task_id:
         cache_connection = connect_ledger_db()
@@ -189,6 +198,8 @@ def download_assets(
         cached = cached_assets.get(index)
         cached_path = cached.get("path") if cached else None
         if isinstance(cached_path, str) and cached_path and Path(cached_path).is_file():
+            if is_video_task:
+                has_video = has_video or media_file_info(Path(cached_path))["kind"] == "video"
             files.append(cached_path)
             asset_metrics.update(
                 {
@@ -200,27 +211,35 @@ def download_assets(
             if metrics is not None:
                 metrics.append(asset_metrics)
             continue
-        data, _response_type = client.asset(
-            task_id, index, download_url, metrics=asset_metrics
-        )
-        actual_mime = image_mime(data)
-        extension = _extension(actual_mime, data)
-        path = (
-            Path(cached_path)
-            if isinstance(cached_path, str) and cached_path
-            else _unique_output_path(directory, f"{prefix or task_id}-{index}", extension)
-        )
-        temporary = path.with_name(f".{path.name}.{secrets.token_hex(4)}.part")
+        temporary = _unique_output_path(directory, f"{task_id}-{index}-{secrets.token_hex(4)}", "part")
         save_started = time.perf_counter()
         try:
-            temporary.write_bytes(data)
+            if is_video_task:
+                client.asset_to_file(task_id, index, temporary, download_url, metrics=asset_metrics)
+                file_info = media_file_info(temporary)
+                actual_mime = str(file_info["content_type"])
+                has_video = has_video or file_info["kind"] == "video"
+                extension = str(file_info["extension"])
+                size_bytes = int(file_info["size_bytes"])
+                checksum = str(file_info["sha256"])
+            else:
+                data, _response_type = client.asset(task_id, index, download_url, metrics=asset_metrics)
+                actual_mime = image_mime(data)
+                extension = _extension(actual_mime, data)
+                size_bytes = len(data)
+                checksum = hashlib.sha256(data).hexdigest()
+                temporary.write_bytes(data)
+            path = (
+                Path(cached_path)
+                if isinstance(cached_path, str) and cached_path
+                else _unique_output_path(directory, f"{prefix or task_id}-{index}", extension)
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
             os.replace(temporary, path)
         except OSError as exc:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise AsxError(f"Cannot save generated image: {exc}", code="output_write_failed") from exc
+            raise AsxError(f"Cannot save generated media: {exc}", code="output_write_failed") from exc
+        finally:
+            temporary.unlink(missing_ok=True)
         asset_metrics["save_seconds"] = time.perf_counter() - save_started
         asset_metrics.pop("download_url", None)
         if metrics is not None:
@@ -235,14 +254,19 @@ def download_assets(
                     path=str(path),
                     remote_url=download_url,
                     mime=actual_mime,
-                    bytes=len(data),
-                    sha256=hashlib.sha256(data).hexdigest(),
+                    bytes=size_bytes,
+                    sha256=checksum,
                     state="available",
                 )
                 connection.commit()
             finally:
                 connection.close()
         files.append(str(path))
+    if is_video_task and not has_video:
+        raise AsxError(
+            "任务返回了附件，但没有可交付的 MP4 视频；已有文件已保留，请检查原任务。",
+            code="missing_video_asset", task_id=task_id,
+        )
     return files
 
 
@@ -284,23 +308,25 @@ def index_downloaded_artifacts(
                 last_polled=utc_now(),
             )
         local_id = str(existing["local_id"])
-        for index, path in enumerate(files):
-            data = Path(path).read_bytes()
+        assets = task.get("result", {}).get("assets", [])
+        for position, path in enumerate(files):
+            index = assets[position].get("index", position) if position < len(assets) else position
+            info = media_file_info(Path(path))
             upsert_asset(
                 connection,
                 local_id,
                 index,
                 path=path,
-                mime=image_mime(data),
-                bytes=len(data),
-                sha256=hashlib.sha256(data).hexdigest(),
+                mime=info["content_type"],
+                bytes=info["size_bytes"],
+                sha256=info["sha256"],
                 state="available",
             )
         connection.commit()
     except (OSError, sqlite3.Error, AsxError) as exc:
         return {
             "code": "artifact_index_failed",
-            "message": f"本地结果索引写入失败，图片仍已保存：{exc}",
+            "message": f"本地结果索引写入失败，文件仍已保存：{exc}",
         }
     finally:
         connection.close()
@@ -318,6 +344,8 @@ def _task_identifier_row(connection: sqlite3.Connection, identifier: str) -> dic
 
 def _local_task_payload(row: dict[str, Any]) -> dict[str, Any]:
     remote = row.get("remote")
+    request = row.get("request")
+    task_type = request.get("task_type") if isinstance(request, dict) else None
     payload: dict[str, Any] = {
         "ok": row.get("status") not in {"failed", "timeout", "canceled", "orphaned"},
         "schema_version": 1,
@@ -326,6 +354,8 @@ def _local_task_payload(row: dict[str, Any]) -> dict[str, Any]:
         "status": row.get("status"),
         "model": row.get("model"),
         "operation": row.get("operation"),
+        "task_type": task_type,
+        "modality": task_type.split(".", 1)[0] if isinstance(task_type, str) else "image",
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
         "last_polled": row.get("last_polled"),
@@ -444,7 +474,11 @@ def _remote_task_for_row(client: AsynxClient, row: dict[str, Any]) -> tuple[dict
             task_id=str(row.get("local_id")),
             details={"next_action_args": ["task", "recover", str(row["local_id"])]},
         )
-    return client.task(remote_id)
+    task, request_id = client.task(remote_id)
+    request = row.get("request")
+    if isinstance(request, dict) and request.get("task_type"):
+        task.setdefault("task_type", request["task_type"])
+    return task, request_id
 
 
 def sync_local_task(
@@ -734,6 +768,7 @@ def task_payload(
         "ok": status == "succeeded" or status not in TERMINAL_STATUSES,
         "task_id": task.get("id"),
         "status": status,
+        "task_type": task.get("task_type"),
         "model": task.get("model"),
         "result_quality": task.get("result_quality"),
         "billing": task.get("billing"),
@@ -743,7 +778,7 @@ def task_payload(
     }
     if files is not None:
         payload["files"] = files
-        attach_image_details(payload, files, expected_ratio=expected_ratio or requested_aspect_ratio(task))
+        attach_media_details(payload, files, expected_ratio=expected_ratio or requested_aspect_ratio(task), task=task)
     if status in TERMINAL_STATUSES and status != "succeeded":
         payload["ok"] = False
         payload["error"] = task.get("error") or {
@@ -789,7 +824,7 @@ def _download_task_result(
         payload["error"] = {**download_error, "phase": "download"}
         payload.setdefault("warnings", []).append({
             "code": "download_incomplete",
-            "message": "图片已生成，但下载未完成；已保存的文件仍可使用。请继续下载原任务，不要重新生图。",
+            "message": "生成已完成，但下载未完成；已保存的文件仍可使用。请继续下载原任务，不要重新生成。",
         })
         _task_followup(payload)
         return payload, 4
@@ -837,7 +872,7 @@ def run_submission(
     started_at = time.perf_counter()
     initial_delay = initial_poll_delay_seconds() if not args.detach else 0.0
     log(f"正在准备 {task_type} 请求")
-    references = args.reference if task_type == "image.generate" else args.image
+    references = args.reference if task_type in {"image.generate", "video.generate"} else args.image
     from_task = getattr(args, "from_task", None)
     if task_type == "image.edit" and from_task:
         if references:
@@ -849,20 +884,38 @@ def run_submission(
             references = ledger_task_paths(connection, from_task)
         finally:
             connection.close()
-    body, model, catalog_request_id = build_task(
-        client,
-        task_type=task_type,
-        model_selector=args.model,
-        prompt=args.prompt,
-        image_size=args.image_size,
-        aspect_ratio=args.aspect_ratio,
-        quality=args.quality,
-        count=args.count,
-        output_format=args.output_format,
-        references=references,
-        mask=args.mask if task_type == "image.edit" else None,
-        keep_reference_original=args.keep_reference_original,
-    )
+    if task_type == "video.generate":
+        if from_task:
+            if args.first_frame:
+                raise AsxError("--from-task 与 --first-frame 不能同时使用", code="conflicting_video_inputs")
+            connection = connect_ledger_db()
+            try:
+                paths = ledger_task_paths(connection, from_task)
+            finally:
+                connection.close()
+            if len(paths) != 1 or media_file_info(Path(paths[0]))["kind"] != "image":
+                raise AsxError(
+                    "请选择一张图片作为首帧，用 --first-frame 传入路径；不能直接使用多张结果或视频。",
+                    code="ambiguous_video_source",
+                )
+            args = argparse.Namespace(**vars(args))
+            args.first_frame = paths[0]
+        body, model, catalog_request_id = body_from_video_args(client, args)
+    else:
+        body, model, catalog_request_id = build_task(
+            client,
+            task_type=task_type,
+            model_selector=args.model,
+            prompt=args.prompt,
+            image_size=args.image_size,
+            aspect_ratio=args.aspect_ratio,
+            quality=args.quality,
+            count=args.count,
+            output_format=args.output_format,
+            references=references,
+            mask=args.mask if task_type == "image.edit" else None,
+            keep_reference_original=args.keep_reference_original,
+        )
     prepared_at = time.perf_counter()
     input_warnings = task_input_warnings(body)
     for warning in input_warnings:
@@ -888,7 +941,9 @@ def run_submission(
             task, request_id = client.task(str(local_row["remote_task_id"]))
         else:
             task, request_id = client.submit(body, idempotency_key)
+            task.setdefault("task_type", task_type)
             _bind_submission(client, local_id, task, request_id)
+        task.setdefault("task_type", task_type)
     except AsxError as exc:
         _record_submit_error(local_id, exc)
         if exc.details is None:
@@ -917,6 +972,7 @@ def run_submission(
     task, request_id = wait_for_terminal(
         client, task, request_id,
         initial_delay=MAX_TASK_POLL_DELAY_SECONDS if local_row.get("remote_task_id") else initial_delay,
+        poll_interval=10.0 if task_type == "video.generate" else None,
     )
     _update_local_snapshot(local_id, task, request_id)
     finished_at = time.perf_counter()
@@ -940,19 +996,28 @@ def run_submission(
     return payload, code
 
 
-def models_payload(client: AsynxClient, operation: str) -> dict[str, Any]:
+def models_payload(client: AsynxClient, operation: str, *, modality: str = "image") -> dict[str, Any]:
     models, request_id = client.models()
     cache_models(client.base_url, models)
-    task_type = None if operation == "all" else f"image.{operation}"
+    task_type = None if operation == "all" else f"{modality}.{operation}"
     items = []
     for model in models:
-        if task_type and task_type not in model.get("task_types", []):
+        if modality != "all" and model.get("modality", "image") != modality:
+            continue
+        if model.get("modality") == "video" and model.get("name") != "MiniMax-H3":
+            continue
+        if modality == "all" and operation != "all" and not any(
+            str(value).endswith(f".{operation}") for value in model.get("task_types", [])
+        ):
+            continue
+        if modality != "all" and task_type and task_type not in model.get("task_types", []):
             continue
         items.append(
             {
                 key: model.get(key)
                 for key in (
                     "name",
+                    "modality",
                     "task_types",
                     "capabilities",
                     "pricing",

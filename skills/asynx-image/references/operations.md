@@ -1,6 +1,6 @@
 # 操作参考
 
-按当前需求阅读对应章节：[批次](#批次)、[任务恢复与取消](#任务恢复与取消)、[本地图片工具](#本地图片工具)、[输入图片](#输入图片)、[生成参数](#生成参数)。
+按当前需求阅读对应章节：[批次](#批次)、[任务恢复与取消](#任务恢复与取消)、[本地图片工具](#本地图片工具)、[输入图片](#输入图片)、[生成参数](#生成参数)。视频输入与生成参数见[视频操作](video.md)。
 
 命令中的 `<skill-dir>` 替换为当前已安装 Skill 的绝对路径，Windows 可用 `py` 替代 `python3`。文件路径使用绝对路径并完整引用。
 
@@ -14,7 +14,7 @@ python3 "<skill-dir>/scripts/asynx.py" batch status "<batch-id>" --refresh
 python3 "<skill-dir>/scripts/asynx.py" batch wait "<batch-id>"
 ```
 
-`--total` 是任务数，`--count` 是每个任务的输出图片数，默认每任务一张。创建和追加会开始提交任务并返回批次 ID，后续操作使用该 ID。
+`--total` 是任务数，图片批次的 `--count` 是每个任务的输出图片数，默认每任务一张。创建和追加会开始提交任务并返回批次 ID，后续操作使用该 ID。视频批次使用 `--operation video.generate`，参数见[视频批次](video.md#视频批次)。
 
 批次默认先返回受理进度；用户要求等完时，执行 `batch wait`，等待同一进程。可用 `--max-wait` 限制本次等待秒数，超时不代表任务失败或取消。Skill 没有常驻调度器：执行进程停止后，已提交的远端任务继续执行，待提交项不会自动推进；只有宿主确实支持并已安排持续执行时，才承诺后台继续整个批次。
 
@@ -27,7 +27,7 @@ python3 "<skill-dir>/scripts/asynx.py" batch wait "<batch-id>"
 | `batch resume` | 解除暂停；随后仍需轮询推进 |
 | `batch cancel` | 停止未提交项，并向已提交的任务请求取消 |
 
-查进度使用 `batch status --refresh`；继续执行使用 `batch wait`。返回的 `batch.files`、`batch.images` 可直接交付；`failed_items`、`download_errors` 和 `warnings` 说明失败、下载未完成或降级情况，无需再查一次明细。需要逐项进度时加 `--items`。自定义调度可用 `batch poll --limit` 控制单次最多提交的任务数。
+查进度使用 `batch status --refresh`；继续执行使用 `batch wait`。返回的 `batch.files` 可直接交付，`images` 和 `videos` 区分结果类型；`failed_items`、`download_errors` 和 `warnings` 说明失败、下载未完成或降级情况，无需再查一次明细。需要逐项进度时加 `--items`。自定义调度可用 `batch poll --limit` 控制单次最多提交的任务数。
 
 追加规则：
 - 优先使用当前对话确定的批次 ID，不依赖全局最近记录。省略 ID 时，多个活动批次会报歧义；没有活动批次时会回退到最近批次，但已完成或已取消的批次不能追加。
@@ -54,8 +54,8 @@ python3 "<skill-dir>/scripts/asynx.py" task recover "<task-id>"
 python3 "<skill-dir>/scripts/asynx.py" task cancel "<task-id>"
 ```
 
-- 已提交：刷新或等待原任务，两者均接受本地或远端 ID。生成成功但下载失败时，结果保留 `status: succeeded`、`download_status: failed` 和已经下载的文件；用 `wait` 继续原下载。文件丢失也可刷新补下载；远端文件不可用时再让用户选择新图片或重新生成。
-- 提交中断：用户要求继续时执行 `task recover "<task-id>"`，只恢复该项，复用原请求避免重复提交。返回仍在运行时，用 `wait` 等待原任务；不会自动重试已失败或取消的生图。
+- 已提交：刷新或等待原任务，两者均接受本地或远端 ID。图片和视频生成成功但下载失败时，结果保留 `status: succeeded`、`download_status: failed` 和已经下载的文件；用 `wait` 继续原下载。文件丢失也可刷新补下载；远端文件不可用时再让用户选择新素材或重新生成。
+- 提交中断：用户要求继续时执行 `task recover "<task-id>"`，只恢复该项，复用原请求避免重复提交。返回仍在运行时，用 `wait` 等待原任务；不会自动重试已失败或取消的生成任务。
 - `task recover` 不带 ID 会检查最近一批记录，默认上限 50；仅用于用户明确要求批量恢复。`--limit` 是检查数量，不是任务过滤器。
 - 批次的恢复使用 `batch poll`，不要用全局 `task recover` 代替批次调度。
 - 等待中断、暂停或发出取消请求都不等于远端已停止。保留原任务记录，不为同一中断请求重新生成幂等键。

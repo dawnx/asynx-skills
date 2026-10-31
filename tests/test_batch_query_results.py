@@ -136,7 +136,7 @@ class BatchQueryResultTests(unittest.TestCase):
         with patch.object(self.client, "task", side_effect=task), patch.object(
             batches.time, "sleep",
         ), patch.object(
-            batches, "attach_image_details", wraps=batches.attach_image_details,
+            batches, "attach_media_details", wraps=batches.attach_media_details,
         ) as metadata:
             result = batches.wait_for_batch(self.client, batch_id, interval=1, max_wait=10)
         self.assertEqual(result["batch"]["status"], "completed")

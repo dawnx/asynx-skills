@@ -20,9 +20,11 @@ from .constants import (
     UTC,
 )
 from .errors import AsxError
-from .image_results import attach_image_details, requested_aspect_ratio
+from .image_results import requested_aspect_ratio
 from .images import build_task, task_input_warnings
+from .media_results import attach_media_details
 from .output import log
+from .reference_media import validate_request_body
 from .state import (
     append_event,
     bind_remote_task,
@@ -38,6 +40,7 @@ from .state import (
     update_task as update_state_task,
 )
 from .tasks import download_assets, index_downloaded_artifacts
+from .videos import _media_url, build_video_task, prepare_video_image
 
 
 def utc_now() -> str:
@@ -117,6 +120,8 @@ def batch_summary(connection: sqlite3.Connection, batch: sqlite3.Row) -> dict[st
         "id": batch["id"],
         "name": batch["name"],
         "operation": batch["operation"],
+        "task_type": _template(batch).get("task_type", f"image.{batch['operation']}"),
+        "modality": "video" if _template(batch).get("task_type") == "video.generate" else "image",
         "status": batch["status"],
         "model": batch["model"],
         "output_dir": batch["output_dir"],
@@ -201,6 +206,14 @@ def _insert_items(
         )
 
 
+def _reject_image_options(
+    image_size: str | None, quality: str | None, count: int | None,
+    output_format: str | None, mask: str | None,
+) -> None:
+    if any(value is not None for value in (image_size, quality, output_format, mask)) or count not in (None, 1):
+        raise AsxError("视频批次不支持图片尺寸、质量、Mask、输出格式或单任务多图参数。", code="conflicting_batch_options")
+
+
 def create_batch(
     client: AsynxClient,
     *,
@@ -218,25 +231,40 @@ def create_batch(
     name: str | None,
     output_dir: str | None,
     keep_reference_original: bool = False,
+    duration: float = 5,
+    resolution: str = "720p",
+    first_frame: str | None = None,
+    last_frame: str | None = None,
+    reference_videos: list[str] | None = None,
+    reference_audios: list[str] | None = None,
 ) -> dict[str, Any]:
     if not 1 <= total <= MAX_BATCH_ITEMS:
         raise AsxError(
             f"Batch size must be between 1 and {MAX_BATCH_ITEMS}", code="invalid_batch_size"
         )
-    body, selected_model, catalog_request_id = build_task(
-        client,
-        task_type=f"image.{operation}",
-        model_selector=model_selector,
-        prompt=prompt,
-        image_size=image_size,
-        aspect_ratio=aspect_ratio,
-        quality=quality,
-        count=count,
-        output_format=output_format,
-        references=references,
-        mask=mask,
-        keep_reference_original=keep_reference_original,
-    )
+    if operation == "video.generate":
+        _reject_image_options(image_size, quality, count, output_format, mask)
+        body, selected_model, catalog_request_id = build_video_task(
+            client, prompt=prompt, model_selector=model_selector, duration=duration,
+            resolution=resolution, aspect_ratio=aspect_ratio or "16:9", references=references,
+            first_frame=first_frame, last_frame=last_frame,
+            reference_videos=reference_videos, reference_audios=reference_audios,
+        )
+    else:
+        body, selected_model, catalog_request_id = build_task(
+            client,
+            task_type=f"image.{operation}",
+            model_selector=model_selector,
+            prompt=prompt,
+            image_size=image_size,
+            aspect_ratio=aspect_ratio,
+            quality=quality,
+            count=count,
+            output_format=output_format,
+            references=references,
+            mask=mask,
+            keep_reference_original=keep_reference_original,
+        )
     batch_id = _new_batch_id()
     now = utc_now()
     resolved_output_dir = str(
@@ -251,7 +279,7 @@ def create_batch(
             "VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?)",
             (
                 batch_id,
-                operation,
+                "generate" if operation == "video.generate" else operation,
                 batch_name,
                 selected_model,
                 resolved_output_dir,
@@ -300,6 +328,12 @@ def add_to_batch(
     quality: str | None,
     output_format: str | None,
     keep_reference_original: bool = False,
+    duration: float | None = None,
+    resolution: str | None = None,
+    first_frame: str | None = None,
+    last_frame: str | None = None,
+    reference_videos: list[str] | None = None,
+    reference_audios: list[str] | None = None,
 ) -> dict[str, Any]:
     if not 1 <= total <= MAX_BATCH_ITEMS:
         raise AsxError(
@@ -325,9 +359,39 @@ def add_to_batch(
                 aspect_ratio,
                 quality,
                 output_format,
+                duration, resolution, first_frame, last_frame, reference_videos, reference_audios,
             )
         )
-        if has_overrides:
+        is_video = body.get("task_type") == "video.generate"
+        if is_video and has_overrides:
+            _reject_image_options(image_size, quality, count, output_format, mask)
+            value = body["input"]
+            existing = value.get("inputs", [])
+            body, _model, _rid = build_video_task(
+                client, prompt=prompt if prompt is not None else value["prompt"], model_selector=batch["model"],
+                duration=duration if duration is not None else value["duration"],
+                resolution=resolution if resolution is not None else value["resolution"],
+                aspect_ratio=aspect_ratio if aspect_ratio is not None else value["aspect_ratio"],
+            )
+            inputs: list[dict[str, str]] = []
+            for kind, role, replacement in (
+                ("image", "reference", references),
+                ("image", "first_frame", [first_frame] if first_frame is not None else None),
+                ("image", "last_frame", [last_frame] if last_frame is not None else None),
+                ("video", "reference", reference_videos), ("audio", "reference", reference_audios),
+            ):
+                if replacement is None:
+                    inputs.extend(dict(item) for item in existing if item["type"] == kind and item["role"] == role)
+                else:
+                    prepare = prepare_video_image if kind == "image" else _media_url
+                    inputs.extend({"type": kind, "role": role, "url": prepare(source)} for source in replacement)
+            if any(item["role"] == "last_frame" for item in inputs) and not any(item["role"] == "first_frame" for item in inputs):
+                raise AsxError("尾帧需要同时提供首帧。", code="missing_first_frame")
+            body["input"]["inputs"] = inputs
+            validate_request_body(body)
+        elif has_overrides:
+            if any(value is not None for value in (duration, resolution, first_frame, last_frame, reference_videos, reference_audios)):
+                raise AsxError("图片批次不支持视频参数。", code="conflicting_batch_options")
             input_value = body.get("input")
             if not isinstance(input_value, dict):
                 raise AsxError("Batch template has invalid input", code="invalid_batch_state")
@@ -460,6 +524,8 @@ def _attach_batch_results(
         ledger_files.setdefault(str(asset["idempotency_key"]), []).append(str(asset["path"]))
     files: list[str] = []
     images: list[dict[str, Any]] = []
+    videos: list[dict[str, Any]] = []
+    media: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     download_errors: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -480,7 +546,7 @@ def _attach_batch_results(
                 **identity,
                 "error": error or {
                     "code": "download_pending",
-                    "message": "图片已生成，但尚未完整下载；刷新或等待此批次即可继续下载，无需重新生成。",
+                    "message": "结果已生成，但尚未完整下载；刷新或等待此批次即可继续下载，无需重新生成。",
                 },
             })
         elif error and row["status"] not in {"failed", "timeout", "canceled"}:
@@ -501,14 +567,16 @@ def _attach_batch_results(
         files.extend(new_files)
         details: dict[str, Any] = {}
         if new_files:
-            attach_image_details(details, new_files, expected_ratio=ratio)
+            attach_media_details(details, new_files, expected_ratio=ratio, task=remote)
         images.extend({**image, **identity} for image in details.get("images", []))
+        videos.extend({**video, **identity} for video in details.get("videos", []))
+        media.extend({**item, **identity} for item in details.get("media", []))
         warnings.extend({**warning, **identity} for warning in details.get("warnings", []))
-    summary.update(files=files, images=images, failed_items=failures, download_errors=download_errors)
+    summary.update(files=files, images=images, videos=videos, media=media, failed_items=failures, download_errors=download_errors)
     if download_errors:
         warnings.append({
             "code": "batch_download_incomplete",
-            "message": "部分图片尚未完整下载，请继续等待或刷新此批次；不要重新提交生成任务。",
+            "message": "部分结果尚未完整下载，请继续等待或刷新此批次；不要重新提交生成任务。",
         })
     if failures:
         paused_notice = summary.get("action_required", "") if batch["status"] == "paused" else ""
@@ -645,7 +713,7 @@ def poll_batch(
                 local_task_id = f"batchitem_{int(item['id'])}"
                 intent = create_task_intent(
                     connection,
-                    operation=str(batch["operation"]),
+                    operation=("video.generate" if _template(batch).get("task_type") == "video.generate" else str(batch["operation"])),
                     model=str(batch["model"]),
                     idempotency_key=str(item["idempotency_key"]),
                     request=body,
@@ -744,6 +812,7 @@ def poll_batch(
             batch_local_task_id = str(state_task_row["local_id"]) if state_task_row else None
             try:
                 task, request_id = client.task(remote_task_id)
+                task.setdefault("task_type", _template(batch).get("task_type"))
             except AsxError as exc:
                 refresh_errors.append({
                     "sequence": item["sequence"], "task_id": remote_task_id,
@@ -842,7 +911,7 @@ def poll_batch(
                         continue
                 if files and not batch_local_task_id:
                     artifact_warning = index_downloaded_artifacts(
-                        task, files, operation=batch["operation"]
+                        task, files, operation=("video.generate" if _template(batch).get("task_type") == "video.generate" else batch["operation"])
                     )
                     if artifact_warning:
                         artifact_warnings.append(artifact_warning)
@@ -1033,8 +1102,16 @@ def execute_batch(
     if action == "cancel":
         return cancel_batch(client, args.batch_id), 0
     if action == "create":
-        log("正在创建并提交图片批次")
-        references = args.reference if args.operation == "generate" else args.image
+        duration = getattr(args, "duration", None)
+        log("正在创建并提交任务批次")
+        references = args.reference if args.operation in {"generate", "video.generate"} else args.image
+        if args.operation == "video.generate" and args.image:
+            raise AsxError("视频参考图请使用 --reference 或 --first-frame。", code="conflicting_batch_options")
+        if args.operation != "video.generate" and any(
+            getattr(args, field, None) is not None
+            for field in ("duration", "resolution", "first_frame", "last_frame", "reference_video", "reference_audio")
+        ):
+            raise AsxError("图片批次不支持视频参数。", code="conflicting_batch_options")
         if args.operation == "edit" and not references:
             raise AsxError("编辑批次至少需要一张输入图片", code="missing_edit_image")
         created = create_batch(
@@ -1053,6 +1130,11 @@ def execute_batch(
             name=args.name,
             output_dir=args.output_dir,
             keep_reference_original=args.keep_reference_original,
+            duration=duration if duration is not None else 5,
+            resolution=getattr(args, "resolution", None) or "720p",
+            first_frame=getattr(args, "first_frame", None), last_frame=getattr(args, "last_frame", None),
+            reference_videos=getattr(args, "reference_video", None),
+            reference_audios=getattr(args, "reference_audio", None),
         )
         for warning in created.get("warnings", []):
             log(f"提示：{warning['message']}")
@@ -1076,6 +1158,10 @@ def execute_batch(
             quality=args.quality,
             output_format=args.output_format,
             keep_reference_original=args.keep_reference_original,
+            duration=getattr(args, "duration", None), resolution=getattr(args, "resolution", None),
+            first_frame=getattr(args, "first_frame", None), last_frame=getattr(args, "last_frame", None),
+            reference_videos=getattr(args, "reference_video", None),
+            reference_audios=getattr(args, "reference_audio", None),
         )
         for warning in result.get("warnings", []):
             log(f"提示：{warning['message']}")

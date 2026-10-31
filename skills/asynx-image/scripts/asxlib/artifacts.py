@@ -153,7 +153,8 @@ def artifact_paths(connection: sqlite3.Connection, task_id: str) -> list[str]:
 
 
 def recent_payload(
-    query: str | None = None, limit: int = 20, *, latest: bool = False
+    query: str | None = None, limit: int = 20, *, latest: bool = False,
+    modality: str | None = None,
 ) -> dict[str, Any]:
     from .state import connect_db as connect_ledger_db
 
@@ -161,6 +162,9 @@ def recent_payload(
     try:
         clauses: list[str] = []
         params: list[Any] = []
+        if modality:
+            clauses.append("a.mime LIKE ?")
+            params.append(f"{modality}/%")
         if query and query.strip():
             pattern = f"%{query.strip()}%"
             clauses.append(
@@ -194,6 +198,9 @@ def recent_payload(
                     "prompt": prompt,
                     "model": row["model"],
                     "operation": row["operation"],
+                    "task_type": request.get("task_type") if isinstance(request, dict) else None,
+                    "kind": str(row["mime"] or "").split("/", 1)[0] or None,
+                    "content_type": row["mime"],
                     "created_at": row["created_at"],
                     "missing": not Path(path).is_file(),
                 }
