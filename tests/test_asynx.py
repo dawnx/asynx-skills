@@ -29,7 +29,7 @@ from asxlib import (
     state,
     tasks,
 )
-from asxlib.constants import DEFAULT_BASE_URL
+from asxlib.constants import DEFAULT_BASE_URL, VERSION
 
 import install as installer
 
@@ -304,7 +304,7 @@ class UnitTestCase(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(installed.returncode, 0, installed.stderr)
-            self.assertEqual(installed.stdout.strip(), "0.6.4")
+            self.assertEqual(installed.stdout.strip(), VERSION)
 
     def test_installer_can_install_both_agents_noninteractively(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
