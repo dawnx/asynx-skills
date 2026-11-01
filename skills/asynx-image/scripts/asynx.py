@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Asynx 图片 Agent Skill 的稳定命令行入口。"""
+"""Asynx 图片与视频 Agent Skill 的命令行入口。"""
 
 import io
 import json
@@ -39,9 +39,9 @@ if __name__ == "__main__":
                     "ok": False,
                     "error": {
                         "code": "update_busy" if busy else "runtime_lock_error",
-                        "message": "Skill 正在使用或更新中，请稍后重试"
+                        "message": "Skill 正在使用或更新中，请稍后重试。"
                         if busy
-                        else "无法访问 Skill 安装目录，请检查目录权限，或通过原安装方式重新安装。",
+                        else "无法访问 Skill 安装目录，请检查目录权限，或使用原安装方式重新安装。",
                         "details": {"path": str(runtime_lock_path(root)), "errno": exc.errno},
                     },
                 },

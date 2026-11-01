@@ -59,9 +59,9 @@ from .videos import body_from_video_args
 
 _SAFE_PATH_COMPONENT = re.compile(r"[^A-Za-z0-9._-]+")
 _STATUS_LABELS = {
-    "queued": "排队中", "running": "生成中", "delayed": "等待继续处理",
-    "canceling": "取消处理中", "succeeded": "生成完成", "failed": "生成未完成",
-    "timeout": "任务已超时", "canceled": "已取消",
+    "queued": "排队中", "running": "生成中", "delayed": "等待重试",
+    "canceling": "正在取消", "succeeded": "已完成", "failed": "生成失败",
+    "timeout": "已超时", "canceled": "已取消",
 }
 _OPERATION_LABELS = {"image.generate": "图片生成", "image.edit": "图片编辑", "video.generate": "视频生成"}
 
@@ -91,7 +91,7 @@ def wait_for_terminal(
 ) -> tuple[dict[str, Any], str | None]:
     task_id = task.get("id")
     if not isinstance(task_id, str):
-        raise AsxError("服务未返回任务 ID，暂时无法确认提交结果。请保留本地任务记录，使用任务恢复确认，避免重复生成。", code="invalid_task_response")
+        raise AsxError("服务未返回任务 ID，暂时无法确认提交结果。请保留本地任务记录，通过 task recover 确认，避免重复生成。", code="invalid_task_response")
     original_task_type = task.get("task_type")
     deadline = parse_deadline(task.get("deadline_at"))
     client_deadline = (
@@ -117,7 +117,7 @@ def wait_for_terminal(
             return task, request_id
         if datetime.now(UTC) >= client_deadline:
             raise AsxError(
-                "本次等待已超时，但没有取消任务。请稍后查询或继续等待原任务，无需重新生成。",
+                "本次等待已超时，但任务未被取消。请稍后查询或继续等待原任务，无需重新生成。",
                 code="client_wait_timeout",
                 exit_code=4,
                 task_id=task_id,
@@ -194,7 +194,7 @@ def download_assets(
     for asset in assets:
         if not isinstance(asset, dict) or not isinstance(asset.get("index"), int):
             raise AsxError(
-                "服务返回的结果文件信息不完整，暂时无法下载。请查询原任务或联系服务支持。",
+                "服务返回的结果文件信息不完整，暂时无法下载。请查询原任务，或联系服务支持。",
                 code="invalid_task_asset",
                 task_id=task_id,
             )
@@ -243,7 +243,7 @@ def download_assets(
             path.parent.mkdir(parents=True, exist_ok=True)
             os.replace(temporary, path)
         except OSError as exc:
-            raise AsxError("结果文件无法保存，请检查输出目录的写入权限和剩余空间，然后继续下载原任务。", code="output_write_failed") from exc
+            raise AsxError("结果文件保存失败，请检查输出目录的写入权限和剩余空间，然后继续下载原任务。", code="output_write_failed") from exc
         finally:
             temporary.unlink(missing_ok=True)
         asset_metrics["save_seconds"] = time.perf_counter() - save_started
@@ -270,7 +270,7 @@ def download_assets(
         files.append(str(path))
     if is_video_task and not has_video:
         raise AsxError(
-            "任务返回了附件，但没有可交付的 MP4 视频；已有文件已保留，请检查原任务。",
+            "任务返回了附件，但没有可交付的 MP4 视频。已下载的文件仍保留，请检查原任务。",
             code="missing_video_asset", task_id=task_id,
         )
     return files
@@ -281,7 +281,7 @@ def index_downloaded_artifacts(
 ) -> dict[str, Any] | None:
     remote_id = task.get("id")
     if not isinstance(remote_id, str):
-        return {"code": "artifact_index_failed", "message": "结果缺少任务 ID，无法加入本地历史记录。请保留已下载的文件。"}
+        return {"code": "artifact_index_failed", "message": "结果缺少任务 ID，无法写入本地历史记录。请保留已下载的文件。"}
     connection = connect_ledger_db()
     try:
         existing = get_ledger_task(connection, remote_task_id=remote_id)
@@ -332,7 +332,7 @@ def index_downloaded_artifacts(
     except (OSError, sqlite3.Error, AsxError):
         return {
             "code": "artifact_index_failed",
-            "message": "结果文件已保存，但未能加入本地历史记录。请保留文件路径，并检查本地目录的写入权限和剩余空间。",
+            "message": "结果文件已保存，但未能写入本地历史记录。请保留文件路径，并检查本地目录的写入权限和剩余空间。",
         }
     finally:
         connection.close()
@@ -344,7 +344,7 @@ def _task_identifier_row(connection: sqlite3.Connection, identifier: str) -> dic
     if row is None:
         row = get_ledger_task(connection, remote_task_id=identifier)
     if row is None:
-        raise AsxError(f"本机没有找到任务 {identifier}，请检查任务 ID 或查询任务列表。", code="task_not_found")
+        raise AsxError(f"本机未找到任务 {identifier}，请检查任务 ID，或通过 task list 查看现有任务。", code="task_not_found")
     return row
 
 
@@ -434,7 +434,7 @@ def _bind_submission(
 ) -> dict[str, Any]:
     remote_id = task.get("id")
     if not isinstance(remote_id, str):
-        raise AsxError("服务未返回任务 ID，暂时无法确认提交结果。请使用任务恢复确认，避免重复生成。", code="invalid_task_response")
+        raise AsxError("服务未返回任务 ID，暂时无法确认提交结果。请通过 task recover 确认，避免重复生成。", code="invalid_task_response")
     status = task.get("status") if isinstance(task.get("status"), str) else "queued"
     connection = connect_ledger_db()
     try:
@@ -477,7 +477,7 @@ def _remote_task_for_row(client: AsynxClient, row: dict[str, Any]) -> tuple[dict
     remote_id = row.get("remote_task_id")
     if not isinstance(remote_id, str):
         raise AsxError(
-            "该任务的提交尚未确认；请使用 task recover 并指定此任务 ID 确认原提交，不要重新生成。",
+            "该任务的提交尚未确认。请通过 task recover 指定该任务 ID 确认原提交，避免重新生成。",
             code="task_not_submitted",
             task_id=str(row.get("local_id")),
             details={"next_action_args": ["task", "recover", str(row["local_id"])]},
@@ -568,7 +568,7 @@ def refresh_task(client: AsynxClient, identifier: str) -> tuple[dict[str, Any], 
             return _local_task_payload(row), 0
         return sync_local_task(client, identifier)
     if identifier.startswith("local_"):
-        raise AsxError(f"本地任务不存在：{identifier}", code="task_not_found")
+        raise AsxError(f"本机未找到任务：{identifier}", code="task_not_found")
     task, request_id = client.task(identifier)
     if task.get("status") == "succeeded":
         return _download_task_result(client, task, request_id, DEFAULT_OUTPUT_DIR)
@@ -622,14 +622,14 @@ def recover_tasks(
                         next_action_args=["batch", "status", paused_batch["id"], "--refresh"],
                         warnings=[{
                             "code": "batch_paused",
-                            "message": "此任务所属批次已暂停，未恢复提交；需要继续生成时请明确恢复该批次。",
+                            "message": "该任务所在的批次已暂停，尚未恢复提交。如需继续生成，请先恢复该批次。",
                         }],
                     )
                     results.append(paused)
                     continue
                 body = row.get("request")
                 if not isinstance(body, dict):
-                    raise AsxError("本地提交记录不完整，暂时无法恢复。请保留记录并联系支持确认原任务，避免重复生成。", code="invalid_task_state")
+                    raise AsxError("本地提交记录不完整，暂时无法恢复。请保留记录并联系服务支持确认原任务，避免重复生成。", code="invalid_task_state")
                 task, request_id = client.submit(body, str(row["idempotency_key"]))
                 row = _bind_submission(client, str(row["local_id"]), task, request_id)
             synced, _code = sync_local_task(client, str(row["local_id"]))
@@ -829,7 +829,7 @@ def _download_task_result(
         payload["error"] = {**download_error, "phase": "download"}
         payload.setdefault("warnings", []).append({
             "code": "download_incomplete",
-            "message": "生成已完成，但下载未完成；已保存的文件仍可使用。请继续下载原任务，不要重新生成。",
+            "message": "生成已完成，但下载未完成；已保存的文件仍可使用。请继续下载原任务，避免重新生成。",
         })
         _task_followup(payload)
         return payload, 4
@@ -848,7 +848,7 @@ def _update_local_snapshot(
     try:
         current = get_ledger_task(connection, local_task_id=local_id)
         if current is None:
-            raise AsxError(f"本机没有找到任务 {local_id}，请检查任务 ID 或查询任务列表。", code="task_not_found")
+            raise AsxError(f"本机未找到任务 {local_id}，请检查任务 ID，或通过 task list 查看现有任务。", code="task_not_found")
         previous = str(current.get("status"))
         update_task(
             connection,
@@ -882,7 +882,7 @@ def run_submission(
     if task_type == "image.edit" and from_task:
         if references:
             raise AsxError(
-                "请通过 --image 选择图片，或通过 --from-task 使用已有任务的结果，两者不能同时使用。", code="conflicting_edit_inputs"
+                "请通过 --image 指定图片，或通过 --from-task 使用已有任务的结果，两者不能同时使用。", code="conflicting_edit_inputs"
             )
         connection = connect_ledger_db()
         try:
@@ -892,7 +892,7 @@ def run_submission(
     if task_type == "video.generate":
         if from_task:
             if args.first_frame:
-                raise AsxError("--from-task 与 --first-frame 不能同时使用", code="conflicting_video_inputs")
+                raise AsxError("--from-task 与 --first-frame 不能同时使用。", code="conflicting_video_inputs")
             connection = connect_ledger_db()
             try:
                 paths = ledger_task_paths(connection, from_task)
@@ -900,7 +900,7 @@ def run_submission(
                 connection.close()
             if len(paths) != 1 or media_file_info(Path(paths[0]))["kind"] != "image":
                 raise AsxError(
-                    "请选择一张图片作为首帧，用 --first-frame 传入路径；不能直接使用多张结果或视频。",
+                    "请选择一张图片作为首帧，通过 --first-frame 传入路径；不能直接使用多张结果或视频。",
                     code="ambiguous_video_source",
                 )
             args = argparse.Namespace(**vars(args))

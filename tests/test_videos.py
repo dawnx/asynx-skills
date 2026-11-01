@@ -78,7 +78,7 @@ class VideoBuilderTests(unittest.TestCase):
         data_url = "data:image/png;base64," + base64.b64encode(Path(source).read_bytes()).decode()
         self.assertTrue(self.build(references=[data_url])["input"]["inputs"][0]["url"].startswith("data:image/jpeg;base64,"))
         with patch.object(videos, "_decoded_image", return_value=(Image.new("RGB", (2, 2)), "image/png", 1)), patch.object(videos.io, "BytesIO") as buffer, patch.object(Image.Image, "save"):
-            buffer.return_value.getvalue.return_value = b"x" * 3_000_001
+            buffer.return_value.getvalue.return_value = b"x" * (3 * 1024 * 1024 + 1)
             with self.assertRaises(AsxError) as caught:
                 self.build(references=[source])
         self.assertEqual(caught.exception.code, "video_reference_too_large")

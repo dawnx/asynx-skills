@@ -137,14 +137,14 @@ def artifact_paths(connection: sqlite3.Connection, task_id: str) -> list[str]:
     rows = list_artifacts(connection, task_id=task_id, limit=1000)
     if not rows:
         raise AsxError(
-            f"本机没有任务 {task_id} 的结果文件记录，请先下载该任务的结果。",
+            f"本机未记录任务 {task_id} 的结果文件，请先下载该任务的结果。",
             code="artifact_not_found",
             task_id=task_id,
         )
     missing = [str(row["path"]) for row in rows if row["missing"]]
     if missing:
         raise AsxError(
-            f"结果文件已移动或删除，请提供新路径，或重新下载原任务结果：{missing[0]}",
+            f"结果文件已被移动或删除，请提供新路径，或重新下载原任务结果：{missing[0]}",
             code="artifact_file_missing",
             task_id=task_id,
             details={"missing": missing},

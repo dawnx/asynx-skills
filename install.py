@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the Asynx image skill and configure its API key."""
+"""Install the Asynx image and video skill and configure its API key."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def _load_client_module(skill_root: Path) -> ModuleType:
         submodule_search_locations=[str(package)],
     )
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"无法加载已安装的 Skill，请重新运行安装命令。位置：{package}")
+        raise RuntimeError(f"已安装的 Skill 加载失败，请重新运行安装命令。位置：{package}")
     client = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = client
     try:
@@ -42,7 +42,7 @@ def _load_client_module(skill_root: Path) -> ModuleType:
         raise
     module_path = Path(client.__file__ or "").resolve()
     if not module_path.is_relative_to(package):
-        raise RuntimeError(f"加载的 Skill 位置不正确，请重新运行安装命令。位置：{module_path}")
+        raise RuntimeError(f"加载到的 Skill 位置不对，请重新运行安装命令。位置：{module_path}")
     return client
 
 
@@ -57,10 +57,10 @@ def _detected_targets(home: Path) -> list[str]:
 
 def _prompt_target() -> list[str]:
     if not sys.stdin.isatty():
-        raise RuntimeError("未检测到 Codex 或 Claude Code，请在安装命令后添加 --target codex、--target claude 或 --target both。")
-    print("要安装到哪个 Agent？codex = Codex，claude = Claude Code，both = 两者", file=sys.stderr)
+        raise RuntimeError("未检测到 Codex 或 Claude Code，请在安装命令后指定 --target codex、--target claude 或 --target both。")
+    print("请选择安装目标：codex = Codex，claude = Claude Code，both = 两者都安装。", file=sys.stderr)
     while True:
-        print("请选择（直接回车选择 Codex）：", end="", file=sys.stderr, flush=True)
+        print("请输入选择（直接回车默认安装到 Codex）：", end="", file=sys.stderr, flush=True)
         value = input().strip().casefold() or "codex"
         if value in {"codex", "claude"}:
             return [value]
@@ -85,7 +85,7 @@ def _target_path(target: str, home: Path) -> Path:
         return home / ".agents" / "skills" / "asynx-image"
     if target == "claude":
         return home / ".claude" / "skills" / "asynx-image"
-    raise ValueError(f"不支持的安装目标：{target}。请使用 codex、claude 或 both。")
+    raise ValueError(f"不支持的安装目标：{target}，请使用 codex、claude 或 both。")
 
 
 def _install_dependencies(destination: Path) -> None:
@@ -108,7 +108,7 @@ def _install_dependencies(destination: Path) -> None:
         capture_output=True,
     )
     if result.returncode:
-        raise RuntimeError("图片处理依赖安装失败。请检查网络连接以及当前 Python 是否已安装 pip，然后重新运行安装命令。")
+        raise RuntimeError("图片处理依赖安装失败，请检查网络连接以及当前 Python 是否已安装 pip，然后重新运行安装命令。")
 
 
 def _check_legacy_installations(home: Path, targets: list[str]) -> None:
@@ -119,10 +119,10 @@ def _check_legacy_installations(home: Path, targets: list[str]) -> None:
     if existing:
         paths = "\n".join(str(path) for path in existing)
         raise RuntimeError(
-            "检测到旧版 asx，需移除旧入口后继续安装 asynx-image：\n"
+            "检测到旧版 asx，需先移除旧入口才能继续安装 asynx-image：\n"
             f"{paths}\n"
-            "可以让 Agent 帮你确认并将旧入口移出 skills 目录备份，再继续安装。\n"
-            "请保留密钥、任务记录和已生成文件，无需迁移这些数据，也不要仅将旧目录改名。"
+            "可让 Agent 协助确认，将旧入口移出 skills 目录备份后再继续安装。\n"
+            "密钥、任务记录和已生成文件均需保留，无需迁移；请勿仅修改旧目录名称。"
         )
 
 
@@ -186,20 +186,20 @@ def _verify(client: ModuleType) -> int:
         models, _request_id = client.AsynxClient(base_url, api_key).models()
     except client.AsxError as exc:
         if exc.http_status == 401 or exc.code in {"missing_api_key", "invalid_api_key"}:
-            message = "API Key 未通过验证，请检查密钥是否完整、有效，并在自己的终端重新配置。"
+            message = "API Key 未通过验证，请确认密钥完整有效，并在自己的终端重新配置。"
         elif exc.http_status == 403:
-            message = "当前密钥无权访问模型目录，请检查密钥权限或联系服务管理员。"
+            message = "当前密钥无权访问模型目录，请检查密钥权限，或联系服务管理员。"
         elif exc.code == "network_error":
-            message = "暂时无法连接 Asynx，请检查网络或服务地址后重试；这不代表密钥错误。"
+            message = "暂时无法连接 Asynx，请检查网络或服务地址后重试；这不代表密钥有误。"
         elif exc.http_status == 429:
-            message = "请求过于频繁，请稍后重试连接检查。"
+            message = "请求过于频繁，请稍后重新执行连接检查。"
         else:
-            message = "暂时无法完成模型目录检查，请稍后重试；若持续失败，可将下方错误编号提供给支持人员。"
+            message = "模型目录检查未能完成，请稍后重试；若持续失败，可将下方错误代码提供给服务支持。"
         print(f"Skill 已安装，但连接检查未通过。{message}", file=sys.stderr)
-        print(f"错误编号：{exc.code}", file=sys.stderr)
+        print(f"错误代码：{exc.code}", file=sys.stderr)
         if exc.request_id:
-            print(f"请求编号：{exc.request_id}", file=sys.stderr)
-        print("无需重装 Skill，可回到 Agent 对话中请求检查配置和连接。", file=sys.stderr)
+            print(f"请求 ID：{exc.request_id}", file=sys.stderr)
+        print("无需重装 Skill，可回到 Agent 对话中请求检查配置与连接。", file=sys.stderr)
         return 1
     capable = [
         model
@@ -207,9 +207,9 @@ def _verify(client: ModuleType) -> int:
         if {"image.generate", "image.edit", "video.generate"}.intersection(model.get("task_types", []))
     ]
     if not capable:
-        print("Skill 已安装，连接正常，但当前没有可用的图片或视频模型。请稍后重试或联系服务支持。", file=sys.stderr)
+        print("Skill 已安装、连接正常，但当前没有可用的图片或视频模型。请稍后重试或联系服务支持。", file=sys.stderr)
         return 1
-    print(f"连接检查通过，可访问 {len(capable)} 个图片或视频模型。本次未提交生成任务，实际生成权限和余额尚未验证。")
+    print(f"连接检查通过，可访问 {len(capable)} 个图片或视频模型。本次未提交生成任务，实际生成权限与余额尚未验证。")
     return 0
 
 
@@ -219,12 +219,12 @@ class _InstallerParser(argparse.ArgumentParser):
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = _InstallerParser(description="安装、更新或卸载 Asynx Agent Skill")
+    parser = _InstallerParser(description="安装或卸载 Asynx Agent Skill")
     parser.add_argument(
         "--target",
         choices=("auto", "codex", "claude", "both"),
         default="auto",
-        help="安装目标，默认自动检测 Codex/Claude Code",
+        help="安装目标，默认自动检测 Codex 和 Claude Code",
     )
     parser.add_argument(
         "--skip-config",
@@ -234,7 +234,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-verify",
         action="store_true",
-        help="跳过只读 API Key 和模型目录检查",
+        help="跳过密钥和模型目录检查（只读，不提交任务）",
     )
     parser.add_argument(
         "--uninstall",
@@ -244,7 +244,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="卸载时跳过确认，仅与 --uninstall 一起使用",
+        help="卸载时跳过确认，仅可与 --uninstall 一起使用",
     )
     return parser
 
@@ -260,12 +260,12 @@ def run(
     if args.uninstall:
         targets = _installed_targets(user_home) if args.target == "auto" else _resolve_targets(args.target, user_home)
         if not targets:
-            print("没有找到由本安装器管理的 Asynx Skill。")
+            print("未找到由本安装器安装的 Asynx Skill。")
             return 0
         if not args.yes:
             if not sys.stdin.isatty():
-                raise RuntimeError("当前终端无法确认卸载。确认要卸载时，请在命令中添加 --yes；密钥、任务记录和已生成文件会保留。")
-            print(f"将卸载：{', '.join(targets)}。密钥、任务记录和已生成文件会保留。", file=sys.stderr)
+                raise RuntimeError("当前终端无法确认卸载。如需卸载，请在命令中添加 --yes；密钥、任务记录和已生成文件将保留。")
+            print(f"将卸载：{', '.join(targets)}。密钥、任务记录和已生成文件将保留。", file=sys.stderr)
             print("确认卸载？[y/N] ", end="", file=sys.stderr, flush=True)
             if input().strip().casefold() not in {"y", "yes"}:
                 print("已取消卸载。", file=sys.stderr)
@@ -294,7 +294,7 @@ def run(
     if not args.skip_config:
         if _configured(client):
             if os.environ.get("ASYNX_API_KEY"):
-                print("正在使用 ASYNX_API_KEY 环境变量中的密钥，它优先于配置文件；此步骤不会将它保存到配置文件。")
+                print("正在使用 ASYNX_API_KEY 环境变量中的密钥，其优先级高于配置文件；此步骤不会将其写入配置文件。")
             else:
                 print("正在使用已保存的 API Key，无需重复输入。")
         else:
@@ -306,7 +306,7 @@ def run(
         else:
             print("已跳过连接检查，尚未验证密钥是否可用。")
     else:
-        print("已跳过密钥配置和连接检查；若尚未配置，请回到 Agent 对话中请求配置指引。")
+        print("已跳过密钥配置和连接检查；若尚未配置，请回到 Agent 对话中获取配置指引。")
 
     if "codex" in targets:
         print("回到 Codex，可输入：$asynx-image 生成一张卡通猫的图片")
@@ -319,17 +319,17 @@ def main() -> int:
     try:
         return run()
     except (KeyboardInterrupt, EOFError):
-        print("操作已中断。已完成的安装或配置步骤会保留，可以重新运行命令继续。", file=sys.stderr)
+        print("操作已中断。已完成的安装或配置步骤将保留，可重新运行命令继续。", file=sys.stderr)
         return 130
     except Exception as exc:  # noqa: BLE001 - installer failures share one CLI error path
         if isinstance(exc, PermissionError):
             message = "没有权限访问安装目录或配置文件，请检查目录权限后重新运行命令。"
         elif isinstance(exc, OSError):
-            message = "无法读写安装文件或启动所需程序，请检查目录权限、磁盘空间及 Python 和 pip 是否可用。"
+            message = "无法读写安装文件或启动所需程序，请检查目录权限、磁盘空间，以及 Python 和 pip 是否可用。"
         elif isinstance(exc, RuntimeError) or hasattr(exc, "message"):
             message = getattr(exc, "message", str(exc))
         else:
-            message = "安装过程遇到异常，请重新运行安装命令；若仍失败，请联系支持人员。"
+            message = "安装过程发生异常，请重新运行安装命令；若仍失败，请联系服务支持。"
         print(f"未能完成操作：{message}", file=sys.stderr)
         return int(getattr(exc, "exit_code", 1))
 

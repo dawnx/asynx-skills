@@ -38,7 +38,7 @@ def resolve_model(
     eligible = [model for model in models if task_type in model.get("task_types", [])]
     available = [str(model.get("name")) for model in eligible if isinstance(model.get("name"), str)]
     if not eligible:
-        raise AsxError("当前没有可用于此操作的图片模型，请查看可用模型或稍后重试。", code="no_compatible_model")
+        raise AsxError("当前没有可用于该操作的图片模型，请查看可用模型或稍后重试。", code="no_compatible_model")
     requested = selector or DEFAULT_MODEL
     exact = [
         model
@@ -57,11 +57,11 @@ def resolve_model(
         return matches[0]
     if len(matches) > 1:
         raise AsxError(
-            f"模型名称 {requested!r} 对应多个模型，请使用完整模型名称。",
+            f"模型名 {requested!r} 匹配到多个模型，请使用完整模型名称。",
             code="ambiguous_model",
             details={"matches": [str(model["name"]) for model in matches]},
         )
-    message = f"模型 {requested!r} 当前不可用于此操作，请选择其他可用模型。"
+    message = f"模型 {requested!r} 当前不可用于该操作，请选择其他可用模型。"
     if selector is None:
         message = f"默认模型 {DEFAULT_MODEL!r} 当前不可用，请指定其他可用模型。"
     raise AsxError(message, code="model_unavailable", details={"available": available})
@@ -156,7 +156,7 @@ def image_mime(data: bytes) -> str:
         return "image/jpeg"
     if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
-    raise AsxError("输入图片需为 PNG、JPEG 或 WebP 格式，请转换格式后重试。", code="unsupported_image_format")
+    raise AsxError("图片需为 PNG、JPEG 或 WebP 格式，请转换格式后重试。", code="unsupported_image_format")
 
 
 def validate_idempotency_key(value: str) -> str:
@@ -166,7 +166,7 @@ def validate_idempotency_key(value: str) -> str:
         raise AsxError("请求标识仅支持英文、数字和可见英文符号，请修改后重试。", code="invalid_idempotency_key") from exc
     if not 1 <= len(raw) <= 128 or any(byte < 0x21 or byte > 0x7E for byte in raw):
         raise AsxError(
-            "请求标识需为 1–128 个英文、数字或可见英文符号，且不能包含空格或换行。",
+            "请求标识须为 1–128 个英文、数字或可见英文符号，不可包含空格或换行。",
             code="invalid_idempotency_key",
         )
     return value
@@ -203,7 +203,7 @@ def task_input_warnings(body: dict[str, Any]) -> list[dict[str, Any]]:
             "message": (
                 f"处理后的 {len(local_sources)} 张本地图片共 "
                 f"{image_bytes / 1024 / 1024:.2f} MiB，实际上传数据约 "
-                f"{body_bytes / 1024 / 1024:.2f} MiB，网络较慢时上传可能需要更久。"
+                f"{body_bytes / 1024 / 1024:.2f} MiB，网络较慢时上传耗时可能增加。"
             ),
             "image_bytes": image_bytes,
             "request_body_bytes": body_bytes,
@@ -228,18 +228,18 @@ def build_task(
     keep_reference_original: bool = False,
 ) -> tuple[dict[str, Any], str, str | None]:
     if not 1 <= len(prompt) <= 32_000:
-        raise AsxError("图片描述需为 1–32,000 个字符，请填写或缩短描述。", code="invalid_prompt")
+        raise AsxError("图片描述须为 1–32,000 个字符，请填写或缩短后提交。", code="invalid_prompt")
     quality_value = quality.strip() if quality is not None else DEFAULT_QUALITY
     if not quality_value:
-        raise AsxError("图片质量不能填写为空；无需指定时请省略该参数。", code="invalid_quality")
+        raise AsxError("图片质量不能为空；无需指定时请省略该参数。", code="invalid_quality")
     if not 1 <= count <= 4:
-        raise AsxError("单次生成数量需为 1–4 张；更多图片请使用批量生成。", code="invalid_count")
+        raise AsxError("单次生成数量须为 1–4 张；更多图片请使用批量生成。", code="invalid_count")
     if task_type == "image.edit" and not references:
-        raise AsxError("编辑图片需要至少一张原图，请提供要修改的图片。", code="missing_edit_image")
+        raise AsxError("编辑图片至少需要一张原图，请提供要修改的图片。", code="missing_edit_image")
 
     requested_model = (model_selector or DEFAULT_MODEL).strip()
     if not 1 <= len(requested_model) <= 160:
-        raise AsxError("模型名称需为 1–160 个字符，请检查名称。", code="invalid_model")
+        raise AsxError("模型名称须为 1–160 个字符，请检查名称是否正确。", code="invalid_model")
     request_id: str | None = None
     models = _cached_models(client.base_url)
     model: dict[str, Any] | None = None
@@ -280,7 +280,7 @@ def build_task(
         if not isinstance(max_images, int) or count > max_images:
             raise AsxError(
                 (
-                    f"所选模型单次最多生成 {max_images} 张图片，请减少数量或使用批量生成。"
+                    f"所选模型单次最多生成 {max_images} 张图片，请减少数量或改用批量生成。"
                     if isinstance(max_images, int)
                     else "暂时无法确认所选模型的生成数量限制，请刷新模型列表或稍后重试。"
                 ),
@@ -320,7 +320,7 @@ def build_task(
     if task_type == "image.edit" and not aspect_ratio:
         if any(size is None for size in source_sizes):
             raise AsxError(
-                "无法读取 URL 输入图的比例；请指定 --aspect-ratio，或改用本地图片以自动保持画幅。",
+                "无法读取 URL 输入图的画幅比例；请通过 --aspect-ratio 指定，或改用本地图片以自动保持画幅。",
                 code="edit_aspect_ratio_required",
             )
         ratios = {
@@ -330,7 +330,7 @@ def build_task(
         }
         if len(ratios) != 1:
             raise AsxError(
-                "输入图片的比例不同；请指定输出 --aspect-ratio，或只传入要修改的图片。",
+                "多张输入图的画幅比例不一致；请通过 --aspect-ratio 指定输出比例，或仅传入要修改的图片。",
                 code="ambiguous_edit_aspect_ratio",
                 details={"input_aspect_ratios": sorted(ratios)},
             )

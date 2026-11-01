@@ -65,7 +65,7 @@ def attach_image_details(
                     "code": "aspect_ratio_mismatch", "path": value,
                     "requested_aspect_ratio": expected_ratio,
                     "actual_aspect_ratio": actual_ratio,
-                    "message": f"结果图片为 {width}×{height}，与请求的 {expected_ratio} 比例不符。",
+                    "message": f"结果图片为 {width}×{height}，与请求的 {expected_ratio} 画幅比例不符。",
                 })
     payload["images"] = details
     if notices:

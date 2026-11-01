@@ -169,7 +169,7 @@ def _validate_download_url(url: str) -> None:
         or parts.fragment
         or parts.port not in {None, 443}
     ):
-        raise AsxError("更新下载地址无效或不受信任，已停止下载。请通过原安装方式更新。", code="invalid_update_url")
+        raise AsxError("更新下载地址无效或不可信，已停止下载。请使用原安装方式更新。", code="invalid_update_url")
 
 
 class _ReleaseRedirect(HTTPRedirectHandler):
@@ -202,7 +202,7 @@ def _fetch(url: str, *, limit: int, timeout: float) -> bytes:
         ) as response:
             length = response.headers.get("Content-Length")
             if length and int(length) > limit:
-                raise AsxError("更新文件超过允许的大小，已停止下载。请稍后重试或通过原安装方式更新。", code="update_response_too_large")
+                raise AsxError("更新文件超过允许的大小，已停止下载。请稍后重试，或使用原安装方式更新。", code="update_response_too_large")
             chunks = bytearray()
             while True:
                 chunk = response.read(min(64 * 1024, limit + 1 - len(chunks)))
@@ -211,7 +211,7 @@ def _fetch(url: str, *, limit: int, timeout: float) -> bytes:
                 chunks.extend(chunk)
                 if len(chunks) > limit:
                     raise AsxError(
-                        "更新文件超过允许的大小，已停止下载。请稍后重试或通过原安装方式更新。", code="update_response_too_large"
+                        "更新文件超过允许的大小，已停止下载。请稍后重试，或使用原安装方式更新。", code="update_response_too_large"
                     )
                 if time.monotonic() - started > timeout:
                     raise TimeoutError("update download timed out")
@@ -220,7 +220,7 @@ def _fetch(url: str, *, limit: int, timeout: float) -> bytes:
         exc.close()
         code = "no_stable_release" if status == 404 else "update_check_unavailable"
         raise AsxError(
-            "尚未找到可下载的稳定版本，请稍后重试。" if status == 404 else "暂时无法连接更新服务，请检查网络或稍后重试。", code=code
+            "暂无可下载的稳定版本，请稍后重试。" if status == 404 else "暂时无法连接更新服务，请检查网络或稍后重试。", code=code
         ) from exc
 
 
@@ -241,18 +241,18 @@ def _latest_release(*, timeout: float) -> dict[str, str]:
         raise AsxError("更新服务未返回有效的稳定版本，请稍后重试。", code="invalid_update_manifest")
     tag = data.get("tag_name")
     if not isinstance(tag, str) or not tag.startswith("v"):
-        raise AsxError("更新服务返回的版本号无效，请稍后重试或联系支持人员。", code="invalid_update_version")
+        raise AsxError("更新服务返回的版本号无效，请稍后重试或联系服务支持。", code="invalid_update_version")
     descriptor = _release_descriptor(tag[1:])
     assets = data.get("assets")
     if not isinstance(assets, list):
-        raise AsxError("新版安装文件不完整，请稍后重试或联系支持人员。", code="invalid_update_manifest")
+        raise AsxError("新版安装文件不完整，请稍后重试或联系服务支持。", code="invalid_update_manifest")
     names = {
         a.get("name")
         for a in assets
         if isinstance(a, dict) and isinstance(a.get("name"), str)
     }
     if not {f"asynx-image-{tag[1:]}.zip", f"asynx-image-{tag[1:]}.json"} <= names:
-        raise AsxError("新版安装文件不完整，请稍后重试或联系支持人员。", code="invalid_update_manifest")
+        raise AsxError("新版安装文件不完整，请稍后重试或联系服务支持。", code="invalid_update_manifest")
     return descriptor
 
 
@@ -289,14 +289,14 @@ def update_check(*, force: bool = False, automatic: bool = False) -> dict[str, A
         if not result["ok"]:
             result["error"] = {
                 "code": cache.get("error_code", "update_check_unavailable"),
-                "message": "目前暂无稳定发布版，仍可使用当前版本。"
+                "message": "目前暂无稳定发布版，可继续使用当前版本。"
                 if cache.get("error_code") == "no_stable_release"
-                else "暂时无法确认是否有更新，仍可使用当前版本。",
+                else "暂时无法确认是否有更新，可继续使用当前版本。",
             }
         return result
     except OSError as exc:
         raise AsxError(
-            "暂时无法检查更新，可能已有检查正在进行，或无法保存检查结果。请稍后重试；持续失败时检查用户目录写入权限。", code="update_check_unavailable"
+            "暂时无法检查更新：可能已有检查正在进行，或检查结果无法保存。请稍后重试；持续失败时检查用户目录的写入权限。", code="update_check_unavailable"
         ) from exc
 
 
@@ -312,7 +312,7 @@ def automatic_update_notice() -> dict[str, Any] | None:
             return {
                 "current_version": VERSION,
                 "latest_version": result["latest_version"],
-                "message": f"Asynx Skill {result['latest_version']} 已发布，可让 Agent 帮你升级。",
+                "message": f"Asynx Skill {result['latest_version']} 已发布，可让 Agent 协助升级。",
                 "update_command": result["update_command"],
                 "release_url": result["release_url"],
                 "outdated_copies": [
@@ -368,11 +368,11 @@ def update_apply(
                     "ok": True,
                     "updated": False,
                     "recovered": restored,
-                    "message": "已恢复上次中断的安装，请重新运行 update apply。",
+                    "message": "上次中断的安装已恢复，请重新运行 update apply。",
                 }
             if not targets:
                 raise AsxError(
-                    "未找到可更新的已安装副本，请先运行安装器",
+                    "未找到可更新的已安装副本，请先运行安装器。",
                     code="no_installed_skills",
                 )
             for root in targets:
@@ -381,15 +381,15 @@ def update_apply(
                     for p in (config_path(), state_path(), cache_path())
                 ):
                     raise AsxError(
-                        "配置或任务数据位于 Skill 安装目录内，请先移到用户数据目录",
+                        "配置或任务数据位于 Skill 安装目录内，请先移至用户数据目录。",
                         code="update_data_inside_installation",
                     )
                 problem = installation_problem(root)
                 if problem and (not force or problem != "local_changes"):
                     raise AsxError(
-                        "Skill 文件有本地修改，已停止更新。请先备份并确认是否替换，再决定是否使用 --force。"
+                        "Skill 文件存在本地修改，已停止更新。请先备份并确认是否覆盖，再决定是否使用 --force。"
                         if problem == "local_changes"
-                        else "此副本不支持内置更新，请使用原安装方式更新。",
+                        else "该副本不支持内置更新，请使用原安装方式更新。",
                         code=problem,
                         details={"path": str(root)},
                     )
@@ -401,7 +401,7 @@ def update_apply(
                     "ok": True,
                     "updated": False,
                     "latest_version": version,
-                    "message": "已是最新稳定版。",
+                    "message": "已经是最新的稳定版。",
                 }
             manifest = validate_manifest(
                 json.loads(
@@ -412,7 +412,7 @@ def update_apply(
             minimum = tuple(int(x) for x in manifest["python_min"].split("."))
             if sys.version_info[:2] < minimum:
                 raise AsxError(
-                    f"新版本需要 Python {manifest['python_min']} 或更高版本，请先升级 Python 再更新 Skill。",
+                    f"新版本需要 Python {manifest['python_min']} 或更高版本，请先把 Python 升级后再更新 Skill。",
                     code="unsupported_update_python",
                 )
             with tempfile.TemporaryDirectory(prefix="asx-release-") as directory:
@@ -430,7 +430,7 @@ def update_apply(
             return result
     except (OSError, ValueError) as exc:
         raise AsxError(
-            "升级未完成，现有文件已保留或恢复；请稍后重试", code="update_failed"
+            "升级未完成，现有文件已保留或恢复；请稍后重试。", code="update_failed"
         ) from exc
 
 
@@ -447,9 +447,9 @@ def update_rollback(*, already_locked: Path | None = None) -> dict[str, Any]:
             return {
                 "ok": True,
                 "restored": restored,
-                "message": "已恢复上一个版本。" if restored else "没有需要恢复的更新。",
+                "message": "已恢复到上一个版本。" if restored else "没有需要恢复的更新。",
             }
     except OSError as exc:
         raise AsxError(
-            "无法恢复更新，请检查安装目录权限和更新记录", code="update_rollback_failed"
+            "无法恢复更新，请检查安装目录权限和更新记录。", code="update_rollback_failed"
         ) from exc

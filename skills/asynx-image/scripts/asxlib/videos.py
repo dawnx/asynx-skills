@@ -36,14 +36,14 @@ def prepare_video_image(value: str) -> str:
     output = io.BytesIO()
     image.save(output, format="PNG" if alpha else "JPEG", **({} if alpha else {"quality": 82}))
     prepared = output.getvalue()
-    if len(prepared) > 3_000_000:
-        raise AsxError("参考图压缩后仍超过 3 MB，请降低原图分辨率或提供较小的图片。", code="video_reference_too_large")
+    if len(prepared) > 3 * 1024 * 1024:
+        raise AsxError("参考图压缩后仍超过 3 MiB，请降低原图分辨率或使用较小的图片。", code="video_reference_too_large")
     return _data_url("image/png" if alpha else "image/jpeg", prepared)
 
 
 def _media_url(value: str) -> str:
     if not value.casefold().startswith(("http://", "https://")):
-        raise AsxError("视频和音频参考需要 HTTP(S) 链接，目前不能直接传入本地文件。", code="video_reference_url_required")
+        raise AsxError("视频和音频参考需要 HTTP(S) 链接，暂不支持直接传入本地文件。", code="video_reference_url_required")
     return _validated_remote_url(value)
 
 
@@ -55,17 +55,17 @@ def build_video_task(
     reference_audios: list[str] | None = None,
 ) -> tuple[dict[str, Any], str, None]:
     if model_selector is not None and model_selector.strip().casefold() != VIDEO_MODEL.casefold():
-        raise AsxError("暂不支持所选视频模型，请使用默认模型（省略 --model）。", code="unsupported_video_model")
+        raise AsxError("暂不支持所选视频模型，请省略 --model 使用默认模型。", code="unsupported_video_model")
     if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 5000:
         raise AsxError("视频描述须为 1–5000 个字符。", code="invalid_prompt")
     if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration):
-        raise AsxError("视频时长需填写有效的秒数，例如 5。", code="invalid_video_duration")
+        raise AsxError("视频时长须填写有效的秒数，例如 5。", code="invalid_video_duration")
     resolutions = {"720p": "720p", "1080p": "1080p", "2k": "2K"}
     canonical_resolution = resolutions.get(resolution.strip().casefold())
     if canonical_resolution is None:
-        raise AsxError("请选择支持的视频分辨率：720p、1080p 或 2K。", code="unsupported_video_resolution")
+        raise AsxError("视频分辨率仅支持 720p、1080p 或 2K。", code="unsupported_video_resolution")
     if last_frame and not first_frame:
-        raise AsxError("尾帧需要同时提供首帧。", code="missing_first_frame")
+        raise AsxError("使用尾帧时必须同时提供首帧。", code="missing_first_frame")
     inputs: list[dict[str, str]] = []
     for role, values in (("reference", references or []), ("first_frame", [first_frame] if first_frame else []),
                          ("last_frame", [last_frame] if last_frame else [])):

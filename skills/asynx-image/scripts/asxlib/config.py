@@ -67,7 +67,7 @@ def _read_config_file(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise AsxError(
-            f"无法读取配置文件，请检查文件权限和 JSON 格式：{path}",
+            f"配置文件读取失败，请检查文件权限与 JSON 格式：{path}",
             code="invalid_config",
             details={"config_path": str(path)},
         ) from exc
@@ -107,8 +107,8 @@ def initial_poll_delay_seconds() -> float:
             raise ValueError
     except (TypeError, ValueError) as exc:
         raise AsxError(
-            "首次查询等待时间必须为 0–300 秒的数字，请检查 initial_poll_delay_seconds "
-            "或 ASYNX_INITIAL_POLL_DELAY_SECONDS。",
+            "首次查询等待时间须为 0–300 之间的秒数，请检查 initial_poll_delay_seconds "
+            "或环境变量 ASYNX_INITIAL_POLL_DELAY_SECONDS。",
             code="invalid_poll_delay",
         ) from exc
     return delay
@@ -125,11 +125,11 @@ def validate_base_url(value: str) -> str:
         or parts.query
         or parts.fragment
     ):
-        raise AsxError("服务地址格式不正确，请使用不含密钥、查询参数或片段的完整 HTTP(S) 地址。", code="invalid_base_url")
+        raise AsxError("服务地址格式不正确，请使用完整的 HTTP(S) 地址，不可包含密钥、查询参数或 # 片段。", code="invalid_base_url")
     local_hosts = {"localhost", "127.0.0.1", "::1"}
     if parts.scheme != "https" and parts.hostname not in local_hosts:
         raise AsxError(
-            "服务地址必须使用 HTTPS；只有本机调试地址可以使用 HTTP。请检查服务地址配置。",
+            "服务地址必须使用 HTTPS，仅本机调试地址可使用 HTTP。请检查服务地址配置。",
             code="insecure_base_url",
         )
     return candidate
@@ -152,8 +152,8 @@ def validate_api_key(value: Any) -> str:
         command = _configure_command()
         checked = [str(path) for path in _checked_config_paths()]
         raise AsxError(
-            f"尚未配置有效的 LLMAPI API Key。配置文件：{canonical}。"
-            f"请在自己的终端运行以下命令配置（不要将密钥发到对话中）：{command}",
+            f"尚未配置可用的 LLMAPI API Key。配置文件：{canonical}。"
+            f"请在自己的终端运行以下命令输入密钥（请勿发送至对话）：{command}",
             code="missing_api_key",
             details={
                 "config_path": str(canonical),
@@ -163,7 +163,7 @@ def validate_api_key(value: Any) -> str:
             },
         )
     if any(char.isspace() for char in value):
-        raise AsxError("API Key 不能包含空白字符，请复制完整密钥后重试。", code="invalid_api_key")
+        raise AsxError("API Key 包含空格或换行，请复制完整密钥后重试。", code="invalid_api_key")
     return value
 
 
@@ -172,7 +172,7 @@ def load_credentials() -> tuple[str, str]:
     api_key = os.environ.get("ASYNX_API_KEY") or config.get("api_key")
     base_url = os.environ.get("ASYNX_BASE_URL") or config.get("base_url") or DEFAULT_BASE_URL
     if not isinstance(base_url, str):
-        raise AsxError("服务地址配置格式不正确，请将 base_url 设置为完整的网址。", code="invalid_base_url")
+        raise AsxError("服务地址格式不正确，请将 base_url 设置为完整网址。", code="invalid_base_url")
     return validate_api_key(api_key), validate_base_url(base_url)
 
 
@@ -201,7 +201,7 @@ def _write_config(payload: dict[str, Any], path: Path) -> Path:
             except OSError:
                 pass
         raise AsxError(
-            f"无法保存配置，请检查目录写入权限和剩余磁盘空间：{path}",
+            f"配置保存失败，请检查目录写入权限与剩余磁盘空间：{path}",
             code="config_write_failed",
             details={"config_path": str(path)},
         ) from exc
@@ -287,8 +287,8 @@ def legacy_installation_notice() -> dict[str, Any] | None:
         "code": "legacy_skill_installation",
         "paths": paths,
         "message": (
-            "发现旧版 asx 安装，可能导致 Agent 调用旧版本。可让 Agent 帮你确认并备份旧版后重新安装；"
-            "密钥、任务记录和已生成文件可继续保留。未确认前不会移动或删除旧版。"
+            "检测到旧版 asx 安装，Agent 可能调用到旧版本。可让 Agent 协助确认并备份旧版后重新安装；"
+            "密钥、任务记录和已生成文件均可继续使用。确认前不会移动或删除旧版。"
         ),
     }
 
@@ -326,13 +326,13 @@ def _permission_check(path: Path | None) -> tuple[bool, str]:
     if path is None or not path.exists():
         return True, "当前未加载配置文件。"
     if os.name == "nt":
-        return True, "Windows 不使用此项文件权限检查。"
+        return True, "Windows 不适用此权限检查。"
     mode = stat.S_IMODE(path.stat().st_mode)
     secure = mode & (stat.S_IRWXG | stat.S_IRWXO) == 0
     return secure, (
         "配置文件权限正常。"
         if secure
-        else f"配置文件允许其他系统用户访问，请将权限限制为当前用户可读写：{path}"
+        else f"配置文件对其他系统用户可读，请限制为仅当前用户可读写：{path}"
     )
 
 
@@ -351,7 +351,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             "name": "credentials",
             "ok": status["configured"] and status["key_valid"],
             "message": {
-                "environment": "正在使用环境变量中的 API Key。",
+                "environment": "正在使用环境变量里的 API Key。",
                 "config_file": "正在使用已保存的 API Key。",
                 "none": "尚未配置 API Key。",
             }[status["credential_source"]],
@@ -369,7 +369,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             "ok": config_count_ok,
             "message": "配置文件检查正常。"
             if config_count_ok
-            else "发现多份配置文件，请确认当前使用的配置。",
+            else "检测到多份配置文件，请确认实际使用的一份。",
             "details": {"paths": existing_configs},
         },
         {
@@ -377,7 +377,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             "ok": version_ok,
             "message": "已发现的 Skill 安装版本一致。"
             if version_ok
-            else "发现不同版本的 Skill，请确认当前调用的位置。",
+            else "检测到不同版本的 Skill，请确认 Agent 实际调用的位置。",
         },
     ]
     issues: list[dict[str, str]] = []
@@ -386,7 +386,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             {
                 "level": "error",
                 "code": "missing_api_key",
-                "message": f"尚未配置 API Key，请在自己的终端运行：{_configure_command()}。不要将密钥发送到对话中。",
+                "message": f"尚未配置 API Key，请在自己的终端运行：{_configure_command()}。请勿将密钥发送至对话。",
             }
         )
     elif not status["key_valid"]:
@@ -394,7 +394,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             {
                 "level": "error",
                 "code": "invalid_api_key",
-                "message": "API Key 为空或包含空白字符，请在自己的终端重新配置完整密钥。",
+                "message": "API Key 为空或包含空格、换行，请在自己的终端重新输入完整密钥。",
             }
         )
     if not status["base_url_valid"]:
@@ -402,7 +402,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             {
                 "level": "error",
                 "code": "invalid_base_url",
-                "message": "服务地址格式不正确，请检查 base_url 或 ASYNX_BASE_URL。",
+                "message": "服务地址格式不正确，请检查 base_url 或环境变量 ASYNX_BASE_URL。",
             }
         )
     if not permission_ok:
@@ -418,7 +418,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             {
                 "level": "warning",
                 "code": "skill_version_mismatch",
-                "message": "不同安装位置的 Asynx Skill 版本不一致，请确认当前使用的副本，并按需更新。",
+                "message": "不同安装位置的 Asynx Skill 版本不一致，请确认实际调用的副本，并按需更新。",
             }
         )
     if not config_count_ok:
@@ -426,7 +426,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             {
                 "level": "warning",
                 "code": "multiple_config_files",
-                "message": "发现多份 Asynx 配置文件，默认优先使用当前配置目录中的文件；请核对实际加载位置。",
+                "message": "检测到多份 Asynx 配置文件，默认优先使用当前配置目录中的文件；请核对实际加载的路径。",
             }
         )
 
@@ -478,9 +478,9 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             {
                 "name": "api_verification",
                 "ok": verification["ok"],
-                "message": "连接检查通过，已获取可用图片或视频模型；本次未提交生成任务。"
+                "message": "连接检查通过，已获取可用的图片或视频模型；本次未提交生成任务。"
                 if verification["ok"]
-                else "连接检查未通过，请查看具体问题并按提示处理。",
+                else "连接检查未通过，请按下列提示处理。",
             }
         )
     return result
@@ -489,7 +489,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
 def configure(base_url_override: str | None = None) -> dict[str, Any]:
     if not sys.stdin.isatty():
         raise AsxError(
-            "请在自己的终端运行配置命令并输入 API Key，不要在对话中发送密钥。",
+            "请在自己的终端运行配置命令并输入 API Key，请勿发送至对话。",
             code="interactive_terminal_required",
         )
     migrated = migrate_legacy_config()
@@ -500,16 +500,16 @@ def configure(base_url_override: str | None = None) -> dict[str, Any]:
     )
     log(f"配置文件：{config_path()}")
     if migrated:
-        log(f"已将旧配置保存到：{migrated}，原文件已保留。")
+        log(f"旧配置已迁移至：{migrated}，原文件已保留。")
     if base_url != DEFAULT_BASE_URL:
         log(f"服务地址：{base_url}")
     if base_url == DEFAULT_BASE_URL:
         log(
-            "还没有 API Key？请前往 https://llmapi.site/api-keys 创建 LLMAPI API Key。"
+            "尚未配置 API Key？请前往 https://llmapi.site/api-keys 创建。"
         )
-    log("输入时不会显示字符，这是正常的。")
+    log("输入时不会显示字符，属于正常现象。")
     existing_key = current.get("api_key") if isinstance(current.get("api_key"), str) else ""
-    label = "请输入 API Key（直接回车保留已保存的密钥）：" if existing_key else "请输入 API Key："
+    label = "请输入 API Key（直接回车沿用已保存的密钥）：" if existing_key else "请输入 API Key："
     try:
         entered_key = getpass.getpass(label).strip()
     except (EOFError, KeyboardInterrupt):
@@ -518,8 +518,8 @@ def configure(base_url_override: str | None = None) -> dict[str, Any]:
     path = save_config(api_key, base_url)
     log("API Key 已保存，尚未验证连接。")
     if os.environ.get("ASYNX_API_KEY"):
-        log("注意：当前设置了 ASYNX_API_KEY 环境变量，运行时会优先使用它；如需使用刚保存的密钥，请先移除或更新该环境变量。")
-    log("可回到 Agent 对话中继续使用 Asynx，无需发送密钥。")
+        log("注意：当前已设置 ASYNX_API_KEY 环境变量，运行时将优先使用它；如需改用刚保存的密钥，请先移除或更新该环境变量。")
+    log("可返回 Agent 对话继续使用 Asynx，无需再次发送密钥。")
     return {
         "ok": True,
         "configured": True,
