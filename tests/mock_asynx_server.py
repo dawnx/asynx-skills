@@ -26,15 +26,7 @@ def _model(name: str, *, mask: bool) -> dict[str, Any]:
         "name": name,
         "modality": "image",
         "task_types": ["image.generate", "image.edit"],
-        "capabilities": {
-            "image_sizes": ["1K", "2K", "4K"],
-            "aspect_ratios": ["1:1", "16:9", "9:16"],
-            "output_formats": ["png", "jpeg", "webp"],
-            "max_images": 4,
-            "supports_reference_images": True,
-            "max_reference_images": 8,
-            "supports_mask": mask,
-        },
+        "capabilities": {"task_types": ["image.generate", "image.edit"]},
         "pricing": {"mode": "per_request", "amount": "0.01000000", "currency": "USD"},
         "official_discount_percent": None,
     }
@@ -92,7 +84,8 @@ class MockState:
                 elif (
                     task.get("model") == "gpt-image-2.5-sunburst"
                     and isinstance(task.get("input"), dict)
-                    and task["input"].get("quality", "standard") not in SUNBURST_QUALITIES
+                    and "quality" in task["input"]
+                    and task["input"]["quality"] not in SUNBURST_QUALITIES
                 ):
                     task["status"] = "failed"
                     task["error"] = {

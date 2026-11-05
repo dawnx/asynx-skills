@@ -196,12 +196,11 @@ class AuditRegressionTests(unittest.TestCase):
         self.assertEqual(result["input"]["aspect_ratio"], "1:1")
         self.assertEqual(result["input"]["output_format"], "png")
 
-    def test_unsupported_default_is_not_silently_upgraded(self):
+    def test_stale_catalog_does_not_override_default_or_explicit_size(self):
         model = catalog_model(DEFAULT_MODEL)
         model["capabilities"]["image_sizes"] = ["4K"]
         images.cache_models(self.client.base_url, [model])
-        with self.assertRaises(AsxError):
-            self.build()
+        self.assertEqual(self.build()["input"]["image_size"], "1K")
         self.assertEqual(self.build(image_size="4K")["input"]["image_size"], "4K")
 
     def test_batch_conversion_preflights_all_collisions_without_writes(self):

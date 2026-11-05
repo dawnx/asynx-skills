@@ -23,6 +23,7 @@ from .constants import (
     UTC,
 )
 from .errors import AsxError, friendly_task_error
+from .image_options import options_from_args
 from .image_results import requested_aspect_ratio
 from .images import (
     build_task,
@@ -147,7 +148,7 @@ def _extension(content_type: str | None, data: bytes) -> str:
         return "webp"
     if normalized == "image/png":
         return "png"
-    return {"image/jpeg": "jpg", "image/webp": "webp", "image/png": "png"}[
+    return {"image/jpeg": "jpg", "image/webp": "webp", "image/png": "png", "image/gif": "gif", "image/svg+xml": "svg"}[
         image_mime(data)
     ]
 
@@ -887,6 +888,8 @@ def run_submission(
         connection = connect_ledger_db()
         try:
             references = ledger_task_paths(connection, from_task)
+            if any(media_file_info(Path(path))["content_type"] in {"image/gif", "image/svg+xml"} for path in references):
+                raise AsxError("GIF/SVG 结果不能直接作为编辑输入；请明确选择静态图片，不会自动取首帧或栅格化。", code="unsupported_edit_source")
         finally:
             connection.close()
     if task_type == "video.generate":
@@ -920,6 +923,7 @@ def run_submission(
             references=references,
             mask=args.mask if task_type == "image.edit" else None,
             keep_reference_original=args.keep_reference_original,
+            options=options_from_args(args),
         )
     prepared_at = time.perf_counter()
     input_warnings = task_input_warnings(body)

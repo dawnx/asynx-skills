@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import AsxError
+from .svg_results import is_svg
 from .image_results import attach_image_details
 
 
@@ -24,10 +25,16 @@ def media_file_info(path: Path) -> dict[str, Any]:
         kind, content_type, extension = "image", "image/jpeg", "jpg"
     elif len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP":
         kind, content_type, extension = "image", "image/webp", "webp"
+    elif header.startswith((b"GIF87a", b"GIF89a")):
+        kind, content_type, extension = "image", "image/gif", "gif"
+    elif is_svg(header):
+        from .svg_results import svg_details
+        svg_details(path.read_bytes())
+        kind, content_type, extension = "image", "image/svg+xml", "svg"
     elif _is_mp4(header, size):
         kind, content_type, extension = "video", "video/mp4", "mp4"
     else:
-        raise AsxError("无法识别结果文件格式，目前支持 PNG、JPEG、WebP 图片和 MP4 视频。", code="unsupported_media_format")
+        raise AsxError("无法识别结果文件格式，目前支持 PNG、JPEG、WebP、GIF、SVG 图片和 MP4 视频。", code="unsupported_media_format")
     return {
         "kind": kind, "content_type": content_type, "extension": extension,
         "size_bytes": size, "sha256": digest.hexdigest(),

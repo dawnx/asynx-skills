@@ -12,6 +12,9 @@ from typing import Any
 
 def requested_aspect_ratio(body: Any) -> str | None:
     task_input = body.get("input") if isinstance(body, dict) else None
+    if isinstance(task_input, dict) and task_input.get("size"):
+        match = re.fullmatch(r"([1-9]\d*)x([1-9]\d*)", task_input["size"])
+        return ":".join(match.groups()) if match else None
     ratio = task_input.get("aspect_ratio") if isinstance(task_input, dict) else None
     return ratio if isinstance(ratio, str) else None
 
@@ -25,6 +28,14 @@ def attach_image_details(
     expected = re.fullmatch(r"([1-9]\d{0,4}):([1-9]\d{0,4})", expected_ratio or "")
     for value in files:
         path = Path(value)
+        if path.suffix.lower() == ".svg":
+            from .svg_results import svg_details
+            from .errors import AsxError
+            try:
+                details.append({"path": value, "size_bytes": path.stat().st_size, **svg_details(path.read_bytes())})
+            except (OSError, AsxError):
+                notices.append({"code": "image_metadata_unavailable", "path": value, "message": "无法读取 SVG 元数据，文件路径已保留。"})
+            continue
         try:
             image_module = importlib.import_module("PIL.Image")
             with warnings.catch_warnings():
@@ -35,6 +46,7 @@ def attach_image_details(
                     if source.getexif().get(274) in {5, 6, 7, 8}:
                         width, height = height, width
                     image_format = str(source.format or "").lower()
+                    frame_count = int(getattr(source, "n_frames", 1))
                 size_bytes = path.stat().st_size
             if width <= 0 or height <= 0:
                 raise ValueError("invalid image dimensions")
@@ -54,7 +66,7 @@ def attach_image_details(
         actual_ratio = f"{width // divisor}:{height // divisor}"
         details.append({
             "path": value, "width": width, "height": height, "format": image_format,
-            "aspect_ratio": actual_ratio, "size_bytes": size_bytes,
+            "aspect_ratio": actual_ratio, "size_bytes": size_bytes, "frame_count": frame_count,
         })
         if expected:
             ratio_width, ratio_height = map(int, expected.groups())

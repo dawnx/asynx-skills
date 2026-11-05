@@ -277,3 +277,25 @@ def validate_request_body(body: dict[str, Any]) -> None:
     size = request_body_size(body)
     if size > MAX_REQUEST_BODY_BYTES:
         raise AsxError("本次上传数据超过 32 MiB，请减少参考素材或缩小图片后重试。", code="request_body_too_large")
+
+
+def prepare_markup(value: str, original: str, *, keep_original: bool) -> str:
+    """Resize the transparent annotation with the same geometry as its source."""
+    if value.casefold().startswith(("http://", "https://")) or original.casefold().startswith(("http://", "https://")):
+        raise AsxError("Markup 需要本地原图和透明 PNG 标注，以核对尺寸并同步缩放。", code="invalid_image_markup")
+    data, _mime = _read_source(value, max_bytes=MAX_MASK_BYTES)
+    layer, content_type, _frames = _decoded_image(data)
+    raw, _mime = _read_source(original, max_bytes=MAX_REFERENCE_SOURCE_BYTES)
+    source, _mime, _frames = _decoded_image(raw)
+    if content_type != "image/png" or layer.size != source.size or ("A" not in layer.getbands() and "transparency" not in layer.info):
+        raise AsxError("Markup 须为与原图尺寸一致、包含透明通道的 PNG。", code="invalid_image_markup")
+    prepared = prepare_image(original, keep_original=keep_original)
+    layer = layer.convert("RGBA")
+    if prepared.width and prepared.height and layer.size != (prepared.width, prepared.height):
+        image_module, _ops, _unidentified = _pillow()
+        layer = layer.resize((prepared.width, prepared.height), image_module.Resampling.LANCZOS)
+    output = io.BytesIO()
+    layer.save(output, format="PNG")
+    if output.tell() > MAX_MASK_BYTES:
+        raise AsxError("Markup 文件超过上传限制。", code="invalid_image_markup")
+    return _data_url("image/png", output.getvalue())

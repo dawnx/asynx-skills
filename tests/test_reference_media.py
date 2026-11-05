@@ -85,8 +85,22 @@ class ReferenceMediaTestCase(unittest.TestCase):
         self.assertEqual(caught.exception.code, code)
         return caught.exception
 
+    def test_markup_resizes_with_source_and_rejects_misalignment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original = Path(directory) / "source.png"
+            markup = Path(directory) / "markup.png"
+            Image.new("RGB", (2000, 1000), "white").save(original)
+            Image.new("RGBA", (2000, 1000), (0, 0, 0, 0)).save(markup)
+            result = reference_media.prepare_markup(str(markup), str(original), keep_original=False)
+            data = base64.b64decode(result.partition(",")[2])
+            with Image.open(io.BytesIO(data)) as layer:
+                self.assertEqual(layer.size, (1600, 800))
+            Image.new("RGBA", (1000, 1000)).save(markup)
+            with self.assertRaises(AsxError):
+                reference_media.prepare_markup(str(markup), str(original), keep_original=False)
+
     def test_fixed_reference_limits(self) -> None:
-        self.assertEqual(MAX_REFERENCE_IMAGES, 5)
+        self.assertEqual(MAX_REFERENCE_IMAGES, 16)
         self.assertEqual(MAX_REFERENCE_SOURCE_BYTES, 25 * 1024 * 1024)
         self.assertEqual(MAX_REFERENCE_BYTES, 5 * 1024 * 1024)
         self.assertEqual(MAX_REFERENCE_TOTAL_BYTES, 20 * 1024 * 1024)
@@ -195,7 +209,7 @@ class ReferenceMediaTestCase(unittest.TestCase):
         self._assert_error("reference_image_too_large", reference_media.prepare_image, str(oversized))
 
     def test_at_most_five_reference_images_are_accepted(self) -> None:
-        references = [f"https://images.example/{index}.png" for index in range(6)]
+        references = [f"https://images.example/{index}.png" for index in range(17)]
 
         prepared, mask = reference_media.prepare_inputs(
             references[:MAX_REFERENCE_IMAGES],

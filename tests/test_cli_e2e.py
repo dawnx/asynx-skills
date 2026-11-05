@@ -357,8 +357,8 @@ class CLIE2ETestCase(unittest.TestCase):
         self.assertEqual(len(edited["files"]), 1)
         history = self.run_cli("history", "--limit", "2")
         self.assertEqual(
-            {task["task_type"]: task["input"]["quality"] for task in history["tasks"]},
-            {"image.generate": "auto", "image.edit": "auto"},
+            {task["task_type"]: "quality" in task["input"] for task in history["tasks"]},
+            {"image.generate": False, "image.edit": False},
         )
 
     def test_real_cli_processes_resume_append_edit_cancel_and_history(self) -> None:
@@ -457,7 +457,7 @@ class CLIE2ETestCase(unittest.TestCase):
         self.assertEqual(len(batches["batches"]), 3)
         history = self.run_cli("history", "--limit", "20")
         self.assertEqual(len(history["tasks"]), 9)
-        self.assertTrue(all(task["input"]["quality"] == "auto" for task in history["tasks"]))
+        self.assertTrue(all("quality" not in task["input"] for task in history["tasks"]))
         recovered = next(
             task
             for task in history["tasks"]

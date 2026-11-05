@@ -43,15 +43,7 @@ def model(name: str, *, mask: bool = False) -> dict[str, Any]:
         "name": name,
         "modality": "image",
         "task_types": ["image.generate", "image.edit"],
-        "capabilities": {
-            "image_sizes": ["1K", "2K", "4K"],
-            "aspect_ratios": ["1:1", "16:9"],
-            "output_formats": ["png", "jpeg", "webp"],
-            "max_images": 4,
-            "supports_reference_images": True,
-            "max_reference_images": 8,
-            "supports_mask": mask,
-        },
+        "capabilities": {"task_types": ["image.generate", "image.edit"]},
         "pricing": {"mode": "per_request", "amount": "0.01", "currency": "USD"},
     }
 
@@ -238,28 +230,19 @@ class UnitTestCase(unittest.TestCase):
             images.resolve_model(models, "gemini", "image.generate")
         self.assertEqual(caught.exception.code, "ambiguous_model")
 
-    def test_edit_requires_a_model_with_mask_support(self) -> None:
+    def test_catalog_without_parameter_lists_does_not_block_explicit_requests(self) -> None:
         class CatalogClient:
             base_url = "https://catalog.test"
-
-            def models(self) -> tuple[list[dict[str, Any]], str]:
+            def models(self):
                 return [model("gemini-3.1-flash-image")], "req_catalog"
-
-        with self.assertRaises(AsxError) as caught:
-            images.build_task(
-                CatalogClient(),
-                task_type="image.edit",
-                model_selector="gemini 3.1",
-                prompt="Replace the background",
-                image_size="1K",
-                aspect_ratio="1:1",
-                quality="standard",
-                count=1,
-                output_format="png",
-                references=["data:image/png;base64,iVBORw0KGgpyZWY="],
-                mask="data:image/png;base64,iVBORw0KGgptYXNr",
-            )
-        self.assertEqual(caught.exception.code, "unsupported_model_capability")
+        body, _, _ = images.build_task(
+            CatalogClient(), task_type="image.generate", model_selector="gemini 3.1",
+            prompt="A landscape", image_size="1K", aspect_ratio="7:5", quality=None,
+            count=6, output_format="svg", references=[],
+        )
+        self.assertEqual(body["input"]["aspect_ratio"], "7:5")
+        self.assertEqual(body["input"]["count"], 6)
+        self.assertNotIn("quality", body["input"])
 
     def test_local_image_becomes_data_url(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -466,7 +449,7 @@ class UnitTestCase(unittest.TestCase):
         self.assertIsNone(request_id)
         self.assertEqual(body["input"]["image_size"], "2K")
         self.assertEqual(body["input"]["aspect_ratio"], "1:1")
-        self.assertEqual(body["input"]["quality"], "auto")
+        self.assertNotIn("quality", body["input"])
         self.assertEqual(body["input"]["output_format"], "png")
 
     def test_task_polling_uses_initial_delay_then_four_seconds(self) -> None:

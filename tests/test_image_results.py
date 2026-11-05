@@ -20,6 +20,27 @@ class ImageResultsTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
 
+    def test_svg_and_animation_keep_original_bytes_and_metadata(self):
+        from asxlib.images import image_mime
+        from asxlib.media_results import media_file_info
+        from asxlib.errors import AsxError
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><path d="M0 0"/></svg>'
+        vector = self.root / "result.svg"
+        vector.write_bytes(svg)
+        animated = self.root / "result.gif"
+        Image.new("RGB", (10, 10), "red").save(animated, save_all=True, append_images=[Image.new("RGB", (10, 10), "blue")], duration=100)
+        before = animated.read_bytes()
+        self.assertEqual(image_mime(svg), "image/svg+xml")
+        self.assertEqual(media_file_info(animated)["extension"], "gif")
+        payload = {}
+        attach_image_details(payload, [str(vector), str(animated)])
+        self.assertEqual(payload["images"][0]["format"], "svg")
+        self.assertEqual(payload["images"][1]["frame_count"], 2)
+        self.assertEqual(animated.read_bytes(), before)
+        self.assertEqual(vector.read_bytes(), svg)
+        with self.assertRaises(AsxError):
+            image_mime(b'<svg><script>alert(1)</script></svg>')
+
     def save_image(self, name="image.png", size=(600, 900), **options):
         path = self.root / name
         Image.new("RGB", size, "red").save(path, **options)

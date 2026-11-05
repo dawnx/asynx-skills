@@ -13,13 +13,13 @@ from .client import AsynxClient
 from .constants import (
     DEFAULT_BATCH_SUBMISSIONS_PER_POLL,
     DEFAULT_OUTPUT_DIR,
-    DEFAULT_QUALITY,
     KNOWN_STATUSES,
     LOCAL_ITEM_STATUSES,
     MAX_BATCH_ITEMS,
     UTC,
 )
 from .errors import AsxError, friendly_task_error
+from .image_options import IMAGE_OPTIONS, options_from_args
 from .image_results import requested_aspect_ratio
 from .images import build_task, task_input_warnings
 from .media_results import attach_media_details
@@ -234,6 +234,7 @@ def create_batch(
     name: str | None,
     output_dir: str | None,
     keep_reference_original: bool = False,
+    options: dict[str, Any] | None = None,
     duration: float = 5,
     resolution: str = "720p",
     first_frame: str | None = None,
@@ -246,6 +247,8 @@ def create_batch(
             f"批次数量须为 1–{MAX_BATCH_ITEMS}，请调整 --total。", code="invalid_batch_size"
         )
     if operation == "video.generate":
+        if options:
+            raise AsxError("视频批次不支持图片高级参数。", code="conflicting_batch_options")
         _reject_image_options(image_size, quality, count, output_format, mask)
         body, selected_model, catalog_request_id = build_video_task(
             client, prompt=prompt, model_selector=model_selector, duration=duration,
@@ -267,6 +270,7 @@ def create_batch(
             references=references,
             mask=mask,
             keep_reference_original=keep_reference_original,
+            options=options,
         )
     batch_id = _new_batch_id()
     now = utc_now()
@@ -331,6 +335,7 @@ def add_to_batch(
     quality: str | None,
     output_format: str | None,
     keep_reference_original: bool = False,
+    options: dict[str, Any] | None = None,
     duration: float | None = None,
     resolution: str | None = None,
     first_frame: str | None = None,
@@ -363,9 +368,12 @@ def add_to_batch(
                 quality,
                 output_format,
                 duration, resolution, first_frame, last_frame, reference_videos, reference_audios,
+                options or None,
             )
         )
         is_video = body.get("task_type") == "video.generate"
+        if is_video and options:
+            raise AsxError("视频批次不支持图片高级参数。", code="conflicting_batch_options")
         if is_video and has_overrides:
             _reject_image_options(image_size, quality, count, output_format, mask)
             value = body["input"]
@@ -409,6 +417,10 @@ def add_to_batch(
                 raise AsxError(
                     "批次中的参考图片记录无效，无法继续操作；请保留现有记录并联系服务支持。", code="invalid_batch_state"
                 )
+            inherited_options = {key: value for key, value in input_value.items() if key in IMAGE_OPTIONS}
+            if image_size is not None or aspect_ratio is not None:
+                inherited_options.pop("size", None)
+            inherited_options.update(options or {})
             body, _selected_model, _request_id = build_task(
                 client,
                 task_type=f"image.{batch['operation']}",
@@ -419,7 +431,7 @@ def add_to_batch(
                 quality=(
                     quality
                     if quality is not None
-                    else str(input_value.get("quality", DEFAULT_QUALITY))
+                    else input_value.get("quality")
                 ),
                 count=count or int(input_value.get("count", 1)),
                 output_format=output_format or str(input_value.get("output_format", "png")),
@@ -431,6 +443,7 @@ def add_to_batch(
                     if batch["operation"] == "edit" and input_value.get("mask")
                     else None
                 ),
+                options=inherited_options,
                 keep_reference_original=(
                     keep_reference_original if references is not None else True
                 ),
@@ -1144,6 +1157,7 @@ def execute_batch(
             name=args.name,
             output_dir=args.output_dir,
             keep_reference_original=args.keep_reference_original,
+            options=options_from_args(args),
             duration=duration if duration is not None else 5,
             resolution=getattr(args, "resolution", None) or "720p",
             first_frame=getattr(args, "first_frame", None), last_frame=getattr(args, "last_frame", None),
@@ -1172,6 +1186,7 @@ def execute_batch(
             quality=args.quality,
             output_format=args.output_format,
             keep_reference_original=args.keep_reference_original,
+            options=options_from_args(args),
             duration=getattr(args, "duration", None), resolution=getattr(args, "resolution", None),
             first_frame=getattr(args, "first_frame", None), last_frame=getattr(args, "last_frame", None),
             reference_videos=getattr(args, "reference_video", None),

@@ -19,7 +19,6 @@ from .config import (
 from .constants import (
     DEFAULT_BATCH_SUBMISSIONS_PER_POLL,
     DEFAULT_OUTPUT_DIR,
-    DEFAULT_QUALITY,
     KNOWN_STATUSES,
     VERSION,
 )
@@ -55,14 +54,23 @@ class _ArgumentParser(argparse.ArgumentParser):
         raise AsxError(description + "请运行对应命令的 --help 查看用法。", code="invalid_arguments")
 
 
+def _add_extended_image_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--params-file", help="图片高级参数 JSON 文件，显式命令参数优先")
+    for name in ("size", "complexity", "background", "moderation", "safety-identifier", "markup"):
+        parser.add_argument("--" + name, help="图片参数 " + name)
+    for name in ("output-compression", "frame-count", "frame-duration-ms"):
+        parser.add_argument("--" + name, type=int, help="图片参数 " + name)
+
+
 def _add_image_options(parser: argparse.ArgumentParser) -> None:
+    _add_extended_image_options(parser)
     parser.add_argument("--prompt", required=True, help="生成或修改的内容描述")
     parser.add_argument("--model", help="模型名称或名称中唯一的片段，省略时使用默认模型")
     parser.add_argument("--image-size", help="图片尺寸档位，例如 1K、2K")
     parser.add_argument("--aspect-ratio", help="画幅比例，例如 1:1、16:9")
-    parser.add_argument("--quality", help=f"生成质量，默认 {DEFAULT_QUALITY}，可选值取决于模型")
-    parser.add_argument("--count", type=int, default=1, help="本次生成数量，1–4 张")
-    parser.add_argument("--output-format", choices=("png", "jpeg", "webp"), help="输出文件格式")
+    parser.add_argument("--quality", help="生成质量，省略时由渠道或上游使用默认值")
+    parser.add_argument("--count", type=int, default=1, help="本次生成数量，1–10 张")
+    parser.add_argument("--output-format", choices=("png", "jpeg", "webp", "svg", "gif"), help="输出文件格式")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="结果保存目录")
     parser.add_argument("--idempotency-key", help="自定义请求标识，用于重复提交时去重")
     parser.add_argument("--detach", action="store_true", help="提交后立即返回，之后通过 wait 等待结果")
@@ -74,6 +82,7 @@ def _add_image_options(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_batch_creation_options(parser: argparse.ArgumentParser) -> None:
+    _add_extended_image_options(parser)
     parser.add_argument(
         "--operation", choices=("generate", "edit", "video.generate"), default="generate", help="批次类型"
     )
@@ -81,11 +90,11 @@ def _add_batch_creation_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", help="模型名称或唯一片段")
     parser.add_argument("--image-size", help="图片尺寸档位，例如 1K、2K")
     parser.add_argument("--aspect-ratio", help="画幅比例，例如 1:1、16:9")
-    parser.add_argument("--quality", help=f"生成质量，默认 {DEFAULT_QUALITY}，可选值取决于模型")
+    parser.add_argument("--quality", help="生成质量，省略时由渠道或上游使用默认值")
     parser.add_argument("--count", type=int, default=1, help="每个图片任务的输出数量")
     parser.add_argument(
         "--output-format",
-        choices=("png", "jpeg", "webp"),
+        choices=("png", "jpeg", "webp", "svg", "gif"),
         help="输出格式",
     )
     parser.add_argument("--total", type=int, default=1, help="批次中的任务数量")
@@ -109,6 +118,7 @@ def _add_batch_creation_options(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_batch_add_options(parser: argparse.ArgumentParser) -> None:
+    _add_extended_image_options(parser)
     parser.add_argument("batch_id", nargs="?", help="批次 ID，省略时使用最近的活动批次")
     parser.add_argument("--total", type=int, default=1, help="追加的任务数量")
     parser.add_argument("--prompt", help="新的提示词，省略时沿用批次设置")
@@ -118,7 +128,7 @@ def _add_batch_add_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--quality", help="覆盖质量参数")
     parser.add_argument("--count", type=int, help="覆盖每个图片任务的输出数量")
     parser.add_argument(
-        "--output-format", choices=("png", "jpeg", "webp"), help="覆盖输出格式"
+        "--output-format", choices=("png", "jpeg", "webp", "svg", "gif"), help="覆盖输出格式"
     )
     parser.add_argument("--reference", action="append", help="新的参考图，可重复传入")
     parser.add_argument("--image", action="append", help="新的输入图片，可重复传入")

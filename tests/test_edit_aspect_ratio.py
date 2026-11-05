@@ -96,13 +96,10 @@ class EditAspectRatioTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "edit_aspect_ratio_required")
         self.assertEqual(self.build(sources, aspect_ratio="2:3")["input"]["aspect_ratio"], "2:3")
 
-    def test_unsupported_inherited_ratio_is_not_silently_replaced(self):
+    def test_catalog_does_not_replace_inherited_ratio(self):
         images.cache_models(self.client.base_url, [catalog_model(DEFAULT_MODEL)])
         source = self.image("portrait.png", (120, 180))
-        with self.assertRaises(AsxError) as caught:
-            self.build([source])
-        self.assertEqual(caught.exception.code, "unsupported_model_capability")
-        self.assertEqual(caught.exception.details["requested"], "2:3")
+        self.assertEqual(self.build([source])["input"]["aspect_ratio"], "2:3")
         self.assertEqual(self.build([source], aspect_ratio="1:1")["input"]["aspect_ratio"], "1:1")
 
 

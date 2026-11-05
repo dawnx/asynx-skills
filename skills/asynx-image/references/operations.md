@@ -87,7 +87,7 @@ python3 "<skill-dir>/scripts/asynx.py" image batch-convert --input-dir "/absolut
 | --- | --- |
 | 普通参考图源数据 | 每张 25 MiB |
 | 处理后普通参考图 | 每张 5 MiB，最长边 1600 px，总像素 2,560,000 |
-| 普通参考图数量 | 每任务最多 5 张，模型上限可能更低 |
+| 普通参考图数量 | 每任务最多 16 张；平台管理员或上游可能设置更低上限 |
 | 本地图片与蒙版合计 | 处理后数据最多 20 MiB |
 | JSON 请求体 | 32 MiB |
 
@@ -101,10 +101,20 @@ HTTP(S) 图片链接原样交由服务端拉取与校验，客户端不下载也
 
 ## 生成参数
 
-生成与编辑支持 `--model`、`--image-size`、`--aspect-ratio`、`--quality`、`--count`、`--output-format`、`--output-dir` 与 `--detach`。单任务的 `--count` 范围为 1–4，且须满足模型限制；多任务数量使用 `--total`。
+生成与编辑支持 `--model`、`--image-size`、`--aspect-ratio`、`--quality`、`--count`、`--output-format`、`--output-dir` 与 `--detach`。单任务的 `--count` 范围为 1–10，平台管理员或上游可能设置更低上限；多任务数量使用 `--total`。
 
-默认模型与质量由脚本定义，当前为 `gpt-image-2.5-sunburst` 与 `auto`。画幅可按用途选择：竖版卡牌或海报可用 `2:3` / `9:16`，横幅或封面可用 `16:9`，实际取值以模型支持为准。不确定模型是否支持某项能力时再查询 `models`，普通请求无需额外前置检查。
+默认模型为 `gpt-image-2.5-sunburst`。未指定质量时不发送 `quality`，由渠道或上游采用默认行为；显式 `--quality auto` 会原样发送。画幅可按用途选择：竖版卡牌或海报可用 `2:3` / `9:16`，横幅或封面可用 `16:9`，实际取值以模型支持为准。`models` 用于查询名称与生成/编辑范围，不提供参数支持保证。常用比例是建议；上游拒绝时说明已知原因，不猜测允许值，不自动重新付费生成。
 
 用户指定质量时使用模型原生档位；GPT Image 不支持 `standard`。未指定时沿用脚本默认值。
 
 输出中的 `timings` 仅用于用户要求的耗时排查；不得将准备、提交、等待、下载等诊断字段作为普通结果逐项复述。
+
+### 高级图片参数与结果格式
+
+- `--size 1536x1024` 或 `--size auto` 表达精确尺寸或上游自动尺寸；不能同时指定 `--image-size` / `--aspect-ratio`。新图省略画幅仍默认 1:1，本地编辑省略时保持原图比例。
+- `--complexity`、`--background`、`--output-compression`、`--moderation`、`--safety-identifier` 为可选参数；不填写就省略。支持情况由协议与上游决定。
+- `--output-format` 支持 png、jpeg、webp、gif、svg。GIF 动画和 SVG 原文件直接保存，不转换为静态位图；它们不能通过 `edit --from-task` 直接作为下一次输入。
+- `--frame-count`、`--frame-duration-ms` 用于 GIF 参数。嵌套 SVG 配置通过 `--params-file /absolute/path/params.json` 提供，例如 `{"svg":{"model":"上游要求的模型名"}}`。
+- JSON 文件只接受 size、complexity、background、output_compression、moderation、safety_identifier、markup、frame_count、frame_duration_ms、svg；不能设置认证、URL、任务身份。显式命令选项覆盖同名 JSON 值。
+- `edit --markup /absolute/path/annotation.png` 使用与本地原图尺寸一致、带透明通道的 PNG 标注。脚本与原图同步缩放；Markup 与 Mask 互斥，URL 输入不能用于这一本地尺寸核对流程。
+- 上述选项同样适用于图片批次创建及追加；追加时省略代表继承，显式值代表覆盖。恢复已有任务沿用保存的请求和幂等键，不按新默认值重建请求。视频批次不接受图片高级参数。

@@ -12,12 +12,13 @@ from typing import Any, Protocol, cast
 from .config import cache_path
 from .constants import (
     DEFAULT_MODEL,
-    DEFAULT_QUALITY,
     MODEL_CACHE_TTL_SECONDS,
+    MAX_REFERENCE_TOTAL_BYTES,
     MODEL_DEFAULT_IMAGE_SIZES,
     REFERENCE_NETWORK_WARNING_BYTES,
 )
 from .errors import AsxError
+from .svg_results import is_svg
 from .reference_media import prepare_inputs, request_body_size, validate_request_body
 
 _CANONICAL_MODEL = re.compile(r"^(?=.*\d)[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)+$")
@@ -122,33 +123,6 @@ def _looks_canonical(selector: str) -> bool:
     return bool(_CANONICAL_MODEL.fullmatch(selector.strip()))
 
 
-def capabilities(model: dict[str, Any]) -> dict[str, Any]:
-    value = model.get("capabilities")
-    if not isinstance(value, dict):
-        raise AsxError("暂时无法读取所选模型的参数说明，请刷新模型列表或稍后重试。", code="invalid_model_catalog")
-    return value
-
-
-def catalog_choice(value: str, allowed: Any, field: str) -> str:
-    if not isinstance(allowed, list) or not all(isinstance(item, str) for item in allowed):
-        raise AsxError(
-            "暂时无法读取所选模型的参数说明，请刷新模型列表或稍后重试。",
-            code="invalid_model_catalog",
-        )
-    for item in allowed:
-        if item.casefold() == value.casefold():
-            return cast(str, item)
-    label = {
-        "image_size": "图片尺寸", "aspect_ratio": "画幅比例", "output_format": "输出格式"
-    }.get(field, field)
-    options = "、".join(allowed) or "暂无可用选项"
-    raise AsxError(
-        f"所选模型不支持{label} {value!r}，支持的选项为：{options}。",
-        code="unsupported_model_capability",
-        details={"field": field, "requested": value, "allowed": allowed},
-    )
-
-
 def image_mime(data: bytes) -> str:
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
@@ -156,7 +130,13 @@ def image_mime(data: bytes) -> str:
         return "image/jpeg"
     if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
-    raise AsxError("图片需为 PNG、JPEG 或 WebP 格式，请转换格式后重试。", code="unsupported_image_format")
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if is_svg(data):
+        from .svg_results import svg_details
+        svg_details(data)
+        return "image/svg+xml"
+    raise AsxError("结果需为 PNG、JPEG、WebP、GIF 或 SVG。", code="unsupported_image_format")
 
 
 def validate_idempotency_key(value: str) -> str:
@@ -226,14 +206,15 @@ def build_task(
     references: list[str],
     mask: str | None = None,
     keep_reference_original: bool = False,
+    options: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str, str | None]:
     if not 1 <= len(prompt) <= 32_000:
         raise AsxError("图片描述须为 1–32,000 个字符，请填写或缩短后提交。", code="invalid_prompt")
-    quality_value = quality.strip() if quality is not None else DEFAULT_QUALITY
-    if not quality_value:
+    quality_value = quality.strip() if quality is not None else None
+    if quality_value is not None and not quality_value:
         raise AsxError("图片质量不能为空；无需指定时请省略该参数。", code="invalid_quality")
-    if not 1 <= count <= 4:
-        raise AsxError("单次生成数量须为 1–4 张；更多图片请使用批量生成。", code="invalid_count")
+    if not 1 <= count <= 10:
+        raise AsxError("单次生成数量须为 1–10 张；更多图片请使用批量生成。", code="invalid_count")
     if task_type == "image.edit" and not references:
         raise AsxError("编辑图片至少需要一张原图，请提供要修改的图片。", code="missing_edit_image")
 
@@ -267,49 +248,11 @@ def build_task(
     )
     canonical_ratio = aspect_ratio.strip() if aspect_ratio else "1:1"
     canonical_format = output_format.strip().lower() if output_format else "png"
-    if model is not None:
-        model_capabilities = capabilities(model)
-        image_sizes = model_capabilities.get("image_sizes")
-        aspect_ratios = model_capabilities.get("aspect_ratios")
-        output_formats = model_capabilities.get("output_formats")
-        canonical_size = catalog_choice(canonical_size, image_sizes, "image_size")
-        if aspect_ratio or task_type != "image.edit":
-            canonical_ratio = catalog_choice(canonical_ratio, aspect_ratios, "aspect_ratio")
-        canonical_format = catalog_choice(canonical_format, output_formats, "output_format")
-        max_images = model_capabilities.get("max_images")
-        if not isinstance(max_images, int) or count > max_images:
-            raise AsxError(
-                (
-                    f"所选模型单次最多生成 {max_images} 张图片，请减少数量或改用批量生成。"
-                    if isinstance(max_images, int)
-                    else "暂时无法确认所选模型的生成数量限制，请刷新模型列表或稍后重试。"
-                ),
-                code="unsupported_model_capability",
-            )
-        max_references = model_capabilities.get("max_reference_images")
-        if not isinstance(max_references, int) or len(references) > max_references:
-            raise AsxError(
-                (
-                    f"所选模型最多接受 {max_references} 张输入图片，请减少参考图。"
-                    if isinstance(max_references, int)
-                    else "暂时无法确认所选模型的参考图数量限制，请刷新模型列表或稍后重试。"
-                ),
-                code="unsupported_model_capability",
-            )
-        if (
-            task_type == "image.generate"
-            and references
-            and not model_capabilities.get("supports_reference_images")
-        ):
-            raise AsxError(
-                "所选模型不支持参考图，请改用支持参考图的模型，或移除参考图。",
-                code="unsupported_model_capability",
-            )
-        if mask and not model_capabilities.get("supports_mask"):
-            raise AsxError(
-                "所选模型不支持编辑蒙版（Mask），请改用支持蒙版的模型，或移除蒙版。", code="unsupported_model_capability"
-            )
-
+    options = dict(options or {})
+    if canonical_format not in {"png", "jpeg", "webp", "svg", "gif"}:
+        raise AsxError("输出格式须为 PNG、JPEG、WebP、SVG 或 GIF。", code="unsupported_image_format")
+    if options.get("markup") and (mask or task_type != "image.edit"):
+        raise AsxError("Markup 仅用于编辑，且不能与 Mask 同时使用。", code="conflicting_image_options")
     source_sizes: list[tuple[int, int] | None] = []
     prepared, prepared_mask = prepare_inputs(
         references,
@@ -317,7 +260,7 @@ def build_task(
         keep_original=keep_reference_original,
         source_sizes=source_sizes,
     )
-    if task_type == "image.edit" and not aspect_ratio:
+    if task_type == "image.edit" and not aspect_ratio and not options.get("size"):
         if any(size is None for size in source_sizes):
             raise AsxError(
                 "无法读取 URL 输入图的画幅比例；请通过 --aspect-ratio 指定，或改用本地图片以自动保持画幅。",
@@ -335,19 +278,26 @@ def build_task(
                 details={"input_aspect_ratios": sorted(ratios)},
             )
         canonical_ratio = ratios.pop()
-        if model is not None:
-            canonical_ratio = catalog_choice(
-                canonical_ratio, capabilities(model).get("aspect_ratios"), "aspect_ratio"
-            )
     task_input: dict[str, Any] = {
         "prompt": prompt,
         "count": count,
         "image_size": canonical_size,
         "aspect_ratio": canonical_ratio,
-        "quality": quality_value,
         "output_format": canonical_format,
         "extra": {},
     }
+    if quality_value is not None:
+        task_input["quality"] = quality_value
+    if options.get("markup"):
+        from .reference_media import prepare_markup
+        options["markup"] = prepare_markup(options["markup"], references[0], keep_original=keep_reference_original)
+        total_bytes = sum(_data_url_size(source) for source in prepared if source.startswith("data:image/")) + _data_url_size(options["markup"])
+        if total_bytes > MAX_REFERENCE_TOTAL_BYTES:
+            raise AsxError("本地图片与标注处理后的总大小超过 20 MiB，请减少图片数量或缩小图片。", code="reference_images_total_too_large")
+    task_input.update(options)
+    if options.get("size"):
+        task_input.pop("image_size", None)
+        task_input.pop("aspect_ratio", None)
     if task_type == "image.generate":
         task_input["reference_images"] = prepared
     else:

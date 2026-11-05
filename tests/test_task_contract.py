@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sys
 import tempfile
 import unittest
@@ -57,6 +58,37 @@ class TaskContractTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         self.client = ResultClient()
+
+    def test_advanced_options_survive_batch_append_without_inventing_quality(self):
+        created = batches.create_batch(
+            self.client, operation="generate", prompt="first", model_selector=None,
+            image_size=None, aspect_ratio=None, quality=None, count=1, output_format="svg",
+            references=[], mask=None, total=1, name=None, output_dir=str(self.root),
+            options={"size": "1536x1024", "svg": {"model": "test-svg"}},
+        )
+        batches.add_to_batch(
+            self.client, created["id"], total=1, prompt="second", references=None,
+            mask=None, count=None, image_size=None, aspect_ratio=None, quality=None,
+            output_format=None, options={"background": "transparent"},
+        )
+        with state.connect_db() as connection:
+            first = json.loads(connection.execute("SELECT template_json FROM batches WHERE id = ?", (created["id"],)).fetchone()[0])["input"]
+            second = json.loads(connection.execute("SELECT body_json FROM batch_items WHERE batch_id = ? AND sequence = 2", (created["id"],)).fetchone()[0])["input"]
+        self.assertNotIn("quality", second)
+        self.assertEqual(second["size"], first["size"])
+        self.assertEqual(second["svg"], first["svg"])
+        self.assertEqual(second["background"], "transparent")
+
+    def test_parameter_file_cannot_replace_transport_or_task_identity(self):
+        from asxlib.image_options import options_from_args
+        path = self.root / "params.json"
+        path.write_text('{"base_url":"https://other.example"}')
+        args = cli.parser().parse_args(["generate", "--prompt", "cat", "--params-file", str(path)])
+        with self.assertRaises(AsxError):
+            options_from_args(args)
+        path.write_text('{"background":"opaque","output_compression":0}')
+        args = cli.parser().parse_args(["generate", "--prompt", "cat", "--params-file", str(path), "--background", "transparent"])
+        self.assertEqual(options_from_args(args), {"background": "transparent", "output_compression": 0})
 
     def intent(self, name, *, remote_id=None, status="intent"):
         with state.connect_db() as connection:
