@@ -809,12 +809,16 @@ def poll_batch(
                 submitted += 1
             except AsxError as exc:
                 canceled = cancel_blocked_batch_intent(connection, str(item["idempotency_key"]))
+                if exc.submission_rejected:
+                    rejected_intent = get_state_task(connection, f"batchitem_{int(item['id'])}")
+                    if rejected_intent is not None and not rejected_intent.get("remote_task_id"):
+                        update_state_task(connection, str(rejected_intent["local_id"]), status="failed", error=exc.payload().get("error"))
                 _update_item(
                     connection,
                     int(item["id"]),
                     status=(
                         "canceled" if canceled
-                        else "failed" if exc.http_status in {400, 404, 410, 422}
+                        else "failed" if exc.submission_rejected or exc.http_status in {400, 404, 410, 422}
                         else "pending"
                     ),
                     error=exc.payload().get("error"),

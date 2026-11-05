@@ -10,11 +10,14 @@ _SERVICE_MESSAGES = {
     "invalid_user": "账户当前不可用，请检查账户状态或联系服务支持。",
     "sub2api_user_inactive": "账户当前不可用，请检查账户状态或联系服务支持。",
     "model_not_found": "未找到所选模型，请查看可用模型后重新选择。",
+    "group_model_unavailable": "当前模型暂不可用，请选择其他模型，或联系服务提供方。",
     "model_unavailable": "所选模型暂时不可用，请稍后重试或更换模型。",
     "input_asset_unavailable": "参考素材读取失败，请确认文件或链接可正常访问。",
     "input_asset_too_large": "参考素材超过大小限制，请压缩后再提交。",
     "invalid_input_asset": "参考素材不可用，请检查格式和内容。",
     "unsupported_image_parameters": "所选模型不支持当前图片参数，请调整尺寸或画幅比例后再提交。",
+    "provider_result_unavailable": "暂时无法获取本次结果，请保留任务 ID 并联系服务提供方，避免重复生成。",
+    "invalid_provider_result": "本次结果暂时无法交付，请保留任务 ID 并联系服务提供方，避免重复生成。",
     "unsupported_asset_delivery": "暂时无法获取本次结果文件，请保留任务 ID 并联系服务支持。",
     "provider_request_rejected": "生成服务未接受本次请求，请检查所选模型、提示词和参考素材。",
     "provider_attempt_timeout": "生成服务超时仍未完成，请查询原任务确认最终结果。",
@@ -83,6 +86,12 @@ class AsxError(Exception):
         self.request_id = request_id
         self.task_id = task_id
         self.details = details
+
+    @property
+    def submission_rejected(self) -> bool:
+        # This gateway error occurs before task creation, regardless of its 503 status.
+        # An accompanying task ID always takes precedence over this classification.
+        return self.code == "group_model_unavailable" and self.http_status in {404, 503} and not self.task_id
 
     def payload(self) -> dict[str, Any]:
         error: dict[str, Any] = {"code": self.code, "message": self.message}

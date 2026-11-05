@@ -38,6 +38,22 @@ class UserMessageTests(unittest.TestCase):
                 self.assertNotIn("private-service-body-and-key", json.dumps(payload))
                 self.assertRegex(payload["error"]["message"], r"[\u4e00-\u9fff]")
 
+    def test_model_unavailable_message_hides_configuration_without_inventing_recovery(self):
+        error = _api_error(503, json.dumps({"code": "group_model_unavailable", "data": {"task_id": None}}).encode(), {})
+        self.assertIn("模型暂不可用", error.message)
+        self.assertNotRegex(error.message, "分组|渠道|路由|配置")
+        self.assertTrue(error.submission_rejected)
+        error.task_id = "task_existing"
+        self.assertFalse(error.submission_rejected)
+
+    def test_result_error_does_not_expose_network_details_or_claim_success(self):
+        for code in ("provider_result_unavailable", "invalid_provider_result"):
+            with self.subTest(code=code):
+                result = friendly_task_error({"code": code, "message": "unsafe result URL 198.18.0.14 SSRF"})
+                self.assertEqual(result["code"], code)
+                self.assertNotRegex(result["message"], "198\\.18|SSRF|unsafe|已生成")
+                self.assertIn("避免重复生成", result["message"])
+
     def test_task_error_keeps_parameter_and_phase_without_echoing_values(self):
         remote = {
             "code": "provider_request_rejected", "phase": "submit",

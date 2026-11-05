@@ -467,7 +467,10 @@ def _bind_submission(
 def _record_submit_error(local_id: str, exc: AsxError) -> None:
     connection = connect_ledger_db()
     try:
-        update_task(connection, local_id, error=exc.payload().get("error"))
+        changes = {"error": exc.payload().get("error")}
+        if exc.submission_rejected:
+            changes["status"] = "failed"
+        update_task(connection, local_id, **changes)
         append_event(connection, local_id, "submit_error", exc.payload().get("error"))
         connection.commit()
     finally:
@@ -636,6 +639,9 @@ def recover_tasks(
             synced, _code = sync_local_task(client, str(row["local_id"]))
             results.append(synced)
         except AsxError as exc:
+            if exc.submission_rejected and not row.get("remote_task_id"):
+                _record_submit_error(str(row["local_id"]), exc)
+                row = {**row, "status": "failed"}
             results.append({**_local_task_payload(row), "ok": False, "error": exc.payload()["error"]})
     return {"ok": all(item.get("ok", False) for item in results), "schema_version": 1, "tasks": results}
 
@@ -958,7 +964,8 @@ def run_submission(
             exc.details = {}
         if isinstance(exc.details, dict):
             exc.details.setdefault("local_id", local_id)
-            exc.details.setdefault("next_action_args", ["task", "recover", local_id])
+            if not exc.submission_rejected:
+                exc.details.setdefault("next_action_args", ["task", "recover", local_id])
             exc.details.setdefault("idempotency_key", idempotency_key)
             if catalog_request_id:
                 exc.details.setdefault("catalog_request_id", catalog_request_id)

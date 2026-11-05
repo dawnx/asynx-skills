@@ -118,6 +118,27 @@ class TaskContractTests(unittest.TestCase):
         with patch.object(cli, "_client", return_value=self.client):
             return cli.execute(cli.parser().parse_args(arguments))
 
+    def test_known_group_rejection_cannot_be_recovered_into_new_generation(self):
+        # A configuration 503 was rejected before task creation, not a lost response.
+        error = AsxError("group route missing", code="group_model_unavailable", http_status=503)
+        with patch.object(self.client, "submit", side_effect=error) as submit:
+            with self.assertRaises(AsxError) as caught:
+                self.execute(["generate", "--prompt", "cat", "--detach", "--output-dir", str(self.root)])
+            local_id = caught.exception.details["local_id"]
+            self.assertNotIn("next_action_args", caught.exception.details)
+            self.assertEqual(tasks.local_task_status(local_id)["task"]["status"], "failed")
+            tasks.recover_tasks(self.client, local_id)
+            self.assertEqual(submit.call_count, 1)
+
+    def test_unknown_503_keeps_idempotent_recovery_available(self):
+        error = AsxError("unavailable", code="http_503", http_status=503)
+        with patch.object(self.client, "submit", side_effect=error):
+            with self.assertRaises(AsxError) as caught:
+                self.execute(["generate", "--prompt", "cat", "--detach", "--output-dir", str(self.root)])
+        local_id = caught.exception.details["local_id"]
+        self.assertEqual(caught.exception.details["next_action_args"], ["task", "recover", local_id])
+        self.assertEqual(tasks.local_task_status(local_id)["task"]["status"], "submitting")
+
     def test_refresh_by_local_or_remote_id_downloads_without_submission(self):
         row = self.intent("bound", remote_id="task_bound", status="queued")
         for identifier in (row["local_id"], "task_bound"):

@@ -239,14 +239,16 @@ class AsynxClient:
                     raw = _read_limited(
                         exc, limit=MAX_API_RESPONSE_BYTES, context="Asynx API error"
                     )
+                    error = _api_error(exc.code, raw, exc.headers)
                     if (
                         retry_safe
+                        and not error.submission_rejected
                         and exc.code in TRANSIENT_HTTP_STATUSES
                         and attempt + 1 < MAX_HTTP_ATTEMPTS
                     ):
                         time.sleep(_retry_after(exc.headers, attempt))
                         continue
-                    raise _api_error(exc.code, raw, exc.headers) from exc
+                    raise error from exc
                 except (URLError, TimeoutError, OSError) as exc:
                     if retry_safe and attempt + 1 < MAX_HTTP_ATTEMPTS:
                         time.sleep(_retry_after(None, attempt))
