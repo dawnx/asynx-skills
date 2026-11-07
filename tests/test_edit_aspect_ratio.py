@@ -73,10 +73,18 @@ class EditAspectRatioTests(unittest.TestCase):
     def test_explicit_ratio_overrides_input(self):
         source = self.image("portrait.png", (120, 180))
         self.assertEqual(self.build([source], aspect_ratio="16:9")["input"]["aspect_ratio"], "16:9")
+        exact = self.build([source], options={"size": "1536x1024"})["input"]
+        self.assertEqual(exact["size"], "1536x1024")
+        self.assertNotIn("aspect_ratio", exact)
+        self.assertNotIn("image_size", exact)
+        for explicit in ({"aspect_ratio": "16:9"}, {"image_size": "2K"}):
+            with self.subTest(explicit=explicit), self.assertRaises(AsxError) as caught:
+                self.build([source], options={"size": "1536x1024"}, **explicit)
+            self.assertEqual(caught.exception.code, "conflicting_image_options")
 
-    def test_generation_with_reference_keeps_generation_default(self):
+    def test_generation_with_reference_leaves_ratio_default_to_server(self):
         source = self.image("portrait.png", (120, 180))
-        self.assertEqual(self.build([source], task_type="image.generate")["input"]["aspect_ratio"], "1:1")
+        self.assertNotIn("aspect_ratio", self.build([source], task_type="image.generate")["input"])
 
     def test_equal_ratio_multiple_images_can_inherit(self):
         sources = [self.image("a.png", (60, 90)), self.image("b.png", (120, 180))]

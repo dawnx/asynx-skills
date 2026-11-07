@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 _SERVICE_MESSAGES = {
@@ -16,6 +17,9 @@ _SERVICE_MESSAGES = {
     "input_asset_too_large": "参考素材超过大小限制，请压缩后再提交。",
     "invalid_input_asset": "参考素材不可用，请检查格式和内容。",
     "unsupported_image_parameters": "所选模型不支持当前图片参数，请调整尺寸或画幅比例后再提交。",
+    "invalid_image_size": "图片尺寸格式无效，请使用宽x高（例如 1536x1024）或明确指定 auto。",
+    "conflicting_image_dimensions": "精确尺寸不能与尺寸档位或画幅比例同时指定，请选择一种方式。",
+    "unsupported_image_size": "所选模型不支持请求的图片尺寸，请调整尺寸后再生成。",
     "provider_result_unavailable": "暂时无法获取本次结果，请保留任务 ID 并联系服务提供方，避免重复生成。",
     "invalid_provider_result": "本次结果暂时无法交付，请保留任务 ID 并联系服务提供方，避免重复生成。",
     "unsupported_asset_delivery": "暂时无法获取本次结果文件，请保留任务 ID 并联系服务支持。",
@@ -34,8 +38,35 @@ _SERVICE_MESSAGES = {
 }
 
 
-def service_error_message(code: str, *, http_status: int | None = None, message: Any = None) -> str:
+def _safe_size(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"auto|[1-9]\d{0,7}x[1-9]\d{0,7}", value) is not None
+
+
+def service_error_message(code: str, *, http_status: int | None = None, message: Any = None, details: Any = None) -> str:
     """Describe known service failures without forwarding arbitrary upstream text."""
+    if code == "unsupported_image_size":
+        values = details if isinstance(details, dict) else {}
+        requested = values.get("requested_size")
+        result = (
+            f"所选模型不支持请求的图片尺寸 {requested}。"
+            if _safe_size(requested) else "所选模型不支持请求的图片尺寸。"
+        )
+        tier = values.get("requested_tier")
+        tier_failure = values.get("size_source") == "tier" and isinstance(tier, str) and re.fullmatch(r"[1-9]\d{0,2}(?:\.\d{1,2})?[kK]", tier) is not None
+        if tier_failure:
+            result = f"当前模型暂时无法满足 {tier} 尺寸档位。"
+            ratio = values.get("requested_aspect_ratio")
+            if isinstance(ratio, str) and re.fullmatch(r"\d{1,8}(?:\.\d{1,6})?:\d{1,8}(?:\.\d{1,6})?", ratio) and all(float(part) > 0 for part in ratio.split(":")):
+                result = f"当前模型暂时无法满足 {tier}、{ratio} 的尺寸要求。"
+        allowed = values.get("allowed_sizes")
+        if isinstance(allowed, list) and 0 < len(allowed) <= 32 and all(_safe_size(x) for x in allowed):
+            result += "服务返回的可选尺寸：" + "、".join(allowed) + "。"
+            if tier_failure:
+                return result + "请联系服务支持核对尺寸适配，无需猜测其他像素值；不会自动换尺寸或重新提交。"
+            return result + "请确认调整后的尺寸再生成，不会自动修改或重新提交。"
+        if tier_failure:
+            return result + "请联系服务支持核对尺寸适配，无需猜测其他像素值；不会自动换尺寸或重新提交。"
+        return result + "服务未提供可选尺寸。可确认是否接受按标准档位生成后在本地调整；不会自动试尺寸或重新提交。"
     if code == "provider_request_rejected" and isinstance(message, str):
         # Keep an explicitly identified parameter actionable without echoing values.
         for parameter, label in (("quality", "质量"), ("aspect_ratio", "画幅比例"), ("image_size", "图片尺寸")):
@@ -62,7 +93,7 @@ def friendly_task_error(error: Any, status: str | None = None) -> dict[str, Any]
     result = dict(error) if isinstance(error, dict) else {}
     code = str(result.get("code") or f"task_{status or 'failed'}")
     result["code"] = code
-    result["message"] = service_error_message(code, message=result.get("message"))
+    result["message"] = service_error_message(code, message=result.get("message"), details=result.get("details"))
     return result
 
 
@@ -91,7 +122,11 @@ class AsxError(Exception):
     def submission_rejected(self) -> bool:
         # This gateway error occurs before task creation, regardless of its 503 status.
         # An accompanying task ID always takes precedence over this classification.
-        return self.code == "group_model_unavailable" and self.http_status in {404, 503} and not self.task_id
+        return not self.task_id and (
+            (self.code == "group_model_unavailable" and self.http_status in {404, 503})
+            or (self.code in {"invalid_image_size", "conflicting_image_dimensions", "unsupported_image_size"}
+                and self.http_status in {400, 422})
+        )
 
     def payload(self) -> dict[str, Any]:
         error: dict[str, Any] = {"code": self.code, "message": self.message}

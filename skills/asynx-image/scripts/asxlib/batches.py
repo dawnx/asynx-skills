@@ -12,6 +12,7 @@ from typing import Any, cast
 from .client import AsynxClient
 from .constants import (
     DEFAULT_BATCH_SUBMISSIONS_PER_POLL,
+    DEFAULT_MODEL,
     DEFAULT_OUTPUT_DIR,
     KNOWN_STATUSES,
     LOCAL_ITEM_STATUSES,
@@ -223,8 +224,8 @@ def create_batch(
     operation: str,
     prompt: str,
     model_selector: str | None,
-    image_size: str,
-    aspect_ratio: str,
+    image_size: str | None,
+    aspect_ratio: str | None,
     quality: str | None,
     count: int,
     output_format: str,
@@ -343,6 +344,8 @@ def add_to_batch(
     reference_videos: list[str] | None = None,
     reference_audios: list[str] | None = None,
 ) -> dict[str, Any]:
+    if (options or {}).get("size") is not None and (image_size is not None or aspect_ratio is not None):
+        raise AsxError("精确尺寸不能与尺寸档位或画幅比例同时指定。", code="conflicting_image_options")
     if not 1 <= total <= MAX_BATCH_ITEMS:
         raise AsxError(
             f"追加数量须为 1–{MAX_BATCH_ITEMS}，请调整 --total。",
@@ -418,16 +421,59 @@ def add_to_batch(
                     "批次中的参考图片记录无效，无法继续操作；请保留现有记录并联系服务支持。", code="invalid_batch_state"
                 )
             inherited_options = {key: value for key, value in input_value.items() if key in IMAGE_OPTIONS}
+            previous_format = str(input_value.get("output_format", "png")).strip().lower()
+            requested_format = output_format.strip().lower() if output_format is not None else previous_format
+            if (
+                requested_format in {"svg", "gif"}
+                and requested_format != previous_format
+                and str(batch["model"]).casefold() == DEFAULT_MODEL.casefold()
+            ):
+                raise AsxError(
+                    "此批次沿用原来的图片模型。生成 SVG 或 GIF 请新建批次，默认会选择适用模型；原批次保持不变。",
+                    code="batch_model_format_conflict",
+                )
+            if requested_format != previous_format:
+                if requested_format != "svg":
+                    inherited_options.pop("svg", None)
+                if requested_format != "gif":
+                    inherited_options.pop("frame_count", None)
+                    inherited_options.pop("frame_duration_ms", None)
+                if requested_format not in {"jpeg", "webp"}:
+                    inherited_options.pop("output_compression", None)
+            if batch["operation"] == "edit" and references is not None:
+                if input_value.get("markup") and not (options or {}).get("markup"):
+                    raise AsxError(
+                        "重新指定原图时，请同时提供对应的 --markup 标注；若不再需要标注，请新建不带标注的批次。原批次未修改。",
+                        code="batch_markup_required",
+                    )
+                if input_value.get("mask") and mask is None:
+                    raise AsxError(
+                        "重新指定原图时，请同时提供对应的 --mask 蒙版；若不再需要蒙版，请新建不带蒙版的批次。原批次未修改。",
+                        code="batch_mask_required",
+                    )
             if image_size is not None or aspect_ratio is not None:
                 inherited_options.pop("size", None)
-            inherited_options.update(options or {})
+            overrides = dict(options or {})
+            if isinstance(inherited_options.get("svg"), dict) and isinstance(overrides.get("svg"), dict):
+                saved_svg = inherited_options["svg"]
+                new_svg = overrides["svg"]
+                merged_svg = {**saved_svg, **new_svg}
+                if isinstance(saved_svg.get("reasoning"), dict) and isinstance(new_svg.get("reasoning"), dict):
+                    merged_svg["reasoning"] = {**saved_svg["reasoning"], **new_svg["reasoning"]}
+                overrides["svg"] = merged_svg
+            inherited_options.update(overrides)
+            inherited_size = image_size if image_size is not None else input_value.get("image_size")
+            inherited_ratio = aspect_ratio if aspect_ratio is not None else input_value.get("aspect_ratio")
+            if inherited_options.get("size") is not None:
+                inherited_size = None
+                inherited_ratio = None
             body, _selected_model, _request_id = build_task(
                 client,
                 task_type=f"image.{batch['operation']}",
                 model_selector=batch["model"],
                 prompt=prompt if prompt is not None else str(input_value.get("prompt", "")),
-                image_size=image_size or str(input_value.get("image_size", "1K")),
-                aspect_ratio=aspect_ratio or str(input_value.get("aspect_ratio", "1:1")),
+                image_size=inherited_size,
+                aspect_ratio=inherited_ratio,
                 quality=(
                     quality
                     if quality is not None

@@ -46,6 +46,31 @@ class UserMessageTests(unittest.TestCase):
         error.task_id = "task_existing"
         self.assertFalse(error.submission_rejected)
 
+    def test_size_rejection_preserves_safe_options_without_retrying_or_echoing_provider_text(self):
+        details = {"requested_size": "1000x1000", "allowed_sizes": ["1024x1024", "1536x1024"]}
+        remote = {"code": "unsupported_image_size", "message": "private-provider-text", "details": details}
+        error = _api_error(422, json.dumps({**remote, "data": {"details": details}}).encode(), {})
+        self.assertTrue(error.submission_rejected)
+        self.assertIn("1000x1000", error.message)
+        self.assertIn("1536x1024", error.message)
+        self.assertNotIn("private-provider-text", error.message)
+        result = tasks.task_payload({"id": "task_size", "status": "failed", "error": remote}, "req_size")
+        self.assertEqual(result["error"]["details"], details)
+        self.assertEqual(result["error"]["message"], error.message)
+        self.assertNotIn("next_action_args", result)
+        remote["details"] = {"requested_size": "secret", "allowed_sizes": ["https://secret.example"]}
+        self.assertNotIn("secret", friendly_task_error(remote)["message"])
+        remote["details"] = {"size_source": "tier", "requested_tier": "2K",
+                             "requested_aspect_ratio": "16:9", "submitted_size": "2048x1152"}
+        tier_result = tasks.task_payload({"id": "task_tier", "status": "failed", "error": remote}, None)
+        self.assertIn("2K、16:9", tier_result["error"]["message"])
+        self.assertIn("服务支持", tier_result["error"]["message"])
+        self.assertNotIn("next_action_args", tier_result)
+        remote["details"] = {"size_source": "exact", "requested_size": "2000x1000"}
+        exact_result = friendly_task_error(remote)
+        self.assertIn("本地调整", exact_result["message"])
+        self.assertNotIn("2048x", exact_result["message"])
+
     def test_result_error_does_not_expose_network_details_or_claim_success(self):
         for code in ("provider_result_unavailable", "invalid_provider_result"):
             with self.subTest(code=code):

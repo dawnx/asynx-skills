@@ -11,15 +11,16 @@ from typing import Any, Protocol, cast
 
 from .config import cache_path
 from .constants import (
+    DEFAULT_EXTENDED_IMAGE_MODEL,
     DEFAULT_MODEL,
-    MODEL_CACHE_TTL_SECONDS,
+    DEFAULT_SVG_AUTHOR_MODEL,
     MAX_REFERENCE_TOTAL_BYTES,
-    MODEL_DEFAULT_IMAGE_SIZES,
+    MODEL_CACHE_TTL_SECONDS,
     REFERENCE_NETWORK_WARNING_BYTES,
 )
 from .errors import AsxError
-from .svg_results import is_svg
 from .reference_media import prepare_inputs, request_body_size, validate_request_body
+from .svg_results import is_svg
 
 _CANONICAL_MODEL = re.compile(r"^(?=.*\d)[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)+$")
 
@@ -218,7 +219,9 @@ def build_task(
     if task_type == "image.edit" and not references:
         raise AsxError("编辑图片至少需要一张原图，请提供要修改的图片。", code="missing_edit_image")
 
-    requested_model = (model_selector or DEFAULT_MODEL).strip()
+    canonical_format = output_format.strip().lower() if output_format else "png"
+    default_model = DEFAULT_EXTENDED_IMAGE_MODEL if canonical_format in {"svg", "gif"} else DEFAULT_MODEL
+    requested_model = (model_selector if model_selector is not None else default_model).strip()
     if not 1 <= len(requested_model) <= 160:
         raise AsxError("模型名称须为 1–160 个字符，请检查名称是否正确。", code="invalid_model")
     request_id: str | None = None
@@ -239,18 +242,20 @@ def build_task(
             cache_models(client.base_url, models)
         model = resolve_model(models, model_selector, task_type)
 
-    canonical_size = (
-        image_size.strip().upper()
-        if image_size
-        else MODEL_DEFAULT_IMAGE_SIZES.get(
-            str(model["name"] if model is not None else requested_model).casefold(), "1K"
-        )
-    )
-    canonical_ratio = aspect_ratio.strip() if aspect_ratio else "1:1"
-    canonical_format = output_format.strip().lower() if output_format else "png"
+    canonical_size = image_size.strip() if image_size is not None else None
+    canonical_ratio = aspect_ratio.strip() if aspect_ratio is not None else None
     options = dict(options or {})
+    if canonical_size == "" or canonical_ratio == "":
+        raise AsxError("图片尺寸与画幅比例不能填写为空；无需指定时请省略对应参数。", code="invalid_image_options")
+    if options.get("size") is not None and (image_size is not None or aspect_ratio is not None):
+        raise AsxError("精确尺寸不能与尺寸档位或画幅比例同时指定。", code="conflicting_image_options")
     if canonical_format not in {"png", "jpeg", "webp", "svg", "gif"}:
         raise AsxError("输出格式须为 PNG、JPEG、WebP、SVG 或 GIF。", code="unsupported_image_format")
+    if canonical_format == "svg":
+        svg = options.get("svg", {})
+        if not isinstance(svg, dict):
+            raise AsxError("SVG 参数须为 JSON 对象。", code="invalid_image_options")
+        options["svg"] = {"model": DEFAULT_SVG_AUTHOR_MODEL, **svg}
     if options.get("markup") and (mask or task_type != "image.edit"):
         raise AsxError("Markup 仅用于编辑，且不能与 Mask 同时使用。", code="conflicting_image_options")
     source_sizes: list[tuple[int, int] | None] = []
@@ -281,11 +286,13 @@ def build_task(
     task_input: dict[str, Any] = {
         "prompt": prompt,
         "count": count,
-        "image_size": canonical_size,
-        "aspect_ratio": canonical_ratio,
         "output_format": canonical_format,
         "extra": {},
     }
+    if canonical_size is not None:
+        task_input["image_size"] = canonical_size
+    if canonical_ratio is not None:
+        task_input["aspect_ratio"] = canonical_ratio
     if quality_value is not None:
         task_input["quality"] = quality_value
     if options.get("markup"):

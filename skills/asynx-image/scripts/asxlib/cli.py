@@ -56,7 +56,10 @@ class _ArgumentParser(argparse.ArgumentParser):
 
 def _add_extended_image_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--params-file", help="图片高级参数 JSON 文件，显式命令参数优先")
-    for name in ("size", "complexity", "background", "moderation", "safety-identifier", "markup"):
+    parser.add_argument("--svg-model", help="SVG 编写模型，默认 gpt-6.1-sol；仅需更换时指定")
+    parser.add_argument("--svg-reasoning-effort", help="SVG 编写模型的推理强度；省略时不指定")
+    parser.add_argument("--size", help="明确的像素宽x高，例如 2000x1000；1K/2K/4K 请用 --image-size，不自行换算")
+    for name in ("complexity", "background", "moderation", "safety-identifier", "markup"):
         parser.add_argument("--" + name, help="图片参数 " + name)
     for name in ("output-compression", "frame-count", "frame-duration-ms"):
         parser.add_argument("--" + name, type=int, help="图片参数 " + name)
@@ -66,7 +69,7 @@ def _add_image_options(parser: argparse.ArgumentParser) -> None:
     _add_extended_image_options(parser)
     parser.add_argument("--prompt", required=True, help="生成或修改的内容描述")
     parser.add_argument("--model", help="模型名称或名称中唯一的片段，省略时使用默认模型")
-    parser.add_argument("--image-size", help="图片尺寸档位，例如 1K、2K")
+    parser.add_argument("--image-size", help="尺寸档位，例如 1K、2K、4K；未指定时省略，由服务端采用默认设置")
     parser.add_argument("--aspect-ratio", help="画幅比例，例如 1:1、16:9")
     parser.add_argument("--quality", help="生成质量，省略时由渠道或上游使用默认值")
     parser.add_argument("--count", type=int, default=1, help="本次生成数量，1–10 张")
@@ -88,7 +91,7 @@ def _add_batch_creation_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--prompt", required=True, help="提示词或编辑指令")
     parser.add_argument("--model", help="模型名称或唯一片段")
-    parser.add_argument("--image-size", help="图片尺寸档位，例如 1K、2K")
+    parser.add_argument("--image-size", help="尺寸档位，例如 1K、2K、4K；未指定时省略，由服务端采用默认设置")
     parser.add_argument("--aspect-ratio", help="画幅比例，例如 1:1、16:9")
     parser.add_argument("--quality", help="生成质量，省略时由渠道或上游使用默认值")
     parser.add_argument("--count", type=int, default=1, help="每个图片任务的输出数量")
@@ -123,7 +126,7 @@ def _add_batch_add_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--total", type=int, default=1, help="追加的任务数量")
     parser.add_argument("--prompt", help="新的提示词，省略时沿用批次设置")
     parser.add_argument("--model", help=argparse.SUPPRESS)
-    parser.add_argument("--image-size", help="覆盖图片尺寸档位")
+    parser.add_argument("--image-size", help="覆盖图片尺寸档位，例如 1K、2K、4K；省略时沿用原批次")
     parser.add_argument("--aspect-ratio", help="覆盖画幅比例")
     parser.add_argument("--quality", help="覆盖质量参数")
     parser.add_argument("--count", type=int, help="覆盖每个图片任务的输出数量")

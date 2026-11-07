@@ -1,7 +1,7 @@
 interface:
-  display_name: "Asynx 图片与视频"
-  short_description: "通过 Asynx 生成图片与视频、编辑图片和管理批量任务，也支持本地图片工具"
-  default_prompt: "请使用 $asynx-image 处理我的图片或视频需求。"
+  display_name: "Asynx 图像创作"
+  short_description: "生成图片、SVG 矢量图与 GIF 动画，支持图片编辑和批量任务"
+  default_prompt: "请使用 $asynx-image 处理我的图片、SVG 或 GIF 动画需求。"
 
 policy:
   allow_implicit_invocation: true

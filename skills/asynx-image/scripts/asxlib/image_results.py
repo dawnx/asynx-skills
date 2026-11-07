@@ -9,6 +9,31 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+from .constants import MAX_ASSET_RESPONSE_BYTES, MAX_SAFE_IMAGE_PIXELS
+from .errors import AsxError
+from .svg_results import svg_details
+
+
+def _gif_metadata(source: Any, size_bytes: int) -> tuple[int, int]:
+    """Bound optional animation inspection without modifying the delivered file."""
+    if size_bytes > MAX_ASSET_RESPONSE_BYTES:
+        raise ValueError("animation byte limit")
+    duration = 0
+    total_pixels = 0
+    frames = 0
+    for index in range(65):
+        try:
+            source.seek(index)
+        except EOFError:
+            break
+        pixels = source.width * source.height
+        total_pixels += pixels
+        if index >= 64 or pixels > MAX_SAFE_IMAGE_PIXELS or total_pixels > MAX_SAFE_IMAGE_PIXELS * 4:
+            raise ValueError("animation inspection budget")
+        duration += int(source.info.get("duration", 0))
+        frames += 1
+    return frames, duration
+
 
 def requested_aspect_ratio(body: Any) -> str | None:
     task_input = body.get("input") if isinstance(body, dict) else None
@@ -29,14 +54,14 @@ def attach_image_details(
     for value in files:
         path = Path(value)
         if path.suffix.lower() == ".svg":
-            from .svg_results import svg_details
-            from .errors import AsxError
             try:
                 details.append({"path": value, "size_bytes": path.stat().st_size, **svg_details(path.read_bytes())})
             except (OSError, AsxError):
                 notices.append({"code": "image_metadata_unavailable", "path": value, "message": "无法读取 SVG 元数据，文件路径已保留。"})
             continue
+        duration_ms: int | None = None
         try:
+            size_bytes = path.stat().st_size
             image_module = importlib.import_module("PIL.Image")
             with warnings.catch_warnings():
                 warnings.simplefilter("error", image_module.DecompressionBombWarning)
@@ -46,8 +71,10 @@ def attach_image_details(
                     if source.getexif().get(274) in {5, 6, 7, 8}:
                         width, height = height, width
                     image_format = str(source.format or "").lower()
-                    frame_count = int(getattr(source, "n_frames", 1))
-                size_bytes = path.stat().st_size
+                    if image_format == "gif":
+                        frame_count, duration_ms = _gif_metadata(source, size_bytes)
+                    else:
+                        frame_count = int(getattr(source, "n_frames", 1))
             if width <= 0 or height <= 0:
                 raise ValueError("invalid image dimensions")
         except (ImportError, OSError, EOFError, SyntaxError, ValueError, Warning):
@@ -67,6 +94,7 @@ def attach_image_details(
         details.append({
             "path": value, "width": width, "height": height, "format": image_format,
             "aspect_ratio": actual_ratio, "size_bytes": size_bytes, "frame_count": frame_count,
+            **({"duration_ms": duration_ms} if duration_ms is not None else {}),
         })
         if expected:
             ratio_width, ratio_height = map(int, expected.groups())

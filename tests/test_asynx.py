@@ -167,7 +167,7 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(FakeAsynxHandler.idempotency_key, "asx-test-idempotency")
         assert FakeAsynxHandler.submission is not None
         self.assertEqual(FakeAsynxHandler.submission["task_type"], "image.generate")
-        self.assertEqual(FakeAsynxHandler.submission["input"]["image_size"], "2K")
+        self.assertEqual(FakeAsynxHandler.submission["input"]["image_size"], "2k")
 
 
 class UnitTestCase(unittest.TestCase):
@@ -367,7 +367,47 @@ class UnitTestCase(unittest.TestCase):
             )
         self.assertEqual(selected, "gpt-image-2.5-sunburst")
         self.assertIsNone(request_id)
-        self.assertEqual(body["input"]["image_size"], "2K")
+        self.assertEqual(body["input"]["image_size"], "2k")
+
+    def test_output_format_default_model_preserves_explicit_choice(self) -> None:
+        # Choosing an output format must not silently override a user's model.
+        class NoCatalogClient:
+            base_url = "https://format-default.test"
+
+            def models(self):
+                raise AssertionError("format defaults must not require a catalog request")
+
+        with patch.object(images, "_cached_models", return_value=None):
+            for output_format, explicit, expected in (
+                (None, None, "gpt-image-2.5-sunburst"),
+                ("webp", None, "gpt-image-2.5-sunburst"),
+                ("SVG", None, "gpt-image-2.6-sunburst"),
+                ("gif", None, "gpt-image-2.6-sunburst"),
+                ("svg", "gpt-image-2.6-flare", "gpt-image-2.6-flare"),
+                ("gif", "gpt-image-2.5-sunburst", "gpt-image-2.5-sunburst"),
+            ):
+                with self.subTest(output_format=output_format, explicit=explicit):
+                    body, selected, _ = images.build_task(
+                        NoCatalogClient(), task_type="image.generate", model_selector=explicit,
+                        prompt="icon", image_size=None, aspect_ratio=None, quality=None,
+                        count=1, output_format=output_format, references=[],
+                    )
+                    self.assertEqual(selected, expected)
+                    self.assertEqual(body["model"], expected)
+                    self.assertNotIn("quality", body["input"])
+                    self.assertNotIn("image_size", body["input"])
+                    self.assertNotIn("aspect_ratio", body["input"])
+                    if (output_format or "").lower() == "svg":
+                        self.assertEqual(body["input"]["svg"], {"model": "gpt-6.1-sol"})
+                    else:
+                        self.assertNotIn("svg", body["input"])
+            explicit_svg = {"model": "custom-author", "reasoning": {"effort": "high"}}
+            body, _, _ = images.build_task(
+                NoCatalogClient(), task_type="image.generate", model_selector=None,
+                prompt="icon", image_size=None, aspect_ratio=None, quality=None,
+                count=1, output_format="svg", references=[], options={"svg": explicit_svg},
+            )
+            self.assertEqual(body["input"]["svg"], explicit_svg)
 
     def test_fuzzy_model_uses_five_minute_cache(self) -> None:
         class CatalogClient:
@@ -420,7 +460,7 @@ class UnitTestCase(unittest.TestCase):
         self.assertEqual(first_result[1], "gemini-3.1-flash-image")
         self.assertEqual(cached_result[1], "gemini-3.1-flash-image")
 
-    def test_explicit_seedream_uses_known_defaults_without_catalog_request(self) -> None:
+    def test_explicit_seedream_leaves_size_defaults_to_server_without_catalog_request(self) -> None:
         class NoCatalogClient:
             base_url = "https://model-defaults.test"
 
@@ -447,8 +487,8 @@ class UnitTestCase(unittest.TestCase):
 
         self.assertEqual(selected, "doubao-seedream-5-0-260128")
         self.assertIsNone(request_id)
-        self.assertEqual(body["input"]["image_size"], "2K")
-        self.assertEqual(body["input"]["aspect_ratio"], "1:1")
+        self.assertNotIn("image_size", body["input"])
+        self.assertNotIn("aspect_ratio", body["input"])
         self.assertNotIn("quality", body["input"])
         self.assertEqual(body["input"]["output_format"], "png")
 

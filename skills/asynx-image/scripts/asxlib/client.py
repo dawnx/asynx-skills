@@ -84,11 +84,11 @@ def _api_error(status: int, raw: bytes, headers: Any) -> AsxError:
         payload = {}
     if isinstance(payload, dict):
         code = str(payload.get("code") or f"http_{status}")
-        message = service_error_message(code, http_status=status, message=payload.get("message"))
         request_id = payload.get("request_id") or request_id
         data = payload.get("data")
         task_id = data.get("task_id") if isinstance(data, dict) else None
         details = data.get("details") if isinstance(data, dict) else None
+        message = service_error_message(code, http_status=status, message=payload.get("message"), details=details)
     else:
         code = f"http_{status}"
         message = service_error_message(code, http_status=status)

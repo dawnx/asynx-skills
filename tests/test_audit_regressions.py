@@ -187,20 +187,21 @@ class AuditRegressionTests(unittest.TestCase):
         images.cache_models(self.client.base_url, [catalog_model(DEFAULT_MODEL)])
         warm = self.build()
         self.assertEqual(cold["input"], warm["input"])
-        self.assertEqual(warm["input"]["image_size"], "1K")
+        self.assertNotIn("image_size", warm["input"])
+        self.assertNotIn("aspect_ratio", warm["input"])
 
-    def test_fuzzy_model_uses_canonical_model_defaults(self):
+    def test_fuzzy_model_leaves_size_defaults_to_server(self):
         self.client.catalog = [catalog_model("doubao-seedream-5-0-260128")]
         result = self.build("seedream")
-        self.assertEqual(result["input"]["image_size"], "2K")
-        self.assertEqual(result["input"]["aspect_ratio"], "1:1")
+        self.assertNotIn("image_size", result["input"])
+        self.assertNotIn("aspect_ratio", result["input"])
         self.assertEqual(result["input"]["output_format"], "png")
 
     def test_stale_catalog_does_not_override_default_or_explicit_size(self):
         model = catalog_model(DEFAULT_MODEL)
         model["capabilities"]["image_sizes"] = ["4K"]
         images.cache_models(self.client.base_url, [model])
-        self.assertEqual(self.build()["input"]["image_size"], "1K")
+        self.assertNotIn("image_size", self.build()["input"])
         self.assertEqual(self.build(image_size="4K")["input"]["image_size"], "4K")
 
     def test_batch_conversion_preflights_all_collisions_without_writes(self):

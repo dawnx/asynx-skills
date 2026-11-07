@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -64,7 +64,7 @@ class TaskContractTests(unittest.TestCase):
             self.client, operation="generate", prompt="first", model_selector=None,
             image_size=None, aspect_ratio=None, quality=None, count=1, output_format="svg",
             references=[], mask=None, total=1, name=None, output_dir=str(self.root),
-            options={"size": "1536x1024", "svg": {"model": "test-svg"}},
+            options={"size": "1536x1024", "svg": {"model": "test-svg", "reasoning": {"effort": "medium"}}},
         )
         batches.add_to_batch(
             self.client, created["id"], total=1, prompt="second", references=None,
@@ -78,6 +78,37 @@ class TaskContractTests(unittest.TestCase):
         self.assertEqual(second["size"], first["size"])
         self.assertEqual(second["svg"], first["svg"])
         self.assertEqual(second["background"], "transparent")
+        self.assertNotIn("image_size", second)
+        self.assertNotIn("aspect_ratio", second)
+        # A ratio override replaces an inherited exact size without inventing a tier.
+        batches.add_to_batch(
+            self.client, created["id"], total=1, prompt="third", references=None,
+            mask=None, count=None, image_size=None, aspect_ratio="16:9", quality=None,
+            output_format=None, options={"svg": {"reasoning": {"effort": "high"}}},
+        )
+        with state.connect_db() as connection:
+            third = json.loads(connection.execute(
+                "SELECT body_json FROM batch_items WHERE batch_id = ? AND sequence = 3",
+                (created["id"],),
+            ).fetchone()[0])["input"]
+        self.assertNotIn("size", third)
+        self.assertNotIn("image_size", third)
+        self.assertEqual(third["aspect_ratio"], "16:9")
+        self.assertEqual(third["svg"], {"model": "test-svg", "reasoning": {"effort": "high"}})
+        self.assertEqual(first["svg"], {"model": "test-svg", "reasoning": {"effort": "medium"}})
+        # Persisted batch settings do not adopt a new default on continuation.
+        with patch("asxlib.images.DEFAULT_SVG_AUTHOR_MODEL", "later-default"):
+            batches.add_to_batch(
+                self.client, created["id"], total=1, prompt="continued", references=None,
+                mask=None, count=None, image_size=None, aspect_ratio=None, quality=None,
+                output_format=None,
+            )
+        with state.connect_db() as connection:
+            fourth = json.loads(connection.execute(
+                "SELECT body_json FROM batch_items WHERE batch_id = ? AND sequence = 4",
+                (created["id"],),
+            ).fetchone()[0])["input"]
+        self.assertEqual(fourth["svg"], first["svg"])
 
     def test_parameter_file_cannot_replace_transport_or_task_identity(self):
         from asxlib.image_options import options_from_args
@@ -89,6 +120,147 @@ class TaskContractTests(unittest.TestCase):
         path.write_text('{"background":"opaque","output_compression":0}')
         args = cli.parser().parse_args(["generate", "--prompt", "cat", "--params-file", str(path), "--background", "transparent"])
         self.assertEqual(options_from_args(args), {"background": "transparent", "output_compression": 0})
+        path.write_text(json.dumps({"background": "transparent", "svg": {
+            "model": "json-model", "reasoning": {"effort": "medium"},
+        }}))
+        args = cli.parser().parse_args([
+            "generate", "--prompt", "cat", "--params-file", str(path), "--svg-model", "cli-model",
+        ])
+        self.assertEqual(options_from_args(args), {"background": "transparent", "svg": {
+            "model": "cli-model", "reasoning": {"effort": "medium"},
+        }})
+        args = cli.parser().parse_args([
+            "generate", "--prompt", "cat", "--params-file", str(path), "--svg-reasoning-effort", "high",
+        ])
+        self.assertEqual(options_from_args(args)["svg"], {"model": "json-model", "reasoning": {"effort": "high"}})
+        # An effort-only SVG command uses the built-in author without asking the caller.
+        result, code = self.execute([
+            "generate", "--prompt", "icon", "--output-format", "svg",
+            "--svg-reasoning-effort", "high", "--detach", "--output-dir", str(self.root),
+        ])
+        self.assertEqual(code, 0)
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.client.submitted[-1][0]["input"]["svg"], {
+            "model": "gpt-6.1-sol", "reasoning": {"effort": "high"},
+        })
+        for invalid in (
+            {"model": ""},
+            {"model": None},
+            {"model": "model", "reasoning": "high"},
+            {"model": "model", "reasoning": {"effort": 1}},
+            {"model": "model", "reasoning": {"effort": "high", "secret": "value"}},
+            {"model": "model", "endpoint": "https://other.example"},
+        ):
+            path.write_text(json.dumps({"svg": invalid}))
+            args = cli.parser().parse_args(["generate", "--prompt", "cat", "--params-file", str(path)])
+            with self.subTest(svg=invalid), self.assertRaises(AsxError):
+                options_from_args(args)
+
+    def test_batch_format_change_drops_inherited_options_but_preserves_explicit_values(self):
+        # Avoid sending stale format settings while retaining this request's intent.
+        for source_format, options in (
+            ("gif", {"frame_count": 9, "frame_duration_ms": 200}),
+            ("svg", {"svg": {"model": "test-svg"}}),
+            ("webp", {"output_compression": 75}),
+        ):
+            with self.subTest(source_format=source_format):
+                created = batches.create_batch(
+                    self.client, operation="generate", prompt="first",
+                    model_selector="gpt-image-2.6-sunburst", image_size=None,
+                    aspect_ratio=None, quality=None, count=1, output_format=source_format,
+                    references=[], mask=None, total=1, name=None, output_dir=str(self.root),
+                    options=options,
+                )
+                for explicit in ({}, options):
+                    batches.add_to_batch(
+                        self.client, created["id"], total=1, prompt="next", references=None,
+                        mask=None, count=None, image_size=None, aspect_ratio=None, quality=None,
+                        output_format="png", options=explicit,
+                    )
+                with state.connect_db() as connection:
+                    bodies = [json.loads(row[0])["input"] for row in connection.execute(
+                        "SELECT body_json FROM batch_items WHERE batch_id = ? AND sequence > 1 ORDER BY sequence",
+                        (created["id"],),
+                    )]
+                    template = json.loads(connection.execute(
+                        "SELECT template_json FROM batches WHERE id = ?", (created["id"],),
+                    ).fetchone()[0])["input"]
+                self.assertEqual(bodies[0]["output_format"], "png")
+                for key, value in options.items():
+                    self.assertNotIn(key, bodies[0])
+                    self.assertEqual(bodies[1][key], value)
+                    self.assertEqual(template[key], value)
+        self.assertEqual(self.client.submitted, [])
+
+    def test_batch_replacing_original_requires_matching_overlay_before_adding_items(self):
+        # Same-size replacement must not silently reuse another image's annotations.
+        from PIL import Image
+        original = self.root / "original.png"
+        replacement = self.root / "replacement.png"
+        layer = self.root / "layer.png"
+        Image.new("RGB", (4, 4), "red").save(original)
+        Image.new("RGB", (4, 4), "blue").save(replacement)
+        overlay = Image.new("RGBA", (4, 4), (0, 0, 0, 0))
+        overlay.putpixel((0, 0), (255, 0, 0, 255))
+        overlay.save(layer)
+        for kind in ("markup", "mask"):
+            with self.subTest(kind=kind):
+                created = batches.create_batch(
+                    self.client, operation="edit", prompt="first", model_selector=None,
+                    image_size=None, aspect_ratio=None, quality=None, count=1, output_format="png",
+                    references=[str(original)], mask=str(layer) if kind == "mask" else None,
+                    total=1, name=None, output_dir=str(self.root),
+                    options={"markup": str(layer)} if kind == "markup" else None,
+                )
+                arguments = {"total": 1, "prompt": "next", "references": [str(replacement)],
+                             "mask": None, "count": None, "image_size": None, "aspect_ratio": None,
+                             "quality": None, "output_format": None}
+                with self.assertRaises(AsxError) as raised:
+                    batches.add_to_batch(self.client, created["id"], **arguments)
+                self.assertEqual(raised.exception.code, f"batch_{kind}_required")
+                self.assertEqual(batches.batch_status(created["id"])["batch"]["total"], 1)
+                # Keeping the original still permits a prompt-only continuation.
+                batches.add_to_batch(self.client, created["id"], **{**arguments, "references": None})
+                explicit = {"mask": str(layer)} if kind == "mask" else {"options": {"markup": str(layer)}}
+                batches.add_to_batch(self.client, created["id"], **{**arguments, **explicit})
+                self.assertEqual(batches.batch_status(created["id"])["batch"]["total"], 3)
+        self.assertEqual(self.client.submitted, [])
+
+    def test_batch_format_change_does_not_silently_switch_default_model(self):
+        created = batches.create_batch(
+            self.client, operation="generate", prompt="first", model_selector=None,
+            image_size=None, aspect_ratio=None, quality=None, count=1, output_format="png",
+            references=[], mask=None, total=1, name=None, output_dir=str(self.root),
+        )
+        for output_format in ("svg", "gif"):
+            with self.subTest(output_format=output_format), self.assertRaises(AsxError) as raised:
+                batches.add_to_batch(
+                    self.client, created["id"], total=1, prompt=None, references=None,
+                    mask=None, count=None, image_size=None, aspect_ratio=None, quality=None,
+                    output_format=output_format,
+                )
+            self.assertEqual(raised.exception.code, "batch_model_format_conflict")
+        snapshot = batches.batch_status(created["id"])["batch"]
+        self.assertEqual(snapshot["model"], DEFAULT_MODEL)
+        self.assertEqual(snapshot["total"], 1)
+        self.assertEqual(self.client.submitted, [])
+        # Prompt-only append keeps omitted dimensions; explicit size removes inherited fields.
+        for options in ({}, {"size": "1000x1000"}):
+            batches.add_to_batch(
+                self.client, created["id"], total=1, prompt="next", references=None,
+                mask=None, count=None, image_size=None, aspect_ratio=None, quality=None,
+                output_format=None, options=options,
+            )
+        with state.connect_db() as connection:
+            inputs = [json.loads(row[0])["input"] for row in connection.execute(
+                "SELECT body_json FROM batch_items WHERE batch_id = ? AND sequence > 1 ORDER BY sequence",
+                (created["id"],),
+            )]
+        for item in inputs:
+            self.assertNotIn("image_size", item)
+            self.assertNotIn("aspect_ratio", item)
+        self.assertNotIn("size", inputs[0])
+        self.assertEqual(inputs[1]["size"], "1000x1000")
 
     def intent(self, name, *, remote_id=None, status="intent"):
         with state.connect_db() as connection:
@@ -118,23 +290,23 @@ class TaskContractTests(unittest.TestCase):
         with patch.object(cli, "_client", return_value=self.client):
             return cli.execute(cli.parser().parse_args(arguments))
 
-    def test_known_group_rejection_cannot_be_recovered_into_new_generation(self):
-        # A configuration 503 was rejected before task creation, not a lost response.
-        error = AsxError("group route missing", code="group_model_unavailable", http_status=503)
-        with patch.object(self.client, "submit", side_effect=error) as submit:
-            with self.assertRaises(AsxError) as caught:
-                self.execute(["generate", "--prompt", "cat", "--detach", "--output-dir", str(self.root)])
-            local_id = caught.exception.details["local_id"]
-            self.assertNotIn("next_action_args", caught.exception.details)
-            self.assertEqual(tasks.local_task_status(local_id)["task"]["status"], "failed")
-            tasks.recover_tasks(self.client, local_id)
-            self.assertEqual(submit.call_count, 1)
+    def test_known_rejection_cannot_be_recovered_into_new_generation(self):
+        # Known admission rejections must not become repeated paid generation attempts.
+        for code, status in (("group_model_unavailable", 503), ("unsupported_image_size", 422)):
+            error = AsxError("rejected", code=code, http_status=status)
+            with self.subTest(code=code), patch.object(self.client, "submit", side_effect=error) as submit:
+                with self.assertRaises(AsxError) as caught:
+                    self.execute(["generate", "--prompt", "cat", "--detach", "--output-dir", str(self.root)])
+                local_id = caught.exception.details["local_id"]
+                self.assertNotIn("next_action_args", caught.exception.details)
+                self.assertEqual(tasks.local_task_status(local_id)["task"]["status"], "failed")
+                tasks.recover_tasks(self.client, local_id)
+                self.assertEqual(submit.call_count, 1)
 
     def test_unknown_503_keeps_idempotent_recovery_available(self):
         error = AsxError("unavailable", code="http_503", http_status=503)
-        with patch.object(self.client, "submit", side_effect=error):
-            with self.assertRaises(AsxError) as caught:
-                self.execute(["generate", "--prompt", "cat", "--detach", "--output-dir", str(self.root)])
+        with patch.object(self.client, "submit", side_effect=error), self.assertRaises(AsxError) as caught:
+            self.execute(["generate", "--prompt", "cat", "--detach", "--output-dir", str(self.root)])
         local_id = caught.exception.details["local_id"]
         self.assertEqual(caught.exception.details["next_action_args"], ["task", "recover", local_id])
         self.assertEqual(tasks.local_task_status(local_id)["task"]["status"], "submitting")

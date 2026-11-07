@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from .errors import AsxError
-from .svg_results import is_svg
 from .image_results import attach_image_details
+from .svg_results import is_svg
 
 
 def media_file_info(path: Path) -> dict[str, Any]:
