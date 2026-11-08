@@ -172,11 +172,17 @@ class TaskContractTests(unittest.TestCase):
                     options=options,
                 )
                 for explicit in ({}, options):
-                    batches.add_to_batch(
-                        self.client, created["id"], total=1, prompt="next", references=None,
-                        mask=None, count=None, image_size=None, aspect_ratio=None, quality=None,
+                    arguments = dict(
+                        total=1, prompt="next", references=None, mask=None, count=None,
+                        image_size=None, aspect_ratio=None, quality=None,
                         output_format="png", options=explicit,
                     )
+                    if explicit and source_format == "gif":
+                        # The service rejects frames on static output; fail before saving the item.
+                        with self.assertRaises(AsxError):
+                            batches.add_to_batch(self.client, created["id"], **arguments)
+                        continue
+                    batches.add_to_batch(self.client, created["id"], **arguments)
                 with state.connect_db() as connection:
                     bodies = [json.loads(row[0])["input"] for row in connection.execute(
                         "SELECT body_json FROM batch_items WHERE batch_id = ? AND sequence > 1 ORDER BY sequence",
@@ -186,11 +192,114 @@ class TaskContractTests(unittest.TestCase):
                         "SELECT template_json FROM batches WHERE id = ?", (created["id"],),
                     ).fetchone()[0])["input"]
                 self.assertEqual(bodies[0]["output_format"], "png")
+                self.assertEqual(len(bodies), 1 if source_format == "gif" else 2)
                 for key, value in options.items():
                     self.assertNotIn(key, bodies[0])
-                    self.assertEqual(bodies[1][key], value)
+                    if source_format != "gif":
+                        self.assertEqual(bodies[1][key], value)
                     self.assertEqual(template[key], value)
         self.assertEqual(self.client.submitted, [])
+
+    def test_gif_omitted_dimensions_are_auto_before_edit_ratio_inference(self):
+        # Avoid paid 1K-frame requests and accidental inheritance of a reference's aspect ratio.
+        from PIL import Image
+        original = self.root / "landscape.png"
+        Image.new("RGB", (32, 16), "red").save(original)
+        base = ["--prompt", "run", "--output-format", "gif", "--detach", "--output-dir", str(self.root)]
+        for command in (["generate"], ["edit", "--image", str(original)]):
+            result, code = self.execute([*command, *base])
+            self.assertEqual(code, 0)
+            self.assertTrue(result["ok"])
+            request = self.client.submitted[-1][0]["input"]
+            self.assertEqual(request["size"], "auto")
+            for key in ("image_size", "aspect_ratio", "quality", "complexity"):
+                self.assertNotIn(key, request)
+        for arguments, expected in (
+            (["--size", "512x512"], {"size": "512x512"}),
+            (["--image-size", "2K", "--aspect-ratio", "16:9"], {"image_size": "2K", "aspect_ratio": "16:9"}),
+            (["--aspect-ratio", "3:2"], {"aspect_ratio": "3:2"}),
+        ):
+            self.execute(["generate", *base, *arguments])
+            request = self.client.submitted[-1][0]["input"]
+            for key, value in expected.items():
+                self.assertEqual(request[key], value)
+            if "size" not in expected:
+                self.assertNotIn("size", request)
+
+    def test_gif_client_resource_bounds_are_rejected_before_paid_submit(self):
+        # Reject invalid resource values locally, without creating any remote task.
+        for arguments in (
+            ["--frame-count", "4"],
+            ["--output-format", "webp", "--frame-duration-ms", "100"],
+            ["--output-format", "gif", "--frame-count", "65"],
+            ["--output-format", "gif", "--frame-count", "1"],
+            ["--output-format", "gif", "--frame-duration-ms", "19"],
+            ["--output-format", "gif", "--frame-duration-ms", "2001"],
+        ):
+            with self.subTest(arguments=arguments), self.assertRaises(AsxError):
+                self.execute(["generate", "--prompt", "run", "--detach", *arguments])
+        self.assertEqual(self.client.submitted, [])
+        for count, duration in ((2, 20), (64, 2000)):
+            self.execute(["generate", "--prompt", "run", "--output-format", "gif", "--frame-count", str(count), "--frame-duration-ms", str(duration), "--detach", "--output-dir", str(self.root)])
+            request = self.client.submitted[-1][0]["input"]
+            self.assertEqual((request["frame_count"], request["frame_duration_ms"]), (count, duration))
+
+    def test_gif_keeps_protocol_validation_at_service_boundary(self):
+        # Catalog aliases do not identify the selected protocol; service owns vendor validation.
+        self.execute([
+            "generate", "--model", "other-image-1", "--prompt", "run", "--output-format", "gif",
+            "--frame-count", "64", "--output-compression", "50", "--detach", "--output-dir", str(self.root),
+        ])
+        request = self.client.submitted[-1][0]["input"]
+        self.assertEqual(request["size"], "auto")
+        self.assertEqual(request["frame_count"], 64)
+        self.assertEqual(request["output_compression"], 50)
+        self.execute(["generate", "--model", "gpt-image-2.6-sunburst", "--prompt", "run", "--output-format", "gif", "--frame-count", "17", "--detach", "--output-dir", str(self.root)])
+        self.assertEqual(self.client.submitted[-1][0]["input"]["frame_count"], 17)
+        with self.assertRaises(AsxError):
+            self.execute(["generate", "--model", "other-image-1", "--prompt", "run", "--output-format", "gif", "--frame-count", "65", "--detach"])
+
+    def test_gif_batch_keeps_saved_dimensions_and_validates_merged_format(self):
+        # New defaults must not overwrite inherited/explicit dimensions or stored recovery requests.
+        created = batches.create_batch(
+            self.client, operation="generate", prompt="run", model_selector="gpt-image-2.6-sunburst",
+            image_size=None, aspect_ratio=None, quality=None, count=1, output_format="gif",
+            references=[], mask=None, total=1, name=None, output_dir=str(self.root),
+            options={"frame_count": 16, "frame_duration_ms": 50},
+        )
+        append = dict(total=1, prompt=None, references=None, mask=None, count=None,
+                      image_size=None, aspect_ratio=None, quality=None, output_format=None)
+        batches.add_to_batch(self.client, created["id"], **append)
+        batches.add_to_batch(self.client, created["id"], **{**append, "image_size": "2K", "aspect_ratio": "16:9"})
+        with state.connect_db() as connection:
+            template = json.loads(connection.execute("SELECT template_json FROM batches WHERE id = ?", (created["id"],)).fetchone()[0])
+            body = json.loads(connection.execute("SELECT body_json FROM batch_items WHERE batch_id = ? AND sequence = 3", (created["id"],)).fetchone()[0])
+        self.assertEqual(template["input"]["size"], "auto")
+        self.assertNotIn("size", body["input"])
+        self.assertEqual(body["input"]["image_size"], "2K")
+        self.assertEqual(body["input"]["aspect_ratio"], "16:9")
+        with self.assertRaises(AsxError):
+            batches.add_to_batch(self.client, created["id"], **append, options={"frame_count": 65})
+        self.assertEqual(batches.batch_status(created["id"])["batch"]["total"], 3)
+        import io
+        from PIL import Image
+        animation = io.BytesIO()
+        Image.new("RGB", (4, 4), "red").save(
+            animation, format="GIF", save_all=True,
+            append_images=[Image.new("RGB", (4, 4), "blue")], duration=50, loop=0,
+        )
+        with patch.object(self.client, "asset", return_value=(animation.getvalue(), "image/gif")):
+            batches.poll_batch(self.client, created["id"], submissions_limit=3)
+        self.assertEqual(self.client.submitted[0][0]["input"]["size"], "auto")
+        self.assertEqual(self.client.submitted[1][0]["input"]["size"], "auto")
+        before = self.client.submitted[0][0]
+        submitted_count = len(self.client.submitted)
+        with patch("asxlib.images.resolved_image_options", side_effect=AssertionError("must not rebuild")), patch.object(
+            self.client, "asset", return_value=(animation.getvalue(), "image/gif"),
+        ):
+            tasks.wait_and_download(self.client, "task_1", str(self.root))
+        self.assertEqual(self.client.submitted[0][0], before)
+        self.assertEqual(len(self.client.submitted), submitted_count)
 
     def test_batch_replacing_original_requires_matching_overlay_before_adding_items(self):
         # Same-size replacement must not silently reuse another image's annotations.

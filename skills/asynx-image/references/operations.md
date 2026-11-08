@@ -51,7 +51,7 @@ python3 "<skill-dir>/scripts/asynx.py" batch add "<batch-id>" --total 5 --prompt
 | `image apply-mask "<图片>" --mask "<蒙版>" --output "<输出.png>"` | 应用已有 Alpha/灰度蒙版 |
 | `image batch-convert --input-dir "<目录>" --output-dir "<目录>" --format webp` | 批量转换；`--recursive` 包含子目录 |
 
-不提供自动抠图、补边、SVG/GIF 编辑或视频处理。尺寸被拒绝时，不自动改为本地加工；用户同意调整静态图后，按需求缩放或裁剪，并区分生成尺寸与交付尺寸。
+本地工具不提供自动抠图、补边、SVG/GIF 编辑或视频处理。以静态参考图生成 GIF 可使用远程 `edit --image ... --output-format gif`，不等于直接修改已有 GIF 的帧或时序。尺寸被拒绝时，不自动改为本地加工；用户同意调整静态图后，按需求缩放或裁剪，并区分生成尺寸与交付尺寸。
 
 ## 输入图片
 
@@ -72,13 +72,13 @@ python3 "<skill-dir>/scripts/asynx.py" batch add "<batch-id>" --total 5 --prompt
 
 ## 生成参数
 
-模型、尺寸及默认值遵循 [SKILL.md](../SKILL.md#生成与编辑)。单任务 `--count` 为 1–10 张，更多数量使用批次；`--output-dir` 指定保存目录。仅在用户要求自动尺寸时传 `--size auto`，不将其当作省略参数。
+模型、尺寸及默认值遵循 [SKILL.md](../SKILL.md#生成与编辑)。单任务 `--count` 为 1–10 张，更多数量使用批次；`--output-dir` 指定保存目录。静态图仅在用户要求自动尺寸时传 `--size auto`；GIF 未指定任何尺寸时由脚本明确补 `size=auto`，避免服务补入静态图档位。
 
 ### 高级图片参数与结果格式
 
 ```bash
 python3 "<skill-dir>/scripts/asynx.py" generate --prompt "咖啡杯矢量图标" --output-format svg
-python3 "<skill-dir>/scripts/asynx.py" generate --prompt "小猫挥手" --output-format gif --frame-count 8 --frame-duration-ms 100
+python3 "<skill-dir>/scripts/asynx.py" generate --prompt "小猫挥手，无缝循环" --output-format gif --size auto --frame-count 8 --frame-duration-ms 100
 ```
 
 | 参数 | 用途 |
@@ -86,9 +86,21 @@ python3 "<skill-dir>/scripts/asynx.py" generate --prompt "小猫挥手" --output
 | `--background transparent` | 请求透明背景，位图使用 PNG/WebP；SVG 也可透明，JPEG 不支持 |
 | `--complexity`、`--moderation`、`--safety-identifier` | 按需传入所选服务支持的值 |
 | `--output-compression` | 压缩参数 0–100，适用于 JPEG/WebP |
-| `--frame-count`、`--frame-duration-ms` | GIF 帧数 2–64，每帧 20–2000 毫秒 |
+| `--frame-count`、`--frame-duration-ms` | 客户端通用边界2–64帧、20–2000ms，不是模型能力承诺；OpenAI GPT Image GIF 限2–16帧，默认9帧、200ms |
 | `--svg-model`、`--svg-reasoning-effort` | 仅在用户要求时覆盖 SVG 编写模型或推理强度 |
 | `--markup "<标注.png>"` | 仅用于编辑；原图与标注支持本地文件或 Data URL，不支持 HTTP(S) URL。标注须为等大透明通道 PNG，与原图同步缩放，不能同时使用 `--mask` |
 | `--params-file "<参数.json>"` | 提供嵌套高级参数；命令参数覆盖同名字段，`size` 与档位/比例的互斥规则仍适用 |
 
 参数文件仅接受 `size`、`complexity`、`background`、`output_compression`、`moderation`、`safety_identifier`、`markup`、`frame_count`、`frame_duration_ms`、`svg`；不接受认证、地址或任务身份字段。上述参数也适用于图片批次，视频操作见[视频参考](video.md)。
+
+### GIF 动画
+
+OpenAI GPT Image 支持 `generate` 或以静态图为输入的 `edit` 请求 GIF；不得将 GIF/SVG 文件直接作为静态参考图输入。帧参数仅用于 GIF，其他格式携带时脚本直接拒绝；OpenAI GIF 不支持 Mask 或自定义 `output_compression`。客户端仅校验通用类型/资源边界，不以模型名称猜测协议或建立厂商白名单；Asynx 服务按所选适配器检查协议组合，其他服务的支持范围以其文档为准。客户端接受某值不代表官方模型支持该值。
+
+GIF 未指定任何尺寸时，单任务和新建批次均保存 `size=auto`；编辑 GIF 不自动继承原图比例。显式 `--size` 与 `--image-size`/`--aspect-ratio` 互斥，明确参数不会被自动尺寸覆盖。批次追加先继承原模板尺寸再应用覆盖；查询、等待、恢复已受理任务不重算其保存参数。
+
+官方 GIF 支持 `size=auto` 或宽高均为16倍数的正像素尺寸，但帧数、每帧尺寸和输出数量共同受请求总像素预算及模型边界限制；文档未公开完整数值预算。不要把静态图尺寸上限当作 GIF 承诺，也不要保证 auto 一定返回512×512或指定比例。参数被拒绝后不自动猜尺寸重提。
+
+官方指南给出的帧时长为20–2000ms，按10ms取整；Images API Reference另写编码延迟上限655,350ms。当前客户端按指南保留20–2000ms校验，不将编码上限解释为已验证的生成范围。GIF 不支持图片流式预览和 partial images。质量与 complexity 分别控制渲染与规划，均不提供骨骼或逐帧姿态强约束，增加帧数不保证动作正确或循环无缝。
+
+参考（2026-11-07核对）：[官方GIF指南](https://developers.openai.com/api/docs/guides/image-generation#generate-animated-gif-output)、[生成参数](https://developers.openai.com/api/reference/resources/images/methods/generate)、[编辑参数](https://developers.openai.com/api/reference/resources/images/methods/edit)。

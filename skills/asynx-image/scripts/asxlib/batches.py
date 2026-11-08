@@ -20,7 +20,7 @@ from .constants import (
     UTC,
 )
 from .errors import AsxError, friendly_task_error
-from .image_options import IMAGE_OPTIONS, options_from_args
+from .image_options import IMAGE_OPTIONS, options_from_args, resolved_image_options
 from .image_results import requested_aspect_ratio
 from .images import build_task, task_input_warnings
 from .media_results import attach_media_details
@@ -494,6 +494,19 @@ def add_to_batch(
                     keep_reference_original if references is not None else True
                 ),
             )
+        inherit_template = not has_overrides
+        if not is_video and not has_overrides:
+            # New appended items must obey format rules even for an old template;
+            # leave saved requests and already-submitted intents untouched.
+            value = body["input"]
+            resolved = resolved_image_options(
+                str(value.get("output_format", "png")),
+                {key: item for key, item in value.items() if key in IMAGE_OPTIONS},
+                image_size=value.get("image_size"), aspect_ratio=value.get("aspect_ratio"),
+            )
+            if any(value.get(key) != item for key, item in resolved.items()):
+                inherit_template = False
+            value.update(resolved)
         connection.execute("BEGIN IMMEDIATE")
         max_sequence = int(
             connection.execute(
@@ -509,7 +522,7 @@ def add_to_batch(
             first_sequence=max_sequence + 1,
             total=total,
             now=now,
-            inherit_template=not has_overrides,
+            inherit_template=inherit_template,
         )
         connection.execute(
             "UPDATE batches SET updated_at = ? WHERE id = ?", (now, batch["id"])

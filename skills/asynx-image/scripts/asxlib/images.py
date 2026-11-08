@@ -19,6 +19,7 @@ from .constants import (
     REFERENCE_NETWORK_WARNING_BYTES,
 )
 from .errors import AsxError
+from .image_options import resolved_image_options
 from .reference_media import prepare_inputs, request_body_size, validate_request_body
 from .svg_results import is_svg
 
@@ -251,6 +252,11 @@ def build_task(
         raise AsxError("精确尺寸不能与尺寸档位或画幅比例同时指定。", code="conflicting_image_options")
     if canonical_format not in {"png", "jpeg", "webp", "svg", "gif"}:
         raise AsxError("输出格式须为 PNG、JPEG、WebP、SVG 或 GIF。", code="unsupported_image_format")
+    options = resolved_image_options(
+        canonical_format, options,
+        image_size=canonical_size,
+        aspect_ratio=canonical_ratio,
+    )
     if canonical_format == "svg":
         svg = options.get("svg", {})
         if not isinstance(svg, dict):

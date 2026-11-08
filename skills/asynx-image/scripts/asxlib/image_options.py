@@ -44,6 +44,13 @@ def options_from_args(args: Any) -> dict[str, Any]:
                 raise AsxError("SVG reasoning 参数须为 JSON 对象。", code="invalid_image_options")
             svg["reasoning"] = {**reasoning, "effort": svg_effort}
         options["svg"] = svg
+    validate_image_options(options)
+    if "size" in options and any(getattr(args, key, None) is not None for key in ("image_size", "aspect_ratio")):
+        raise AsxError("--size 与 --image-size/--aspect-ratio 不能同时指定。", code="conflicting_image_options")
+    return options
+
+
+def validate_image_options(options: dict[str, Any]) -> None:
     for key, value in options.items():
         if key in {"output_compression", "frame_count", "frame_duration_ms"}:
             lower, upper = {"output_compression": (0, 100), "frame_count": (2, 64), "frame_duration_ms": (20, 2000)}[key]
@@ -68,6 +75,23 @@ def options_from_args(args: Any) -> dict[str, Any]:
             raise AsxError("图片高级参数的类型或取值无效：" + key, code="invalid_image_options")
     if "size" in options and not re.fullmatch(r"auto|[1-9]\d*x[1-9]\d*", options["size"]):
         raise AsxError("size 须为 auto 或 WIDTHxHEIGHT。", code="invalid_image_options")
-    if "size" in options and any(getattr(args, key, None) is not None for key in ("image_size", "aspect_ratio")):
-        raise AsxError("--size 与 --image-size/--aspect-ratio 不能同时指定。", code="conflicting_image_options")
+
+
+def resolved_image_options(
+    output_format: str,
+    options: dict[str, Any],
+    *,
+    image_size: str | None,
+    aspect_ratio: str | None,
+) -> dict[str, Any]:
+    """Apply client resource bounds and GIF sizing after batch inheritance."""
+    options = dict(options)
+    validate_image_options(options)
+    if output_format != "gif" and any(key in options for key in ("frame_count", "frame_duration_ms")):
+        raise AsxError("--frame-count 与 --frame-duration-ms 仅适用于 GIF 输出。", code="invalid_image_options")
+    if output_format == "gif":
+        if options.get("size") is None and image_size is None and aspect_ratio is None:
+            # A GIF's frame budget differs from static images; do not let the
+            # service turn omitted dimensions into a static 1K square request.
+            options["size"] = "auto"
     return options
