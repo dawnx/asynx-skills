@@ -23,6 +23,36 @@ import install as installer
 
 
 class UserMessageTests(unittest.TestCase):
+    def test_parameter_feedback_matches_submission_and_terminal_without_retry(self):
+        for details, expected in [
+            ({"field": "input.count", "reason": "count_limit", "maximum": 1}, "最多可生成 1 张"),
+            ({"field": "input.reference_images", "reason": "reference_limit", "maximum": 10}, "参考图 10 张"),
+            ({"field": "input.reference_images", "reason": "total_image_limit", "maximum": 15}, "合计最多 15 张"),
+            ({"field": "input.image_size", "reason": "unsupported_size", "allowed": ["1K", "1.5K", "2K"]}, "1K、1.5K、2K"),
+            ({"field": "input.output_format", "reason": "unsupported_format", "allowed": ["png", "jpeg"]}, "png、jpeg"),
+            ({"field": "input.background", "reason": "transparent_requires_single_alpha_png"}, "单张带 Alpha"),
+            ({"field": "input.extra", "reason": "unsupported_sequential"}, "不支持组图参数"),
+            ({"field": "input.extra", "reason": "unsupported_option"}, "附加参数"),
+            ({"field": "input.quality", "reason": "unsupported_option"}, "质量（quality）"),
+            ({"field": "input.extra.optimize_prompt_options", "reason": "unsupported_option", "allowed": ["standard"]}, "可选值：standard"),
+        ]:
+            with self.subTest(details=details):
+                remote = {"code": "unsupported_image_parameters", "message": "private-provider-text", "details": details}
+                error = _api_error(422, json.dumps({**remote, "data": {"details": details}}).encode(), {})
+                self.assertIn(expected, error.message)
+                self.assertNotIn("private-provider-text", error.message)
+                self.assertTrue(error.submission_rejected)
+                terminal = tasks.task_payload({"id": "parameter-task", "status": "failed", "error": remote}, None)
+                self.assertEqual(terminal["error"]["message"], error.message)
+                self.assertNotIn("next_action_args", terminal)
+                error.task_id = "accepted-task"
+                self.assertFalse(error.submission_rejected)
+        unsafe = friendly_task_error({
+            "code": "unsupported_image_parameters", "message": "private-value",
+            "details": {"reason": "unsupported_format", "allowed": ["private-value"]},
+        })
+        self.assertNotIn("private-value", unsafe["message"])
+
     def test_api_errors_preserve_identity_without_echoing_remote_body(self):
         for code, status in (("invalid_api_key", 401), ("unexpected_service_error", 502), ("busy", 429)):
             with self.subTest(code=code):
@@ -91,6 +121,20 @@ class UserMessageTests(unittest.TestCase):
         self.assertIn("quality", result["error"]["message"])
         self.assertNotIn("private-value", result["error"]["message"])
         self.assertIn("private-value", remote["message"])
+
+    def test_provider_endpoint_error_does_not_suggest_changing_generation_inputs(self):
+        for status in (404, 405):
+            with self.subTest(status=status):
+                remote = {"code": "provider_endpoint_unavailable", "message": "private upstream URL"}
+                error = _api_error(status, json.dumps(remote).encode(), {})
+                terminal = tasks.task_payload({"id": "endpoint-task", "status": "failed", "error": remote}, None)
+                self.assertEqual(error.message, terminal["error"]["message"])
+                self.assertIn("接口或模型路由不可用", error.message)
+                self.assertNotRegex(error.message, "提示词|素材|参数|private|重新提交")
+                self.assertNotIn("next_action_args", terminal)
+        missing = _api_error(404, json.dumps({"code": "task_not_found"}).encode(), {})
+        self.assertIn("未找到该任务", missing.message)
+        self.assertNotIn("渠道配置", missing.message)
 
     def test_terminal_error_without_details_does_not_invent_a_cause(self):
         for status in ("failed", "timeout", "canceled"):

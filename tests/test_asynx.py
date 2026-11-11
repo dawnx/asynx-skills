@@ -142,6 +142,18 @@ class ServerTestCase(unittest.TestCase):
         self.cache_environment.stop()
         self.cache_directory.cleanup()
 
+    def test_gpt_quality_reaches_http_body_without_overriding_explicit_quality(self) -> None:
+        for model_name, quality, expected in [(None, None, "high"), (None, "auto", "auto"), ("gpt-image-2.6-sunburst", None, "high"), ("gpt-image-2.6-flare", "auto", "auto")]:
+            with self.subTest(model=model_name, quality=quality):
+                body, _, _ = images.build_task(
+                    self.client, task_type="image.generate", model_selector=model_name,
+                    prompt="A product photo", image_size=None, aspect_ratio=None,
+                    quality=quality, count=1, output_format="png", references=[],
+                )
+                self.client.submit(body, "quality-default-" + expected)
+                self.assertEqual(FakeAsynxHandler.submission["input"]["quality"], expected)
+                self.assertNotIn("complexity", FakeAsynxHandler.submission["input"])
+
     def test_async_submission_wait_and_download(self) -> None:
         body, selected, _request_id = images.build_task(
             self.client,
@@ -394,7 +406,7 @@ class UnitTestCase(unittest.TestCase):
                     )
                     self.assertEqual(selected, expected)
                     self.assertEqual(body["model"], expected)
-                    self.assertNotIn("quality", body["input"])
+                    self.assertEqual(body["input"]["quality"], "high")
                     self.assertNotIn("image_size", body["input"])
                     self.assertNotIn("aspect_ratio", body["input"])
                     if (output_format or "").lower() == "svg":
@@ -412,6 +424,7 @@ class UnitTestCase(unittest.TestCase):
     def test_fuzzy_model_uses_five_minute_cache(self) -> None:
         class CatalogClient:
             base_url = "https://cache.test"
+            cache_scope = "a" * 64
 
             def __init__(self) -> None:
                 self.calls = 0
@@ -422,6 +435,7 @@ class UnitTestCase(unittest.TestCase):
 
         class CachedClient:
             base_url = "https://cache.test"
+            cache_scope = "a" * 64
 
             def models(self) -> tuple[list[dict[str, Any]], str | None]:
                 raise AssertionError("fresh model cache must avoid a network request")
@@ -459,6 +473,46 @@ class UnitTestCase(unittest.TestCase):
         self.assertEqual(first.calls, 1)
         self.assertEqual(first_result[1], "gemini-3.1-flash-image")
         self.assertEqual(cached_result[1], "gemini-3.1-flash-image")
+
+    def test_gpt25_and_gpt26_quality_defaults_preserve_explicit_values_for_other_models(self) -> None:
+        # Apply the quality preference only after resolving a known GPT 2.5/2.6 name.
+        class CatalogClient:
+            base_url = "https://quality-default.test"
+            def models(self):
+                return [model("gpt-image-2.5-sunburst")], "catalog-request"
+        client = CatalogClient()
+        for selector, quality, expected in (
+            (None, None, "high"),
+            ("gpt-image-2.5-flare", None, "high"),
+            ("gpt-image-2.5-sunburst-2026-09-08", None, "high"),
+            ("gpt-image-2.6-sunburst", None, "high"),
+            ("gpt-image-2.6-flare", None, "high"),
+            ("gpt-image-2.5", None, "high"),
+            ("gpt-image-2.6", None, "high"),
+            ("gpt-image-2-6", None, "high"),
+            ("GPT-Image-2.6", None, "high"),
+            ("gpt-image-2-2026-04-21", None, None),
+            ("gpt-image-2.5-custom", None, None),
+            ("sunburst", None, "high"),
+            (None, "auto", "auto"),
+            (None, "low", "low"),
+            (None, "max", "max"),
+            ("gpt-image-2", None, None),
+            ("gpt-image-2.6-flare", "auto", "auto"),
+            ("gpt-image-2.6-sunburst", "low", "low"),
+            ("gemini-3.1-flash-image", None, None),
+            ("doubao-seedream-5-0-pro-260628", None, None),
+        ):
+            with self.subTest(model=selector, quality=quality):
+                body, _, _ = images.build_task(
+                    client, task_type="image.generate", model_selector=selector,
+                    prompt="Keep prompt", image_size=None, aspect_ratio="16:9", quality=quality,
+                    count=1, output_format="png", references=[],
+                )
+                self.assertEqual(body["input"].get("quality"), expected)
+                self.assertNotIn("complexity", body["input"])
+                self.assertNotIn("image_size", body["input"])
+                self.assertEqual(body["input"]["aspect_ratio"], "16:9")
 
     def test_explicit_seedream_leaves_size_defaults_to_server_without_catalog_request(self) -> None:
         class NoCatalogClient:

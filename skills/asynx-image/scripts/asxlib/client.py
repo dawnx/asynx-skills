@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import random
@@ -183,6 +184,10 @@ class AsynxClient:
         self.base_url = validate_base_url(base_url)
         self.api_key = api_key
 
+    @property
+    def cache_scope(self) -> str:
+        return hashlib.sha256(self.api_key.encode("utf-8")).hexdigest()
+
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
 
@@ -279,6 +284,21 @@ class AsynxClient:
             raise AsxError("暂时无法获取可用模型列表，请稍后重试；若持续出现，请联系服务支持。", code="invalid_model_catalog")
         media_models = [item for item in items if item.get("modality") in {"image", "video"}]
         return media_models, request_id
+
+    def model_guide(self, model: str, *, examples: bool = False) -> tuple[dict[str, Any], str | None]:
+        if not model.strip():
+            raise AsxError("请指定要查询说明的模型名称。", code="invalid_model")
+        path = f"/v1/tasks/models/{quote(model, safe='')}/guide"
+        if examples:
+            path += "?examples=true"
+        data, request_id = self.request_json("GET", path, retry_safe=True)
+        fields = ("model", "revision", "status", "content")
+        if (
+            not all(isinstance(data.get(field), str) for field in fields)
+            or data["status"] not in {"documented", "unconfirmed"}
+        ):
+            raise AsxError("模型说明格式不完整，请稍后重试或联系服务支持。", code="invalid_model_guide")
+        return {field: data[field] for field in fields}, request_id
 
     def submit(
         self, body: dict[str, Any], idempotency_key: str

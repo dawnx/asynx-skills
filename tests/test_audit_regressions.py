@@ -19,6 +19,7 @@ from asxlib.errors import AsxError
 
 
 class FakeClient:
+    cache_scope = "a" * 64
     base_url = "https://example.test"
 
     def __init__(self):
@@ -184,7 +185,7 @@ class AuditRegressionTests(unittest.TestCase):
 
     def test_catalog_order_does_not_change_defaults(self):
         cold = self.build()
-        images.cache_models(self.client.base_url, [catalog_model(DEFAULT_MODEL)])
+        images.cache_models(self.client.base_url, [catalog_model(DEFAULT_MODEL)], scope=self.client.cache_scope)
         warm = self.build()
         self.assertEqual(cold["input"], warm["input"])
         self.assertNotIn("image_size", warm["input"])
@@ -200,7 +201,7 @@ class AuditRegressionTests(unittest.TestCase):
     def test_stale_catalog_does_not_override_default_or_explicit_size(self):
         model = catalog_model(DEFAULT_MODEL)
         model["capabilities"]["image_sizes"] = ["4K"]
-        images.cache_models(self.client.base_url, [model])
+        images.cache_models(self.client.base_url, [model], scope=self.client.cache_scope)
         self.assertNotIn("image_size", self.build()["input"])
         self.assertEqual(self.build(image_size="4K")["input"]["image_size"], "4K")
 

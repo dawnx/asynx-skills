@@ -56,10 +56,12 @@ class PollingConfigurationTests(unittest.TestCase):
         self.config_path.write_text(json.dumps({"initial_poll_delay_seconds": delay}))
 
     def test_new_submission_waits_twenty_seconds_by_default(self):
-        result, code = tasks.run_submission(self.client, self.args(), "image.generate")
+        with patch.object(self.client, "task", wraps=self.client.task) as query:
+            result, code = tasks.run_submission(self.client, self.args(), "image.generate")
         self.assertEqual(code, 0)
         self.assertTrue(result["ok"])
         self.assertEqual(self.delays, [20.0])
+        query.assert_called_once_with(result["task_id"])
         self.assertEqual(len(self.client.submitted), 1)
 
     def test_edit_uses_persistent_configured_delay(self):

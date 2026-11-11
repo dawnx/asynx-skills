@@ -70,13 +70,18 @@ def resolve_model(
     raise AsxError(message, code="model_unavailable", details={"available": available})
 
 
-def _cached_models(base_url: str) -> list[dict[str, Any]] | None:
+def _cached_models(base_url: str, *, scope: str | None = None) -> list[dict[str, Any]] | None:
+    if not isinstance(scope, str) or re.fullmatch(r"[a-f0-9]{64}", scope) is None:
+        return None
     path = cache_path()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if not isinstance(payload, dict) or payload.get("base_url") != base_url:
+    if (
+        not isinstance(payload, dict) or payload.get("base_url") != base_url
+        or payload.get("scope") != scope
+    ):
         return None
     fetched_at = payload.get("fetched_at")
     items = payload.get("items")
@@ -90,7 +95,9 @@ def _cached_models(base_url: str) -> list[dict[str, Any]] | None:
     return cast(list[dict[str, Any]], items)
 
 
-def cache_models(base_url: str, models: list[dict[str, Any]]) -> None:
+def cache_models(base_url: str, models: list[dict[str, Any]], *, scope: str | None = None) -> None:
+    if not isinstance(scope, str) or re.fullmatch(r"[a-f0-9]{64}", scope) is None:
+        return
     path = cache_path()
     temporary: str | None = None
     try:
@@ -105,7 +112,7 @@ def cache_models(base_url: str, models: list[dict[str, Any]]) -> None:
         ) as handle:
             temporary = handle.name
             json.dump(
-                {"base_url": base_url, "fetched_at": time.time(), "items": models},
+                {"base_url": base_url, "scope": scope, "fetched_at": time.time(), "items": models},
                 handle,
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -226,7 +233,7 @@ def build_task(
     if not 1 <= len(requested_model) <= 160:
         raise AsxError("模型名称须为 1–160 个字符，请检查名称是否正确。", code="invalid_model")
     request_id: str | None = None
-    models = _cached_models(client.base_url)
+    models = _cached_models(client.base_url, scope=getattr(client, "cache_scope", None))
     model: dict[str, Any] | None = None
     if models is not None:
         exact = [
@@ -240,8 +247,18 @@ def build_task(
     if model is None and model_selector is not None and not _looks_canonical(model_selector):
         if models is None:
             models, request_id = client.models()
-            cache_models(client.base_url, models)
+            cache_models(client.base_url, models, scope=getattr(client, "cache_scope", None))
         model = resolve_model(models, model_selector, task_type)
+
+    selected_model = str(model["name"]) if model is not None else requested_model
+    # Keyed on the model name only: the family aliases the service recognizes
+    # (gpt-image-2.5, gpt-image-2.6, gpt-image-2-6), their Sunburst/Flare variants
+    # and dated snapshots. A custom public name gets no default from the client.
+    if quality_value is None and re.fullmatch(
+        r"gpt-image-(?:2\.[56]|2-6)(?:-(?:sunburst|flare))?(?:-\d{4}-\d{2}-\d{2})?",
+        selected_model.casefold(),
+    ):
+        quality_value = "high"
 
     canonical_size = image_size.strip() if image_size is not None else None
     canonical_ratio = aspect_ratio.strip() if aspect_ratio is not None else None

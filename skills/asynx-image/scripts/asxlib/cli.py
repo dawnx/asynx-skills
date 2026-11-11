@@ -55,6 +55,7 @@ class _ArgumentParser(argparse.ArgumentParser):
 
 
 def _add_extended_image_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--optimize-prompt-mode", choices=("standard", "fast"), help="提示词优化模式，仅在所选模型说明支持时使用")
     parser.add_argument("--params-file", help="图片高级参数 JSON 文件，显式命令参数优先")
     parser.add_argument("--svg-model", help="SVG 编写模型，默认 gpt-6.1-sol；仅需更换时指定")
     parser.add_argument("--svg-reasoning-effort", help="SVG 编写模型的推理强度；省略时不指定")
@@ -71,7 +72,7 @@ def _add_image_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", help="模型名称或名称中唯一的片段，省略时使用默认模型")
     parser.add_argument("--image-size", help="尺寸档位，例如 1K、2K、4K；未指定时省略，由服务端采用默认设置")
     parser.add_argument("--aspect-ratio", help="画幅比例，例如 1:1、16:9")
-    parser.add_argument("--quality", help="生成质量，省略时由渠道或上游使用默认值")
+    parser.add_argument("--quality", help="生成质量；GPT Image 2.5/2.6（按模型名识别）省略时为 high，其他模型及自定义模型名不补值；显式值优先")
     parser.add_argument("--count", type=int, default=1, help="本次生成数量，1–10 张")
     parser.add_argument("--output-format", choices=("png", "jpeg", "webp", "svg", "gif"), help="输出文件格式")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="结果保存目录")
@@ -93,7 +94,7 @@ def _add_batch_creation_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", help="模型名称或唯一片段")
     parser.add_argument("--image-size", help="尺寸档位，例如 1K、2K、4K；未指定时省略，由服务端采用默认设置")
     parser.add_argument("--aspect-ratio", help="画幅比例，例如 1:1、16:9")
-    parser.add_argument("--quality", help="生成质量，省略时由渠道或上游使用默认值")
+    parser.add_argument("--quality", help="生成质量；GPT Image 2.5/2.6（按模型名识别）省略时为 high，其他模型及自定义模型名不补值；显式值优先")
     parser.add_argument("--count", type=int, default=1, help="每个图片任务的输出数量")
     parser.add_argument(
         "--output-format",
@@ -250,6 +251,10 @@ def parser() -> argparse.ArgumentParser:
     models = commands.add_parser("models", help="列出可用模型，默认仅列出图片模型")
     models.add_argument("--operation", choices=("all", "generate", "edit"), default="all", help="按用途筛选")
     models.add_argument("--modality", choices=("image", "video", "all"), default="image", help="图片模型、视频模型或全部")
+    model_commands = models.add_subparsers(dest="models_command")
+    describe = model_commands.add_parser("describe", help="读取当前账户可用的模型说明")
+    describe.add_argument("--model", required=True, help="模型名称或别名")
+    describe.add_argument("--examples", action="store_true", help="附带服务生成的调用示例，默认仅返回能力与使用说明")
 
     generate = commands.add_parser("generate", help="生成一张或多张新图片")
     _add_image_options(generate)
@@ -408,6 +413,12 @@ def execute(args: argparse.Namespace, *, locked_root: Path | None = None) -> tup
         return execute_batch(None, args)
     client = _client()
     if args.command == "models":
+        if args.models_command == "describe":
+            guide, request_id = client.model_guide(args.model, examples=args.examples)
+            payload = {"ok": True, **guide}
+            if request_id:
+                payload["request_id"] = request_id
+            return payload, 0
         return models_payload(client, args.operation, modality=args.modality), 0
     if args.command == "video":
         return run_submission(client, args, "video.generate")

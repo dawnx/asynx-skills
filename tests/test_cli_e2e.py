@@ -356,9 +356,10 @@ class CLIE2ETestCase(unittest.TestCase):
         self.assertEqual(edited["status"], "succeeded")
         self.assertEqual(len(edited["files"]), 1)
         history = self.run_cli("history", "--limit", "2")
+        # Both tasks use the default GPT Image 2.5 model, which gets quality=high.
         self.assertEqual(
-            {task["task_type"]: "quality" in task["input"] for task in history["tasks"]},
-            {"image.generate": False, "image.edit": False},
+            {task["task_type"]: task["input"].get("quality") for task in history["tasks"]},
+            {"image.generate": "high", "image.edit": "high"},
         )
 
     def test_real_cli_processes_resume_append_edit_cancel_and_history(self) -> None:
@@ -457,7 +458,14 @@ class CLIE2ETestCase(unittest.TestCase):
         self.assertEqual(len(batches["batches"]), 3)
         history = self.run_cli("history", "--limit", "20")
         self.assertEqual(len(history["tasks"]), 9)
-        self.assertTrue(all("quality" not in task["input"] for task in history["tasks"]))
+        # Only the default GPT Image 2.5 tasks get quality=high; gpt-image-2 gets none.
+        for task in history["tasks"]:
+            expected = "high" if task["model"] == "gpt-image-2.5-sunburst" else None
+            self.assertEqual(task["input"].get("quality"), expected, task["model"])
+        self.assertEqual(
+            {task["model"] for task in history["tasks"]},
+            {"gpt-image-2.5-sunburst", "gpt-image-2"},
+        )
         recovered = next(
             task
             for task in history["tasks"]

@@ -59,7 +59,7 @@ class TaskContractTests(unittest.TestCase):
         self.addCleanup(env.stop)
         self.client = ResultClient()
 
-    def test_advanced_options_survive_batch_append_without_inventing_quality(self):
+    def test_advanced_options_and_default_quality_survive_batch_append(self):
         created = batches.create_batch(
             self.client, operation="generate", prompt="first", model_selector=None,
             image_size=None, aspect_ratio=None, quality=None, count=1, output_format="svg",
@@ -74,7 +74,7 @@ class TaskContractTests(unittest.TestCase):
         with state.connect_db() as connection:
             first = json.loads(connection.execute("SELECT template_json FROM batches WHERE id = ?", (created["id"],)).fetchone()[0])["input"]
             second = json.loads(connection.execute("SELECT body_json FROM batch_items WHERE batch_id = ? AND sequence = 2", (created["id"],)).fetchone()[0])["input"]
-        self.assertNotIn("quality", second)
+        self.assertEqual(second["quality"], "high")
         self.assertEqual(second["size"], first["size"])
         self.assertEqual(second["svg"], first["svg"])
         self.assertEqual(second["background"], "transparent")
@@ -212,7 +212,8 @@ class TaskContractTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             request = self.client.submitted[-1][0]["input"]
             self.assertEqual(request["size"], "auto")
-            for key in ("image_size", "aspect_ratio", "quality", "complexity"):
+            self.assertEqual(request["quality"], "high")
+            for key in ("image_size", "aspect_ratio", "complexity"):
                 self.assertNotIn(key, request)
         for arguments, expected in (
             (["--size", "512x512"], {"size": "512x512"}),

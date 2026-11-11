@@ -105,7 +105,7 @@ class EditAspectRatioTests(unittest.TestCase):
         self.assertEqual(self.build(sources, aspect_ratio="2:3")["input"]["aspect_ratio"], "2:3")
 
     def test_catalog_does_not_replace_inherited_ratio(self):
-        images.cache_models(self.client.base_url, [catalog_model(DEFAULT_MODEL)])
+        images.cache_models(self.client.base_url, [catalog_model(DEFAULT_MODEL)], scope=self.client.cache_scope)
         source = self.image("portrait.png", (120, 180))
         self.assertEqual(self.build([source])["input"]["aspect_ratio"], "2:3")
         self.assertEqual(self.build([source], aspect_ratio="1:1")["input"]["aspect_ratio"], "1:1")

@@ -1013,7 +1013,7 @@ def run_submission(
 
 def models_payload(client: AsynxClient, operation: str, *, modality: str = "image") -> dict[str, Any]:
     models, request_id = client.models()
-    cache_models(client.base_url, models)
+    cache_models(client.base_url, models, scope=client.cache_scope)
     task_type = None if operation == "all" else f"{modality}.{operation}"
     items = []
     for model in models:

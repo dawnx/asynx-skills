@@ -4,6 +4,8 @@
 
 ## 批次
 
+`--total` 表示独立任务数，`--count` 表示每个任务的输出数量或组图上限；二者不能互换。对只支持单图的模型，明确授权生成多张独立结果后使用 `--count 1 --total N`，不可承诺跨任务内容严格一致，也不能因组图请求失败擅自增加付费提交。
+
 ```bash
 python3 "<skill-dir>/scripts/asynx.py" batch create --prompt "<描述>" --total 12
 python3 "<skill-dir>/scripts/asynx.py" batch add "<batch-id>" --total 5 --prompt "<新增描述>"
@@ -84,6 +86,7 @@ python3 "<skill-dir>/scripts/asynx.py" generate --prompt "小猫挥手，无缝�
 | 参数 | 用途 |
 | --- | --- |
 | `--background transparent` | 请求透明背景，位图使用 PNG/WebP；SVG 也可透明，JPEG 不支持 |
+| `--quality` | GPT Image 2.5/2.6 省略时补充 `high`，显式值优先。仅按模型名识别（`gpt-image-2.5`、`gpt-image-2.6` 及其 Sunburst/Flare、带日期版本）；其他模型和自定义模型名省略时不补值，需要时显式指定 |
 | `--complexity`、`--moderation`、`--safety-identifier` | 按需传入所选服务支持的值 |
 | `--output-compression` | 压缩参数 0–100，适用于 JPEG/WebP |
 | `--frame-count`、`--frame-duration-ms` | 客户端通用边界2–64帧、20–2000ms，不是模型能力承诺；OpenAI GPT Image GIF 限2–16帧，默认9帧、200ms |
@@ -91,7 +94,11 @@ python3 "<skill-dir>/scripts/asynx.py" generate --prompt "小猫挥手，无缝�
 | `--markup "<标注.png>"` | 仅用于编辑；原图与标注支持本地文件或 Data URL，不支持 HTTP(S) URL。标注须为等大透明通道 PNG，与原图同步缩放，不能同时使用 `--mask` |
 | `--params-file "<参数.json>"` | 提供嵌套高级参数；命令参数覆盖同名字段，`size` 与档位/比例的互斥规则仍适用 |
 
-参数文件仅接受 `size`、`complexity`、`background`、`output_compression`、`moderation`、`safety_identifier`、`markup`、`frame_count`、`frame_duration_ms`、`svg`；不接受认证、地址或任务身份字段。上述参数也适用于图片批次，视频操作见[视频参考](video.md)。
+参数文件仅接受 `size`、`complexity`、`background`、`output_compression`、`moderation`、`safety_identifier`、`markup`、`frame_count`、`frame_duration_ms`、`svg`、`optimize_prompt_options`；不接受认证、地址或任务身份字段。上述参数也适用于图片批次，视频操作见[视频参考](video.md)。
+
+### 提示词优化模式
+
+已有模型说明确认支持时直接复用；首次使用且缺少能力信息时才查询 `models describe`。需示例再加 `--examples`。可用 `--optimize-prompt-mode standard` 或 `fast`。参数文件对应 `{"optimize_prompt_options":{"mode":"fast"}}`；仅接受 `mode` 这一字段及这两个值，显式 CLI 优先。脚本会将其映射到 `input.extra.optimize_prompt_options`，参数文件不开放任意 `extra`，也不能覆盖服务、认证、模型或数量。批次追加继承原模式；显式新模式只影响追加任务。省略不强制选择模式，上游拒绝时不自动换值或重提。
 
 ### GIF 动画
 
