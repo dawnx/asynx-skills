@@ -512,6 +512,29 @@ class TaskContractTests(unittest.TestCase):
         self.assertNotIn("submission_blocked", resumed["batch"])
         self.assertEqual(len(self.client.submitted), 3)
 
+    def test_task_failing_for_the_account_pauses_the_batch_before_more_are_submitted(self):
+        # Balance is checked after acceptance: without this every remaining item
+        # was accepted only to fail the same way.
+        batch_id = self.batch(6)
+        fail = self.client.task
+
+        def task(task_id):
+            result, request_id = fail(task_id)
+            result.update(status="failed", error={
+                "code": "asynx_insufficient_balance", "message": "developer text",
+                "next_step": "fix_account", "user_message": "账户余额不足，请充值后再提交。",
+            })
+            return result, request_id
+
+        with patch.object(self.client, "task", side_effect=task):
+            first = batches.poll_batch(self.client, batch_id, submissions_limit=2)
+            batches.poll_batch(self.client, batch_id, submissions_limit=2)
+        self.assertTrue(first["auto_paused"])
+        self.assertEqual(first["batch"]["status"], "paused")
+        self.assertIn("余额不足", first["batch"]["action_required"])
+        self.assertEqual(len(self.client.submitted), 2)
+        self.assertEqual(self.item_statuses(batch_id), ["failed", "failed", *["pending"] * 4])
+
     def test_blocked_batch_backs_off_then_pauses_instead_of_retrying_forever(self):
         batch_id = self.batch(2)
         with patch.object(

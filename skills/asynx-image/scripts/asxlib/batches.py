@@ -1284,18 +1284,27 @@ def poll_batch(
                     if artifact_warning:
                         artifact_warnings.append(artifact_warning)
                         log(f"提示：{artifact_warning['message']}")
+            failure = task_error(task.get("error"), status=status) if status in {"failed", "timeout", "canceled"} else None
             _update_item(
                 connection,
                 int(item["id"]),
                 status=status,
                 request_id=request_id,
                 files=files,
-                error=(
-                    task_error(task.get("error"), status=status)
-                    if status in {"failed", "timeout", "canceled"}
-                    else None
-                ),
+                error=failure,
             )
+            if failure is not None and status == "failed" and failure["next_step"] in PAUSING_STEPS and not auto_paused:
+                # Balance and budgets are checked after acceptance, so they arrive as a
+                # failed task. The remaining items would be accepted only to fail too.
+                has_pending = connection.execute(
+                    "SELECT 1 FROM batch_items WHERE batch_id = ? AND status = 'pending' LIMIT 1",
+                    (batch["id"],),
+                ).fetchone()
+                if has_pending is not None:
+                    blocked, auto_paused = _block_submissions(
+                        connection, batch["id"], blocked, code=failure["code"],
+                        message=failure["message"], pause_now=True,
+                    )
             connection.commit()
         _refresh_batch_status(connection, batch["id"])
         connection.commit()
