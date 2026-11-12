@@ -99,7 +99,7 @@ class ModelGuideTests(unittest.TestCase):
                 self.assertNotIn("raw upstream details", str(raised.exception))
                 self.assertEqual(len(self.requests), 1)
 
-    def test_legacy_models_flags_still_dispatch_to_listing(self):
+    def test_models_flags_dispatch_to_listing(self):
         for arguments, operation, modality in [
             (["models"], "all", "image"),
             (["models", "--operation", "edit", "--modality", "all"], "edit", "all"),

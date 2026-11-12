@@ -68,54 +68,21 @@ class StateTestCase(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(database.parent.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(database.stat().st_mode), 0o600)
 
-    def test_legacy_unversioned_database_gets_v1_schema(self) -> None:
-        database = self.directory / "legacy.db"
-        old = sqlite3.connect(database)
-        old.execute("CREATE TABLE artifacts (id INTEGER PRIMARY KEY, path TEXT)")
-        old.commit()
-        old.close()
+    def test_ledger_this_version_cannot_read_is_refused_with_its_path(self) -> None:
+        # Without this the first write fails deep inside a command with an opaque
+        # SQL error, and the user never learns which file to move aside.
+        database = self.directory / "unreadable.db"
+        other = sqlite3.connect(database)
+        other.execute("CREATE TABLE tasks (id INTEGER PRIMARY KEY, status TEXT)")
+        other.commit()
+        other.close()
 
-        connection = state.connect_db(database)
-        try:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
-            self.assertIsNotNone(
-                connection.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='artifacts'"
-                ).fetchone()
-            )
-        finally:
-            connection.close()
-
-    def test_incompatible_legacy_core_tables_are_rebuilt(self) -> None:
-        database = self.directory / "legacy-core.db"
-        old = sqlite3.connect(database)
-        old.execute("CREATE TABLE tasks (id INTEGER PRIMARY KEY, status TEXT)")
-        old.execute("INSERT INTO tasks (id, status) VALUES (7, 'submitting')")
-        old.execute("CREATE TABLE batches (id TEXT PRIMARY KEY)")
-        old.commit()
-        old.close()
-
-        connection = state.connect_db(database)
-        try:
-            columns = {
-                row["name"] for row in connection.execute("PRAGMA table_info(tasks)")
-            }
-            self.assertIn("local_id", columns)
-            # The unreadable ledger may hold the only record of an unconfirmed
-            # submission: it is set aside, never dropped.
-            kept = connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'legacy_tasks_%'"
-            ).fetchone()[0]
-            self.assertEqual(
-                tuple(connection.execute(f'SELECT id, status FROM "{kept}"').fetchone()), (7, "submitting")
-            )
-            self.assertIsNotNone(
-                connection.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='batches'"
-                ).fetchone()
-            )
-        finally:
-            connection.close()
+        with self.assertRaises(AsxError) as caught:
+            state.connect_db(database)
+        self.assertEqual(caught.exception.code, "unsupported_state_schema")
+        reported = Path(caught.exception.details["state_path"])
+        self.assertTrue(reported.samefile(database))
+        self.assertIn(str(reported), caught.exception.message)
 
     def test_task_intent_is_idempotent_and_conflicts_are_rejected(self) -> None:
         first = self._task()

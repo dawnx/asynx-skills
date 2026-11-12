@@ -51,7 +51,7 @@ python3 "<skill-dir>/scripts/asynx.py" task recover "<task-id>"
 python3 "<skill-dir>/scripts/asynx.py" task cancel "<task-id>"
 ```
 
-普通生成在同一脚本进程内等待，无需另起命令重复查询。用户仅查询进度时使用 `task status --refresh`；仅在提交中断且用户要求继续时使用 `task recover`。下载失败使用 `wait` 取回原结果，不得重新生成。
+普通生成在同一脚本进程内等待，无需另起命令重复查询。用户仅查询进度时使用 `task status --refresh`；提交中断、不确定是否已受理时使用 `task recover` 向服务确认（只查询，不重新提交）。下载失败使用 `wait` 取回原结果，不得重新生成。
 
 直接交付返回的 `files`，其中 `videos` 为视频，`images` 为图片附件，`media` 标明素材类型。宿主支持本地播放视频时可用绝对路径展示，否则提供文件链接。不得将封面图作为视频交付，也不得凭猜测补充结果中未返回的时长、尺寸或音轨信息。
 

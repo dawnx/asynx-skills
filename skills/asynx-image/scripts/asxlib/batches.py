@@ -23,7 +23,7 @@ from .constants import (
     MAX_BATCH_ITEMS,
     UTC,
 )
-from .errors import AsxError, friendly_task_error
+from .errors import PAUSING_STEPS, AsxError, task_error
 from .image_options import IMAGE_OPTIONS, options_from_args, resolved_image_options
 from .image_results import requested_aspect_ratio
 from .images import build_task, task_input_warnings
@@ -48,7 +48,7 @@ from .tasks import (
     download_assets,
     index_downloaded_artifacts,
     quote_payload,
-    unanswered_attempt,
+    still_settling,
     wait_limit,
 )
 from .videos import _media_url, build_video_task, prepare_video_image
@@ -109,6 +109,37 @@ def _set_blocked(connection: sqlite3.Connection, batch_id: str, value: dict[str,
         "UPDATE batches SET blocked_json = ? WHERE id = ?",
         (_json(value) if value is not None else None, batch_id),
     )
+
+
+def _block_submissions(
+    connection: sqlite3.Connection,
+    batch_id: str,
+    blocked: dict[str, Any] | None,
+    *,
+    code: str,
+    message: str,
+    pause_now: bool,
+) -> tuple[dict[str, Any], bool]:
+    """Back off after a failed round; pause when told to, or after too many rounds."""
+    rounds = int((blocked or {}).get("rounds") or 0) + 1
+    paused = pause_now or rounds >= BLOCKED_ROUNDS_BEFORE_PAUSE
+    delay = min(10 * 2 ** (rounds - 1), 120)
+    state = {
+        "code": code,
+        "message": message,
+        "since": (blocked or {}).get("since") or utc_now(),
+        "rounds": rounds,
+        "retry_at": (datetime.now(UTC) + timedelta(seconds=delay)).isoformat(timespec="seconds"),
+        "auto_paused": paused,
+    }
+    _set_blocked(connection, batch_id, state)
+    if paused:
+        connection.execute(
+            "UPDATE batches SET status = 'paused', updated_at = ? WHERE id = ? AND status = 'active'",
+            (utc_now(), batch_id),
+        )
+        log(f"批次 {batch_id} 已自动暂停：{message}")
+    return state, paused
 
 
 def _item_request(template: dict[str, Any], item_body: dict[str, Any]) -> dict[str, Any]:
@@ -748,7 +779,7 @@ def _item_error(row: sqlite3.Row) -> dict[str, Any] | None:
     # Older records may contain the original remote error.  Local download and
     # state errors already have their own actionable messages.
     if error is not None and remote.get("error") == error:
-        return friendly_task_error(error, status=row["status"])
+        return task_error(error, status=row["status"])
     return cast(dict[str, Any] | None, error)
 
 
@@ -1000,11 +1031,16 @@ def poll_batch(
             if claim.rowcount != 1:
                 continue
             connection.commit()
-            replay = False
+            local_task_id = f"batchitem_{int(item['id'])}"
+            in_flight = False
             try:
                 body = _item_request(template, json.loads(item["body_json"]))
-                local_task_id = f"batchitem_{int(item['id'])}"
-                replay = unanswered_attempt(get_state_task(connection, local_task_id))
+                earlier = get_state_task(connection, local_task_id)
+                unanswered = (
+                    earlier is not None
+                    and not earlier.get("remote_task_id")
+                    and str(earlier.get("status")) == "submitting"
+                )
                 intent = create_task_intent(
                     connection,
                     operation=("video.generate" if template.get("task_type") == "video.generate" else str(batch["operation"])),
@@ -1017,15 +1053,22 @@ def poll_batch(
                     status="submitting",
                 )
                 if not intent.get("remote_task_id") and intent.get("status") != "submitting":
-                    update_state_task(connection, local_task_id, status="submitting")
+                    intent = update_state_task(connection, local_task_id, status="submitting")
                 connection.commit()
                 if cancel_blocked_batch_intent(connection, str(item["idempotency_key"])):
                     connection.commit()
                     continue
+                task: dict[str, Any] | None = None
+                request_id: str | None = None
                 if intent.get("remote_task_id"):
                     task, request_id = client.task(str(intent["remote_task_id"]))
-                else:
+                elif unanswered:
+                    # An earlier attempt got no answer: ask what became of it first.
+                    task, request_id = client.find_submission(str(item["idempotency_key"]))
+                    in_flight = task is None and still_settling(earlier)
+                if task is None:
                     task, request_id = client.submit(body, item["idempotency_key"])
+                if not intent.get("remote_task_id"):
                     bind_remote_task(
                         connection,
                         local_task_id,
@@ -1072,7 +1115,7 @@ def poll_batch(
                     status=status if status in LOCAL_ITEM_STATUSES else "submitted",
                     task_id=submitted_task_id,
                     request_id=request_id,
-                    error=friendly_task_error(task.get("error"), status=status) if status in {"failed", "timeout", "canceled"} else None,
+                    error=task_error(task.get("error"), status=status) if status in {"failed", "timeout", "canceled"} else None,
                 )
                 if blocked is not None:
                     blocked = None
@@ -1081,28 +1124,28 @@ def poll_batch(
                 submitted += 1
             except AsxError as exc:
                 canceled = cancel_blocked_batch_intent(connection, str(item["idempotency_key"]))
-                exc.replayed = exc.replayed or replay
-                outcome = exc.submission_outcome if exc.for_submission else None
-                # Only a request the service will refuse again fails its item. Anything
-                # else leaves the item pending, to be sent later under the same key.
-                refused = outcome == "request" or (
-                    not exc.for_submission and exc.http_status in {400, 404, 410, 422}
-                )
-                unsent_intent = get_state_task(connection, f"batchitem_{int(item['id'])}")
-                if unsent_intent is not None and not unsent_intent.get("remote_task_id") and not canceled:
+                # While the earlier attempt may still arrive, this refusal settles nothing.
+                exc.replayed = exc.replayed or in_flight
+                # The service says what to do; an unanswered request is retried later.
+                step = exc.next_step or "retry_later"
+                refused = exc.submission_rejected and step == "change_request"
+                unsent = get_state_task(connection, local_task_id)
+                if unsent is not None and not unsent.get("remote_task_id") and not canceled:
                     if refused:
-                        update_state_task(connection, str(unsent_intent["local_id"]), status="failed", error=exc.payload().get("error"))
-                    elif outcome is not None:
-                        # Definitely not created: the next attempt starts clean, not as a replay.
-                        update_state_task(connection, str(unsent_intent["local_id"]), status="intent")
+                        update_state_task(connection, local_task_id, status="failed", error=exc.payload().get("error"))
+                    elif exc.submission_rejected:
+                        # Certainly not created: the next round sends it fresh.
+                        update_state_task(connection, local_task_id, status="intent")
                 _update_item(
                     connection,
                     int(item["id"]),
                     status="canceled" if canceled else "failed" if refused else "pending",
                     error=exc.payload().get("error"),
                 )
-                # The remaining items would meet the same answer: stop this round.
-                waiting_for_slot = outcome == "later" and exc.http_status == 429 and not canceled
+                # A full account is ordinary back-pressure: hold the rest for the next round.
+                waiting_for_slot = (
+                    exc.submission_rejected and exc.http_status == 429 and step == "retry_later" and not canceled
+                )
                 log(
                     f"批次 {batch['id']} 第 {item['sequence']} 项暂未提交，等待空闲名额后继续。"
                     if waiting_for_slot
@@ -1111,26 +1154,12 @@ def poll_batch(
                 if canceled or refused:
                     connection.commit()
                     continue
+                # The remaining items would meet the same answer: stop this round.
                 if not waiting_for_slot:
-                    rounds = int((blocked or {}).get("rounds") or 0) + 1
-                    auto_paused = outcome == "account" or rounds >= BLOCKED_ROUNDS_BEFORE_PAUSE
-                    delay = min(10 * 2 ** (rounds - 1), 120)
-                    blocked = {
-                        "code": exc.code,
-                        "message": exc.message,
-                        "since": (blocked or {}).get("since") or utc_now(),
-                        "rounds": rounds,
-                        "retry_at": (datetime.now(UTC) + timedelta(seconds=delay)).isoformat(timespec="seconds"),
-                        "auto_paused": auto_paused,
-                    }
-                    _set_blocked(connection, batch["id"], blocked)
-                    if auto_paused:
-                        connection.execute(
-                            "UPDATE batches SET status = 'paused', updated_at = ? "
-                            "WHERE id = ? AND status = 'active'",
-                            (utc_now(), batch["id"]),
-                        )
-                        log(f"批次 {batch['id']} 已自动暂停：{exc.message}")
+                    blocked, auto_paused = _block_submissions(
+                        connection, batch["id"], blocked, code=exc.code, message=exc.message,
+                        pause_now=step in PAUSING_STEPS,
+                    )
                 connection.commit()
                 break
 
@@ -1209,7 +1238,7 @@ def poll_batch(
                     status=status,
                     remote=task,
                     billing=task.get("billing"),
-                    error=friendly_task_error(task.get("error"), status=status) if status in {"failed", "timeout", "canceled"} else None,
+                    error=task_error(task.get("error"), status=status) if status in {"failed", "timeout", "canceled"} else None,
                     last_polled=utc_now(),
                 )
                 if previous_state != status:
@@ -1262,7 +1291,7 @@ def poll_batch(
                 request_id=request_id,
                 files=files,
                 error=(
-                    friendly_task_error(task.get("error"), status=status)
+                    task_error(task.get("error"), status=status)
                     if status in {"failed", "timeout", "canceled"}
                     else None
                 ),

@@ -21,7 +21,7 @@ if __name__ == "__main__":
     managed = (root / ".asx-install.json").is_file() or (
         root.name == "asynx-image"
         and root.parent.name == "skills"
-        and root.parent.parent.name in {".agents", ".claude", ".codex"}
+        and root.parent.parent.name in {".agents", ".claude"}
     )
     changing = sys.argv[1:3] in (["update", "apply"], ["update", "rollback"])
     guard = (

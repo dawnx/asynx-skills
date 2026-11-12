@@ -98,82 +98,6 @@ class ConfigurationPathTestCase(unittest.TestCase):
             ):
                 self.assertEqual(config.config_path(), home / ".config" / "asynx" / "config.json")
 
-    def test_read_config_falls_back_to_legacy_xdg_path(self) -> None:
-        if os.name == "nt":
-            self.skipTest("XDG legacy migration is POSIX-only")
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            home = root / "home"
-            legacy = root / "old-xdg" / "asynx" / "config.json"
-            legacy.parent.mkdir(parents=True)
-            expected = {
-                "api_key": "asx-legacy-key",
-                "base_url": "https://asynx.llmapi.site/api",
-            }
-            legacy.write_text(json.dumps(expected), encoding="utf-8")
-            with patch.dict(
-                os.environ,
-                isolated_environment(home, XDG_CONFIG_HOME=str(legacy.parents[1])),
-                clear=True,
-            ):
-                actual, source = config.read_config_with_source()
-            self.assertEqual(actual, expected)
-            self.assertEqual(source, legacy)
-
-    def test_canonical_config_takes_precedence_over_legacy_xdg_file(self) -> None:
-        if os.name == "nt":
-            self.skipTest("XDG legacy migration is POSIX-only")
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            home = root / "home"
-            canonical = home / ".config" / "asynx" / "config.json"
-            legacy = root / "old-xdg" / "asynx" / "config.json"
-            canonical.parent.mkdir(parents=True)
-            legacy.parent.mkdir(parents=True)
-            canonical.write_text(json.dumps({"api_key": "asx-canonical"}), encoding="utf-8")
-            legacy.write_text(json.dumps({"api_key": "asx-legacy"}), encoding="utf-8")
-            with patch.dict(
-                os.environ,
-                isolated_environment(home, XDG_CONFIG_HOME=str(legacy.parents[1])),
-                clear=True,
-            ):
-                actual, source = config.read_config_with_source()
-                migrated = config.migrate_legacy_config()
-
-            self.assertEqual(actual["api_key"], "asx-canonical")
-            self.assertEqual(source, canonical)
-            self.assertIsNone(migrated)
-            self.assertEqual(
-                json.loads(canonical.read_text(encoding="utf-8"))["api_key"],
-                "asx-canonical",
-            )
-
-    def test_migrate_legacy_config_creates_private_canonical_copy(self) -> None:
-        if os.name == "nt":
-            self.skipTest("XDG legacy migration is POSIX-only")
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            home = root / "home"
-            legacy = root / "old-xdg" / "asynx" / "config.json"
-            canonical = home / ".config" / "asynx" / "config.json"
-            legacy.parent.mkdir(parents=True)
-            expected = {
-                "api_key": "asx-legacy-key",
-                "base_url": "https://asynx.llmapi.site/api",
-            }
-            legacy.write_text(json.dumps(expected), encoding="utf-8")
-            with patch.dict(
-                os.environ,
-                isolated_environment(home, XDG_CONFIG_HOME=str(legacy.parents[1])),
-                clear=True,
-            ):
-                migrated = config.migrate_legacy_config()
-
-            self.assertEqual(migrated, canonical)
-            self.assertTrue(legacy.exists(), "migration must leave the legacy file intact")
-            self.assertEqual(json.loads(canonical.read_text(encoding="utf-8")), expected)
-            self.assertEqual(stat.S_IMODE(canonical.stat().st_mode), 0o600)
-
     def test_configure_writes_canonical_path_even_with_xdg_override(self) -> None:
         if os.name == "nt":
             self.skipTest("POSIX canonical path behavior")
@@ -196,39 +120,7 @@ class ConfigurationPathTestCase(unittest.TestCase):
             self.assertEqual(result["config_path"], str(canonical.resolve()))
             self.assertTrue(canonical.is_file())
             self.assertFalse((xdg_home / "asynx" / "config.json").exists())
-
-    def test_installer_migrates_legacy_config_even_when_configuration_is_skipped(self) -> None:
-        if os.name == "nt":
-            self.skipTest("XDG legacy migration is POSIX-only")
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            home = root / "home"
-            legacy = root / "old-xdg" / "asynx" / "config.json"
-            canonical = home / ".config" / "asynx" / "config.json"
-            legacy.parent.mkdir(parents=True)
-            legacy.write_text(
-                json.dumps(
-                    {
-                        "api_key": "asx-installer-migration",
-                        "base_url": "https://asynx.llmapi.site/api",
-                    }
-                ),
-                encoding="utf-8",
-            )
-            with patch.dict(
-                os.environ,
-                isolated_environment(home, XDG_CONFIG_HOME=str(legacy.parents[1])),
-                clear=True,
-            ):
-                result = installer.run(
-                    ["--target", "codex", "--skip-config", "--no-verify"],
-                    home=home,
-                    install_dependencies=False,
-                )
-
-            self.assertEqual(result, 0)
-            self.assertTrue(canonical.is_file())
-            self.assertTrue(legacy.is_file())
+            self.assertEqual(stat.S_IMODE(canonical.stat().st_mode), 0o600)
 
 
 class ConfigurationCLITestCase(unittest.TestCase):
@@ -247,7 +139,6 @@ class ConfigurationCLITestCase(unittest.TestCase):
                     contextlib.redirect_stderr(errors),
                     patch.object(output, "isatty", return_value=terminal),
                     patch("asxlib.config.getpass.getpass", return_value=secret),
-                    patch.object(cli, "legacy_installation_notice", return_value=None),
                     patch.object(cli, "AsynxClient") as api,
                     self.assertRaises(SystemExit) as raised,
                 ):
@@ -279,7 +170,6 @@ class ConfigurationCLITestCase(unittest.TestCase):
                     contextlib.redirect_stderr(errors),
                     patch.object(output, "isatty", return_value=True),
                     patch("asxlib.config.getpass.getpass", side_effect=interruption),
-                    patch.object(cli, "legacy_installation_notice", return_value=None),
                 ):
                     path = config.save_config("asx-existing-private-key", config.DEFAULT_BASE_URL)
                     before = path.read_bytes()
@@ -385,19 +275,18 @@ class ConfigurationCLITestCase(unittest.TestCase):
             self.assertFalse(payload["config_exists"])
             self.assertNotIn(secret, json.dumps(payload))
 
-    def test_doctor_accepts_standard_and_legacy_api_keys(self) -> None:
-        for secret in ("sk-doctor-test", "asx-doctor-test"):
-            with self.subTest(secret=secret), tempfile.TemporaryDirectory() as directory:
-                result, payload = run_cli(
-                    CLI,
-                    isolated_environment(Path(directory), ASYNX_API_KEY=secret),
-                    "doctor",
-                )
+    def test_doctor_accepts_environment_api_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result, payload = run_cli(
+                CLI,
+                isolated_environment(Path(directory), ASYNX_API_KEY="sk-doctor-test"),
+                "doctor",
+            )
 
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertTrue(payload["config"]["key_valid"])
-                credentials = next(item for item in payload["checks"] if item["name"] == "credentials")
-                self.assertTrue(credentials["ok"])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(payload["config"]["key_valid"])
+            credentials = next(item for item in payload["checks"] if item["name"] == "credentials")
+            self.assertTrue(credentials["ok"])
 
     def test_config_status_does_not_echo_credentials_from_invalid_base_url(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -415,7 +304,7 @@ class ConfigurationCLITestCase(unittest.TestCase):
             self.assertEqual(payload["base_url"], "<invalid>")
             self.assertNotIn(secret, json.dumps(payload))
 
-    def test_missing_key_error_includes_checked_path_and_absolute_configure_command(self) -> None:
+    def test_missing_key_error_includes_config_path_and_absolute_configure_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             environment = isolated_environment(home)
@@ -428,7 +317,6 @@ class ConfigurationCLITestCase(unittest.TestCase):
             self.assertEqual(error["code"], "missing_api_key")
             self.assertEqual(details["credential_source"], "none")
             self.assertEqual(Path(details["config_path"]).resolve(), canonical)
-            self.assertIn(canonical, {Path(item).resolve() for item in details["checked_paths"]})
             self.assertIn(str(CLI.resolve()), details["configure_command"])
             self.assertIn(details["config_path"], error["message"])
             self.assertIn(details["configure_command"], error["message"])
@@ -478,40 +366,6 @@ class ConfigurationCLITestCase(unittest.TestCase):
                     for issue in issues
                 ),
                 issues,
-            )
-
-    def test_doctor_warns_when_canonical_and_legacy_configs_both_exist(self) -> None:
-        if os.name == "nt":
-            self.skipTest("XDG legacy migration is POSIX-only")
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            home = root / "home"
-            canonical = home / ".config" / "asynx" / "config.json"
-            legacy = root / "old-xdg" / "asynx" / "config.json"
-            canonical.parent.mkdir(parents=True)
-            legacy.parent.mkdir(parents=True)
-            canonical.write_text(json.dumps({"api_key": "asx-canonical"}), encoding="utf-8")
-            legacy.write_text(json.dumps({"api_key": "asx-legacy"}), encoding="utf-8")
-            environment = isolated_environment(
-                home,
-                ASYNX_API_KEY="asx-doctor-test",
-                XDG_CONFIG_HOME=str(legacy.parents[1]),
-            )
-
-            result, payload = run_cli(CLI, environment, "doctor")
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            issues = cast(list[dict[str, Any]], payload["issues"])
-            self.assertTrue(
-                any(issue.get("code") == "multiple_config_files" for issue in issues),
-                issues,
-            )
-            checks = cast(list[dict[str, Any]], payload["checks"])
-            config_check = next(item for item in checks if item["name"] == "config_files")
-            details = cast(dict[str, Any], config_check["details"])
-            self.assertEqual(
-                set(cast(list[str], details["paths"])),
-                {str(canonical), str(legacy)},
             )
 
 

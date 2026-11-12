@@ -111,21 +111,6 @@ def _install_dependencies(destination: Path) -> None:
         raise RuntimeError("图片处理依赖安装失败，请检查网络连接以及当前 Python 是否已安装 pip，然后重新运行安装命令。")
 
 
-def _check_legacy_installations(home: Path, targets: list[str]) -> None:
-    candidates = [_target_path(target, home).with_name("asx") for target in targets]
-    if "codex" in targets:
-        candidates.append(home / ".codex" / "skills" / "asx")
-    existing = [path for path in candidates if path.exists() or path.is_symlink()]
-    if existing:
-        paths = "\n".join(str(path) for path in existing)
-        raise RuntimeError(
-            "检测到旧版 asx，需先移除旧入口才能继续安装 asynx-image：\n"
-            f"{paths}\n"
-            "可让 Agent 协助确认，将旧入口移出 skills 目录备份后再继续安装。\n"
-            "密钥、任务记录和已生成文件均需保留，无需迁移；请勿仅修改旧目录名称。"
-        )
-
-
 def _install_skill(destination: Path, *, install_dependencies: bool = True) -> None:
     if destination.exists() and not destination.is_dir():
         raise RuntimeError(f"安装位置被同名文件占用，请先检查该文件：{destination}")
@@ -277,7 +262,6 @@ def run(
                 print(f"已从 {label} 卸载：{destination}")
         return 0
     targets = _resolve_targets(args.target, user_home)
-    _check_legacy_installations(user_home, targets)
     for target in targets:
         destination = _target_path(target, user_home)
         _install_skill(destination, install_dependencies=install_dependencies)
@@ -285,11 +269,6 @@ def run(
         print(f"已安装到 {label}：{destination}")
 
     client = _load_client_module(_target_path(targets[0], user_home))
-    migrate = getattr(client, "migrate_legacy_config", None)
-    if callable(migrate):
-        migrated_path = migrate()
-        if migrated_path is not None:
-            print(f"已迁移旧配置，原文件已保留：{migrated_path}")
     print(f"配置文件：{client.config_path().resolve()}")
     if not args.skip_config:
         if _configured(client):

@@ -22,7 +22,7 @@ from .constants import (
     TERMINAL_STATUSES,
     UTC,
 )
-from .errors import AsxError, friendly_task_error
+from .errors import AsxError, task_error
 from .image_options import options_from_args
 from .image_results import requested_aspect_ratio
 from .images import (
@@ -556,7 +556,7 @@ def _local_task_payload(row: dict[str, Any]) -> dict[str, Any]:
     }
     if isinstance(remote, dict):
         if payload.get("error") and payload["error"] == remote.get("error"):
-            payload["error"] = friendly_task_error(payload["error"], status=row.get("status"))
+            payload["error"] = task_error(payload["error"], status=row.get("status"))
         for key in ("result_quality", "result", "deadline_at", "started_at", "finished_at"):
             if remote.get(key) is not None:
                 payload[key] = remote[key]
@@ -591,8 +591,12 @@ def _persist_task_intent(
     model: str,
     idempotency_key: str,
     output_dir: str,
-) -> tuple[dict[str, Any], bool]:
-    """Record the submission first; also report whether it replays an unanswered attempt."""
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Record the submission before sending it.
+
+    Also returns the earlier record when this key was sent before without an
+    answer: such a submission is looked up before anything is sent again.
+    """
     local_id = f"local_{secrets.token_hex(12)}"
     task_input = body.get("input")
     prompt = task_input.get("prompt") if isinstance(task_input, dict) else None
@@ -614,24 +618,20 @@ def _persist_task_intent(
             local_id=local_id,
             status="submitting",
         )
-        replay = unanswered_attempt(row) and str(row["local_id"]) != local_id
+        earlier = (
+            dict(row)
+            if str(row["local_id"]) != local_id
+            and not row.get("remote_task_id")
+            and str(row.get("status")) == "submitting"
+            else None
+        )
         if not row.get("remote_task_id") and row.get("status") != "submitting":
             row = update_task(connection, str(row["local_id"]), status="submitting")
         append_event(connection, str(row["local_id"]), "submit_started")
         connection.commit()
-        return row, replay
+        return row, earlier
     finally:
         connection.close()
-
-
-def unanswered_attempt(row: dict[str, Any] | None) -> bool:
-    """Whether this record was sent before without a definite answer.
-
-    If so the task may already exist, and a refusal of the replay cannot settle it.
-    """
-    if row is None or row.get("remote_task_id"):
-        return False
-    return str(row.get("status")) in {"submitting", "unknown"}
 
 
 def _bind_submission(
@@ -731,7 +731,7 @@ def sync_local_task(
             local_id,
             status=local_status,
             remote=task,
-            error=friendly_task_error(task.get("error"), status=status) if status in {"failed", "timeout", "canceled"} else None,
+            error=task_error(task.get("error"), status=status) if status in {"failed", "timeout", "canceled"} else None,
             billing=task.get("billing"),
             last_polled=utc_now(),
         )
@@ -787,24 +787,84 @@ def refresh_task(client: AsynxClient, identifier: str) -> tuple[dict[str, Any], 
     return payload, 0 if payload["ok"] else 4
 
 
-def recover_tasks(
-    client: AsynxClient, identifier: str | None = None, *, limit: int = 50,
-    max_age_hours: float = 24,
-) -> dict[str, Any]:
-    """Confirm unbound submissions by replaying them with their original key.
+# How long after sending a submission the service may still be creating its task.
+# A lookup that finds nothing inside this window proves nothing yet.
+SUBMISSION_SETTLE_SECONDS = 180
 
-    A replay creates the task when the first attempt never reached the service,
-    so without an explicit ID only recent records are replayed.
+
+def still_settling(row: dict[str, Any] | None) -> bool:
+    """Whether an earlier, unanswered attempt of this submission may still be in flight.
+
+    While it is, an empty lookup and a refusal of a later attempt both prove nothing.
     """
-    if max_age_hours <= 0:
-        raise AsxError("恢复时限须为正数（小时）。", code="invalid_recover_age")
-    replay_after = datetime.now(UTC) - timedelta(hours=max_age_hours)
+    if row is None:
+        return False
+    sent = parse_deadline(row.get("updated_at")) or parse_deadline(row.get("created_at"))
+    return sent is not None and datetime.now(UTC) - sent < timedelta(seconds=SUBMISSION_SETTLE_SECONDS)
+
+
+def _not_created_payload(row: dict[str, Any]) -> dict[str, Any]:
+    payload = _local_task_payload({**row, "status": "failed"})
+    payload.pop("next_action", None)
+    payload.pop("next_action_args", None)
+    payload.update(
+        ok=False,
+        task_created=False,
+        error={
+            "code": "submission_not_created",
+            "message": "服务端没有这次提交对应的任务，未产生费用。仍需要结果时请重新提交。",
+            "task_created": False,
+        },
+    )
+    return payload
+
+
+def confirm_submission(client: AsynxClient, row: dict[str, Any]) -> dict[str, Any] | None:
+    """Settle an unbound submission by asking the service, never by sending it again.
+
+    Returns the bound ledger row when the task exists, or None after recording
+    that it does not. Raises ``submission_pending`` while the original request
+    may still be in flight.
+    """
+    local_id = str(row["local_id"])
+    task, request_id = client.find_submission(str(row["idempotency_key"]))
+    if task is not None:
+        return _bind_submission(client, local_id, task, request_id)
+    if still_settling(row):
+        raise AsxError(
+            "原提交刚发出，服务可能仍在处理。请稍后再确认，不要重新生成。",
+            code="submission_pending",
+            exit_code=4,
+            details={"local_id": local_id, "next_action_args": ["task", "recover", local_id]},
+        )
+    connection = connect_ledger_db()
+    try:
+        update_task(
+            connection,
+            local_id,
+            status="failed",
+            error={
+                "code": "submission_not_created",
+                "message": "服务端没有这次提交对应的任务，未产生费用。",
+            },
+        )
+        append_event(connection, local_id, "submission_not_created", {"request_id": request_id})
+        connection.commit()
+    finally:
+        connection.close()
+    return None
+
+
+def recover_tasks(
+    client: AsynxClient, identifier: str | None = None, *, limit: int = 50
+) -> dict[str, Any]:
+    """Find out what became of interrupted submissions. Never submits anything."""
     connection = connect_ledger_db()
     try:
         if identifier:
             rows = [_task_identifier_row(connection, identifier)]
         else:
-            # Look at unfinished records only: newer finished tasks must not push an
+            # Unfinished records only: newer finished tasks must not push an
             # unconfirmed submission out of the window that is examined.
             rows = [
                 row for row in list_ledger_tasks(connection, limit=1000)
@@ -815,74 +875,29 @@ def recover_tasks(
     results: list[dict[str, Any]] = []
     for row in rows:
         status = str(row.get("status"))
-        if status in TERMINAL_STATUSES:
-            if not identifier:
-                continue
-            if status != "succeeded":
-                results.append(_local_task_payload(row))
-                continue
-        replay = unanswered_attempt(row)
+        if status in TERMINAL_STATUSES and status != "succeeded":
+            results.append(_local_task_payload(row))
+            continue
         try:
             if not row.get("remote_task_id"):
-                created = parse_deadline(row.get("created_at"))
-                if not identifier and (created is None or created < replay_after):
-                    stale = _local_task_payload(row)
-                    stale.update(
-                        skipped="stale",
-                        warnings=[{
-                            "code": "stale_unconfirmed_submission",
-                            "message": (
-                                f"该提交已超过 {max_age_hours:g} 小时仍未确认，未自动重新提交。"
-                                "仍需要时请指定该任务 ID 恢复（可能创建并计费），不需要时可取消该记录。"
-                            ),
-                        }],
-                    )
-                    results.append(stale)
-                    continue
                 connection = connect_ledger_db()
                 try:
-                    blocked = cancel_blocked_batch_intent(connection, str(row["idempotency_key"]))
-                    paused_batch = None
-                    if connection.execute(
-                        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'batch_items'"
-                    ).fetchone():
-                        paused_batch = connection.execute(
-                            "SELECT b.id FROM batch_items i JOIN batches b ON b.id = i.batch_id "
-                            "WHERE i.idempotency_key = ? AND b.status = 'paused'",
-                            (row["idempotency_key"],),
-                        ).fetchone()
+                    canceled = cancel_blocked_batch_intent(connection, str(row["idempotency_key"]))
                     connection.commit()
                 finally:
                     connection.close()
-                if blocked:
+                if canceled:
                     if identifier:
                         results.append(_local_task_payload({**row, "status": "canceled"}))
                     continue
-                if paused_batch is not None:
-                    paused = _local_task_payload(row)
-                    paused.update(
-                        paused=True,
-                        next_action="batch status",
-                        next_action_args=["batch", "status", paused_batch["id"], "--refresh"],
-                        warnings=[{
-                            "code": "batch_paused",
-                            "message": "该任务所在的批次已暂停，尚未恢复提交。如需继续生成，请先恢复该批次。",
-                        }],
-                    )
-                    results.append(paused)
+                bound = confirm_submission(client, row)
+                if bound is None:
+                    results.append(_not_created_payload(row))
                     continue
-                body = row.get("request")
-                if not isinstance(body, dict):
-                    raise AsxError("本地提交记录不完整，暂时无法恢复。请保留记录并联系服务支持确认原任务，避免重复生成。", code="invalid_task_state")
-                task, request_id = client.submit(body, str(row["idempotency_key"]))
-                row = _bind_submission(client, str(row["local_id"]), task, request_id)
+                row = bound
             synced, _code = sync_local_task(client, str(row["local_id"]))
             results.append(synced)
         except AsxError as exc:
-            exc.replayed = exc.replayed or replay
-            if exc.submission_rejected and not row.get("remote_task_id"):
-                _record_submit_error(str(row["local_id"]), exc)
-                row = {**row, "status": "failed"}
             results.append({**_local_task_payload(row), "ok": False, "error": exc.payload()["error"]})
     return {"ok": all(item.get("ok", False) for item in results), "schema_version": 1, "tasks": results}
 
@@ -990,7 +1005,7 @@ def cancel_local_task(client: AsynxClient, identifier: str) -> tuple[dict[str, A
             status=local_status,
             remote=task,
             billing=task.get("billing"),
-            error=friendly_task_error(task.get("error"), status=local_status) if local_status in TERMINAL_STATUSES and local_status != "succeeded" else None,
+            error=task_error(task.get("error"), status=local_status) if local_status in TERMINAL_STATUSES and local_status != "succeeded" else None,
             last_polled=utc_now(),
         )
         append_event(
@@ -1038,7 +1053,7 @@ def task_payload(
         attach_media_details(payload, files, expected_ratio=expected_ratio or requested_aspect_ratio(task), task=task)
     if status in TERMINAL_STATUSES and status != "succeeded":
         payload["ok"] = False
-        payload["error"] = friendly_task_error(task.get("error"), status=status)
+        payload["error"] = task_error(task.get("error"), status=status)
     if files is None:
         _task_followup(payload)
     return {key: value for key, value in payload.items() if value is not None}
@@ -1128,7 +1143,7 @@ def _update_local_snapshot(
             local_id,
             status=status,
             remote=task,
-            error=friendly_task_error(task.get("error"), status=status) if status in {"failed", "timeout", "canceled"} else None,
+            error=task_error(task.get("error"), status=status) if status in {"failed", "timeout", "canceled"} else None,
             billing=task.get("billing"),
             last_polled=utc_now(),
         )
@@ -1282,7 +1297,7 @@ def run_submission(
     idempotency_key = validate_idempotency_key(
         args.idempotency_key or f"asx-{secrets.token_hex(16)}"
     )
-    local_row, replay = _persist_task_intent(
+    local_row, earlier = _persist_task_intent(
         client,
         body,
         operation=task_type.removeprefix("image."),
@@ -1295,15 +1310,22 @@ def run_submission(
     log(f"正在提交{_OPERATION_LABELS[task_type]}任务……")
     submitted_at = time.perf_counter()
     try:
+        found: dict[str, Any] | None = None
+        in_flight = False
         if local_row.get("remote_task_id"):
-            task, request_id = client.task(str(local_row["remote_task_id"]))
-        else:
-            task, request_id = client.submit(body, idempotency_key)
-            task.setdefault("task_type", task_type)
-            _bind_submission(client, local_id, task, request_id)
+            found, request_id = client.task(str(local_row["remote_task_id"]))
+        elif earlier is not None:
+            # This key was sent before without an answer: ask what became of it.
+            found, request_id = client.find_submission(idempotency_key)
+            in_flight = found is None and still_settling(earlier)
+        if found is None:
+            found, request_id = client.submit(body, idempotency_key)
+        task = found
         task.setdefault("task_type", task_type)
+        if not local_row.get("remote_task_id"):
+            _bind_submission(client, local_id, task, request_id)
     except KeyboardInterrupt:
-        # Stopped mid-request: only a replay under the same key can tell whether it arrived.
+        # Stopped mid-request: only the service knows whether it arrived.
         raise AsxError(
             "提交被中断，尚未确认服务是否已受理。请恢复该记录确认原提交，不要直接重新生成。",
             code="interrupted",
@@ -1311,7 +1333,8 @@ def run_submission(
             details={"local_id": local_id, "next_action_args": ["task", "recover", local_id]},
         ) from None
     except AsxError as exc:
-        exc.replayed = exc.replayed or replay
+        # While the earlier attempt may still arrive, a refusal of this one settles nothing.
+        exc.replayed = exc.replayed or in_flight
         _record_submit_error(local_id, exc)
         if exc.details is None:
             exc.details = {}
@@ -1419,7 +1442,7 @@ def history_payload(
     if not isinstance(items, list):
         raise AsxError("暂时无法读取任务历史，请稍后重试；若持续出现，请联系服务支持。", code="invalid_api_response")
     readable_items = [
-        {**item, "error": friendly_task_error(item["error"], status=item.get("status"))}
+        {**item, "error": task_error(item["error"], status=item.get("status"))}
         if isinstance(item, dict) and item.get("error") else item
         for item in items
     ]

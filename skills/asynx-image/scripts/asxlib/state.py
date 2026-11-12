@@ -13,6 +13,7 @@ import sqlite3
 import stat
 from collections.abc import Mapping
 from datetime import datetime
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -49,39 +50,88 @@ _JSON_ALIASES = {
     "remote_json": "remote",
     "error_json": "error",
 }
-_REQUIRED_COLUMNS = {
-    "tasks": {
-        "local_id",
-        "remote_task_id",
-        "operation",
-        "model",
-        "status",
-        "idempotency_key",
-        "request_json",
-        "output_dir",
-        "remote_json",
-        "error_json",
-        "billing",
-        "created_at",
-        "updated_at",
-        "last_polled",
-        "base_url",
-    },
-    "assets": {
-        "artifact_id",
-        "local_task_id",
-        "remote_index",
-        "path",
-        "remote_url",
-        "mime",
-        "bytes",
-        "sha256",
-        "state",
-        "created_at",
-        "updated_at",
-    },
-    "task_events": {"id", "local_task_id", "event_type", "payload_json", "created_at"},
-}
+_LEDGER_TABLES = """
+CREATE TABLE IF NOT EXISTS tasks (
+    local_id TEXT PRIMARY KEY,
+    remote_task_id TEXT UNIQUE,
+    operation TEXT NOT NULL,
+    model TEXT NOT NULL,
+    status TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    request_json TEXT NOT NULL,
+    output_dir TEXT NOT NULL,
+    remote_json TEXT,
+    error_json TEXT,
+    billing TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_polled TEXT,
+    base_url TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_tasks_status_updated
+    ON tasks(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS ix_tasks_operation_created
+    ON tasks(operation, created_at DESC);
+CREATE TABLE IF NOT EXISTS assets (
+    artifact_id TEXT PRIMARY KEY,
+    local_task_id TEXT NOT NULL REFERENCES tasks(local_id) ON DELETE CASCADE,
+    remote_index INTEGER NOT NULL CHECK (remote_index >= 0),
+    path TEXT NOT NULL,
+    remote_url TEXT,
+    mime TEXT,
+    bytes INTEGER,
+    sha256 TEXT,
+    state TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(local_task_id, remote_index)
+);
+CREATE INDEX IF NOT EXISTS ix_assets_task_index
+    ON assets(local_task_id, remote_index);
+CREATE INDEX IF NOT EXISTS ix_assets_state_updated
+    ON assets(state, updated_at DESC);
+CREATE TABLE IF NOT EXISTS task_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    local_task_id TEXT NOT NULL REFERENCES tasks(local_id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    payload_json TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_task_events_task_created
+    ON task_events(local_task_id, created_at, id);
+PRAGMA user_version = 1;
+"""
+_BATCH_TABLES = """
+CREATE TABLE IF NOT EXISTS batches (
+    id TEXT PRIMARY KEY,
+    operation TEXT NOT NULL CHECK (operation IN ('generate', 'edit')),
+    name TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'paused', 'completed', 'canceled')),
+    model TEXT NOT NULL,
+    output_dir TEXT NOT NULL,
+    template_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    blocked_json TEXT
+);
+CREATE TABLE IF NOT EXISTS batch_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id TEXT NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL,
+    body_json TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    task_id TEXT,
+    status TEXT NOT NULL,
+    request_id TEXT,
+    files_json TEXT,
+    error_json TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE(batch_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS ix_batch_items_batch_status
+    ON batch_items(batch_id, status, sequence);
+"""
 
 
 def utc_now() -> str:
@@ -180,165 +230,59 @@ def connect_db(path: Path | str | None = None) -> sqlite3.Connection:
     return connection
 
 
+def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+
+
+@cache
+def _schema_columns() -> dict[str, set[str]]:
+    """Columns of every table this version creates, read back from its own DDL."""
+    scratch = sqlite3.connect(":memory:")
+    try:
+        scratch.executescript(_LEDGER_TABLES + _BATCH_TABLES)
+        tables = scratch.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        return {str(name): _table_columns(scratch, str(name)) for (name,) in tables}
+    finally:
+        scratch.close()
+
+
 def init_schema(connection: sqlite3.Connection) -> None:
-    """Create or migrate the schema without copying legacy batch tables."""
+    """Create the ledger tables, or refuse a file this version cannot read."""
 
     if connection.row_factory is None:
         connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    if version > SCHEMA_VERSION:
+    readable = version in (0, SCHEMA_VERSION)
+    for table, columns in _schema_columns().items():
+        # A table that does not exist yet has no columns: it is created below,
+        # or by ensure_batch_schema on first batch use.
+        found = _table_columns(connection, table)
+        if found and not columns <= found:
+            readable = False
+    if not readable:
+        # No table is rebuilt or converted: the file may hold the only record
+        # of an unconfirmed submission, so moving it aside is the user's call.
+        path = str(connection.execute("PRAGMA database_list").fetchone()[2])
         raise AsxError(
-            "本地任务记录由更高版本创建，请升级 Skill 后重试。",
+            f"本地任务记录与当前版本的 Skill 不兼容，无法读取：{path}。"
+            "请先升级 Skill；已是最新版本时，将该文件（连同同名的 -wal、-shm 文件）移至其他位置后重试。"
+            "移走后此前的任务记录不再显示，已生成的文件不受影响。",
             code="unsupported_state_schema",
-            details={"stored_version": version, "supported_version": SCHEMA_VERSION},
+            details={
+                "state_path": path,
+                "stored_version": version,
+                "supported_version": SCHEMA_VERSION,
+            },
         )
-
-
-    existing_tables = {
-        str(row[0])
-        for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
-        ).fetchall()
-    }
-    rebuild = False
-    for table, required_columns in _REQUIRED_COLUMNS.items():
-        if table in existing_tables:
-            columns = {
-                str(row[1])
-                for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
-            }
-            if not required_columns.issubset(columns):
-                rebuild = True
-                break
-    if rebuild:
-        # An unversioned ledger cannot be read by v1, but it may still hold the
-        # only record of an unconfirmed submission. Set it aside instead of
-        # dropping it; unrelated tables such as the batch tables stay in place.
-        suffix = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-        for table in ("assets", "task_events", "tasks"):
-            if table in existing_tables:
-                for (index,) in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? "
-                    "AND sql IS NOT NULL",
-                    (table,),
-                ).fetchall():
-                    connection.execute(f'DROP INDEX IF EXISTS "{index}"')
-                connection.execute(f'ALTER TABLE "{table}" RENAME TO "legacy_{table}_{suffix}"')
-        connection.execute("PRAGMA user_version = 0")
-        connection.commit()
-    if version in (0, SCHEMA_VERSION):
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS tasks (
-                local_id TEXT PRIMARY KEY,
-                remote_task_id TEXT UNIQUE,
-                operation TEXT NOT NULL,
-                model TEXT NOT NULL,
-                status TEXT NOT NULL,
-                idempotency_key TEXT NOT NULL UNIQUE,
-                request_json TEXT NOT NULL,
-                output_dir TEXT NOT NULL,
-                remote_json TEXT,
-                error_json TEXT,
-                billing TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                last_polled TEXT,
-                base_url TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS ix_tasks_status_updated
-                ON tasks(status, updated_at DESC);
-            CREATE INDEX IF NOT EXISTS ix_tasks_operation_created
-                ON tasks(operation, created_at DESC);
-            CREATE TABLE IF NOT EXISTS assets (
-                artifact_id TEXT PRIMARY KEY,
-                local_task_id TEXT NOT NULL REFERENCES tasks(local_id) ON DELETE CASCADE,
-                remote_index INTEGER NOT NULL CHECK (remote_index >= 0),
-                path TEXT NOT NULL,
-                remote_url TEXT,
-                mime TEXT,
-                bytes INTEGER,
-                sha256 TEXT,
-                state TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(local_task_id, remote_index)
-            );
-            CREATE INDEX IF NOT EXISTS ix_assets_task_index
-                ON assets(local_task_id, remote_index);
-            CREATE INDEX IF NOT EXISTS ix_assets_state_updated
-                ON assets(state, updated_at DESC);
-            CREATE TABLE IF NOT EXISTS task_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                local_task_id TEXT NOT NULL REFERENCES tasks(local_id) ON DELETE CASCADE,
-                event_type TEXT NOT NULL,
-                payload_json TEXT,
-                created_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS ix_task_events_task_created
-                ON task_events(local_task_id, created_at, id);
-            PRAGMA user_version = 1;
-            """
-        )
-    actual = {
-        str(row[0])
-        for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
-        ).fetchall()
-    }
-    required = {"tasks", "assets", "task_events"}
-    if not required.issubset(actual):
-        raise AsxError("本地任务记录不完整，请保留现有数据并联系服务支持。", code="invalid_state_schema")
+    connection.executescript(_LEDGER_TABLES)
 
 
 def ensure_batch_schema(connection: sqlite3.Connection) -> None:
-    """Add the legacy-compatible batch tables to an already-open ledger DB."""
-    connection.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS batches (
-            id TEXT PRIMARY KEY,
-            operation TEXT NOT NULL CHECK (operation IN ('generate', 'edit')),
-            name TEXT NOT NULL,
-            status TEXT NOT NULL CHECK (status IN ('active', 'paused', 'completed', 'canceled')),
-            model TEXT NOT NULL,
-            output_dir TEXT NOT NULL,
-            template_json TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            cancel_requested INTEGER NOT NULL DEFAULT 0,
-            blocked_json TEXT
-        );
-        CREATE TABLE IF NOT EXISTS batch_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            batch_id TEXT NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
-            sequence INTEGER NOT NULL,
-            body_json TEXT NOT NULL,
-            idempotency_key TEXT NOT NULL UNIQUE,
-            task_id TEXT,
-            status TEXT NOT NULL,
-            request_id TEXT,
-            files_json TEXT,
-            error_json TEXT,
-            updated_at TEXT NOT NULL,
-            UNIQUE(batch_id, sequence)
-        );
-        CREATE INDEX IF NOT EXISTS ix_batch_items_batch_status
-            ON batch_items(batch_id, status, sequence);
-        """
-    )
-    columns = {
-        str(row[1]) for row in connection.execute("PRAGMA table_info(batches)").fetchall()
-    }
-    if "cancel_requested" not in columns:
-        connection.execute(
-            "ALTER TABLE batches ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
-        )
-        connection.commit()
-    if "blocked_json" not in columns:
-        # Why submission is backing off or was paused automatically; NULL when clear.
-        connection.execute("ALTER TABLE batches ADD COLUMN blocked_json TEXT")
-        connection.commit()
+    """Create the batch tables in an already-open ledger DB."""
+    connection.executescript(_BATCH_TABLES)
 
 
 def create_task_intent(
@@ -443,7 +387,7 @@ def get_task(
 
 
 def cancel_blocked_batch_intent(connection: sqlite3.Connection, idempotency_key: str) -> bool:
-    """Honor batch cancellation, including ledgers saved by older versions."""
+    """Cancel an unsent intent whose batch or batch item has been canceled."""
     if connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'batch_items'"
     ).fetchone() is None:

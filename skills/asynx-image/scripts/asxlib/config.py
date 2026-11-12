@@ -30,18 +30,6 @@ def config_path() -> Path:
     return Path.home() / ".config" / "asynx" / "config.json"
 
 
-def legacy_config_paths() -> list[Path]:
-    """Return discoverable paths used by releases that honored XDG_CONFIG_HOME."""
-    if os.environ.get("ASYNX_CONFIG_PATH"):
-        return []
-    xdg_home = os.environ.get("XDG_CONFIG_HOME")
-    if not xdg_home:
-        return []
-    legacy = Path(xdg_home).expanduser() / "asynx" / "config.json"
-    canonical = config_path()
-    return [] if legacy == canonical else [legacy]
-
-
 def state_path() -> Path:
     override = os.environ.get("ASYNX_STATE_PATH")
     if override:
@@ -80,18 +68,9 @@ def _read_config_file(path: Path) -> dict[str, Any]:
     return value
 
 
-def read_config_with_source() -> tuple[dict[str, Any], Path | None]:
-    canonical = config_path()
-    if canonical.exists():
-        return _read_config_file(canonical), canonical
-    for path in legacy_config_paths():
-        if path.exists():
-            return _read_config_file(path), path
-    return {}, None
-
-
 def read_config() -> dict[str, Any]:
-    return read_config_with_source()[0]
+    path = config_path()
+    return _read_config_file(path) if path.exists() else {}
 
 
 def initial_poll_delay_seconds() -> float:
@@ -174,22 +153,16 @@ def _configure_command() -> str:
     return f"python3 {shlex.quote(str(script))} configure"
 
 
-def _checked_config_paths() -> list[Path]:
-    return [config_path(), *legacy_config_paths()]
-
-
 def validate_api_key(value: Any) -> str:
     if not isinstance(value, str) or not value.strip():
         canonical = config_path()
         command = _configure_command()
-        checked = [str(path) for path in _checked_config_paths()]
         raise AsxError(
             f"尚未配置可用的 LLMAPI API Key。配置文件：{canonical}。"
             f"请在自己的终端运行以下命令输入密钥（请勿发送至对话）：{command}",
             code="missing_api_key",
             details={
                 "config_path": str(canonical),
-                "checked_paths": checked,
                 "configure_command": command,
                 "credential_source": "none",
             },
@@ -246,18 +219,6 @@ def save_config(api_key: str, base_url: str) -> Path:
     return _write_config(payload, config_path())
 
 
-def migrate_legacy_config() -> Path | None:
-    """Copy a discoverable legacy config to the canonical path without deleting it."""
-    canonical = config_path()
-    if canonical.exists() or os.environ.get("ASYNX_CONFIG_PATH"):
-        return None
-    for legacy in legacy_config_paths():
-        if legacy.exists():
-            _write_config(_read_config_file(legacy), canonical)
-            return canonical
-    return None
-
-
 def _masked_key(value: Any) -> str | None:
     if not isinstance(value, str) or not value.strip() or any(char.isspace() for char in value):
         return None
@@ -268,7 +229,7 @@ def _masked_key(value: Any) -> str | None:
 
 
 def config_status() -> dict[str, Any]:
-    config, source = read_config_with_source()
+    config = read_config()
     env_key = os.environ.get("ASYNX_API_KEY")
     stored_key = config.get("api_key")
     key = env_key or stored_key
@@ -296,7 +257,7 @@ def config_status() -> dict[str, Any]:
         "configured": isinstance(key, str) and bool(key.strip()),
         "credential_source": credential_source,
         "config_path": str(canonical),
-        "loaded_config_path": str(source) if source else None,
+        "loaded_config_path": str(canonical) if canonical.exists() else None,
         "config_exists": canonical.exists(),
         "api_key_prefix": _masked_key(key),
         "key_valid": isinstance(key, str) and bool(key.strip()) and not any(char.isspace() for char in key),
@@ -307,34 +268,12 @@ def config_status() -> dict[str, Any]:
     }
 
 
-def legacy_installation_notice() -> dict[str, Any] | None:
-    """Inspect only fixed legacy entry paths; never mutate installations or state."""
-    try:
-        home = Path.home()
-        candidates = [home / agent / "skills" / "asx" for agent in (".agents", ".claude", ".codex")]
-        paths = [str(path) for path in candidates if path.exists() or path.is_symlink()]
-    except (OSError, RuntimeError):
-        # An optional cleanup reminder must not hide the command's actual result.
-        return None
-    if not paths:
-        return None
-    return {
-        "code": "legacy_skill_installation",
-        "paths": paths,
-        "message": (
-            "检测到旧版 asx 安装，Agent 可能调用到旧版本。可让 Agent 协助确认并备份旧版后重新安装；"
-            "密钥、任务记录和已生成文件均可继续使用。确认前不会移动或删除旧版。"
-        ),
-    }
-
-
 def _installation_info() -> list[dict[str, Any]]:
     current = Path(__file__).resolve().parents[2]
     candidates = [
         current,
         Path.home() / ".agents" / "skills" / "asynx-image",
         Path.home() / ".claude" / "skills" / "asynx-image",
-        Path.home() / ".codex" / "skills" / "asynx-image",
     ]
     installations: list[dict[str, Any]] = []
     seen: set[Path] = set()
@@ -379,8 +318,6 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
     installations = _installation_info()
     versions = {item["version"] for item in installations if item["version"]}
     version_ok = len(versions) <= 1
-    existing_configs = [str(path) for path in _checked_config_paths() if path.exists()]
-    config_count_ok = len(existing_configs) <= 1
     checks: list[dict[str, Any]] = [
         {
             "name": "credentials",
@@ -398,14 +335,6 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             "message": "服务地址格式正常。"
             if status["base_url_valid"]
             else "服务地址格式不正确，请检查地址配置。",
-        },
-        {
-            "name": "config_files",
-            "ok": config_count_ok,
-            "message": "配置文件检查正常。"
-            if config_count_ok
-            else "检测到多份配置文件，请确认实际使用的一份。",
-            "details": {"paths": existing_configs},
         },
         {
             "name": "skill_versions",
@@ -454,14 +383,6 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
                 "level": "warning",
                 "code": "skill_version_mismatch",
                 "message": "不同安装位置的 Asynx Skill 版本不一致，请确认实际调用的副本，并按需更新。",
-            }
-        )
-    if not config_count_ok:
-        issues.append(
-            {
-                "level": "warning",
-                "code": "multiple_config_files",
-                "message": "检测到多份 Asynx 配置文件，默认优先使用当前配置目录中的文件；请核对实际加载的路径。",
             }
         )
 
@@ -528,15 +449,12 @@ def configure(base_url_override: str | None = None) -> dict[str, Any]:
             "请在自己的终端运行配置命令并输入 API Key，请勿发送至对话。",
             code="interactive_terminal_required",
         )
-    migrated = migrate_legacy_config()
     current = read_config()
     configured_url = current.get("base_url") if isinstance(current.get("base_url"), str) else None
     base_url = validate_base_url(
         base_url_override or os.environ.get("ASYNX_BASE_URL") or configured_url or DEFAULT_BASE_URL
     )
     log(f"配置文件：{config_path()}")
-    if migrated:
-        log(f"旧配置已迁移至：{migrated}，原文件已保留。")
     if base_url != DEFAULT_BASE_URL:
         log(f"服务地址：{base_url}")
     if base_url == DEFAULT_BASE_URL:

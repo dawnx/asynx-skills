@@ -128,6 +128,7 @@ class MockState:
                 "input": body.get("input"),
                 "metadata": body.get("metadata", {}),
                 "markers": markers,
+                "idempotency_key": idempotency_key,
                 "status": "queued",
                 "polls": 0,
                 "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -162,10 +163,13 @@ class MockState:
                     task["status"] = "failed"
                     task["error"] = {
                         "code": "provider_request_rejected",
+                        # Developer text carrying upstream wording: clients must not show it.
                         "message": (
                             f"Invalid value for quality: {task['input'].get('quality', 'standard')!r}. "
                             f"Supported values are: {', '.join(SUNBURST_QUALITIES)}."
                         ),
+                        "next_step": "change_request",
+                        "user_message": "生成服务未接受本次请求，请检查所选模型、提示词和参考素材。",
                     }
                 elif isinstance(prompt, str) and "[失败测试]" in prompt:
                     task["status"] = "failed"
@@ -182,9 +186,13 @@ class MockState:
                 task["status"] = "canceled"
             return task
 
-    def list(self, status: str | None, model: str | None, limit: int) -> list[dict[str, Any]]:
+    def list(
+        self, status: str | None, model: str | None, limit: int, key: str | None = None,
+    ) -> list[dict[str, Any]]:
         with self.lock:
             tasks = list(reversed(self.tasks.values()))
+            if key is not None:
+                tasks = [task for task in tasks if task.get("idempotency_key") == key]
             if status:
                 tasks = [task for task in tasks if task["status"] == status]
             if model:
@@ -196,7 +204,7 @@ def _public_task(task: dict[str, Any], base_url: str) -> dict[str, Any]:
     status = task["status"]
     response: dict[str, Any] = {
         "id": task["id"],
-        "idempotency_key": None,
+        "idempotency_key": task.get("idempotency_key"),
         "object": "task",
         "task_type": task["task_type"],
         "model": task["model"],
@@ -264,10 +272,14 @@ def _public_task(task: dict[str, Any], base_url: str) -> dict[str, Any]:
         }
     elif status == "failed":
         response["error"] = task.get("error") or {
-            "code": "mock_failure", "message": "Mock 任务按测试要求失败"
+            "code": "mock_failure", "message": "developer text for mock_failure",
+            "next_step": "retry_later", "user_message": "Mock 任务按测试要求失败",
         }
     elif status == "canceled":
-        response["error"] = {"code": "task_canceled", "message": "Mock 任务已取消"}
+        response["error"] = {
+            "code": "canceled", "message": "The task was canceled",
+            "next_step": "change_request", "user_message": "Mock 任务已取消",
+        }
     return response
 
 
@@ -308,9 +320,23 @@ class MockHandler(BaseHTTPRequestHandler):
         )
 
     def _error(self, status: int, code: str, message: str) -> None:
+        submitting = self.command == "POST" and urlsplit(self.path).path == "/v1/tasks"
         self._send(
             status,
-            {"code": code, "message": message, "data": {"task_id": None}, "request_id": "req_mock"},
+            {
+                "code": code,
+                "message": f"developer text for {code}",
+                "data": {
+                    "task_id": None,
+                    "details": None,
+                    # Every refusal this mock issues happens before a task exists.
+                    "task_created": False if submitting else None,
+                    "next_step": "fix_account" if status in {401, 402, 403}
+                    else "retry_later" if status == 429 or status >= 500 else "change_request",
+                    "user_message": message,
+                },
+                "request_id": "req_mock",
+            },
         )
 
     def _json_body(self) -> dict[str, Any] | None:
@@ -362,7 +388,9 @@ class MockHandler(BaseHTTPRequestHandler):
                 limit = 20
             items = [
                 _public_task(task, self.base_url)
-                for task in self.server.state.list(status, model, limit)
+                for task in self.server.state.list(
+                    status, model, limit, query.get("idempotency_key", [None])[0]
+                )
             ]
             self._ok({"items": items, "next_cursor": None})
             return

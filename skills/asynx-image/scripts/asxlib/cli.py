@@ -13,7 +13,6 @@ from .config import (
     config_status,
     configure,
     doctor,
-    legacy_installation_notice,
     load_credentials,
 )
 from .constants import (
@@ -378,13 +377,11 @@ def parser() -> argparse.ArgumentParser:
     task_poll = task_commands.add_parser("poll", help="刷新一个或全部本机任务")
     task_poll.add_argument("task_id", nargs="?", help="仅刷新指定任务；省略时按 --limit 刷新多个")
     task_poll.add_argument("--limit", type=int, default=50, help="最多刷新的任务数")
-    task_recover = task_commands.add_parser("recover", help="确认提交中断的原任务，可能补提交请求")
-    task_recover.add_argument("task_id", nargs="?", help="仅处理指定任务；省略时检查最近一批记录")
-    task_recover.add_argument("--limit", type=int, default=50, help="未指定 ID 时最多检查的任务数")
-    task_recover.add_argument(
-        "--max-age-hours", type=float, default=24,
-        help="未指定 ID 时，只重新提交这段时间内创建的未确认记录；更早的仅列出，不自动提交",
+    task_recover = task_commands.add_parser(
+        "recover", help="向服务确认提交中断的原任务是否已创建；只查询，不会重新提交"
     )
+    task_recover.add_argument("task_id", nargs="?", help="仅确认指定任务；省略时检查所有尚未确认的记录")
+    task_recover.add_argument("--limit", type=int, default=50, help="未指定 ID 时最多检查的任务数")
     task_cancel = task_commands.add_parser("cancel", help="请求取消服务端的任务")
     task_cancel.add_argument("task_id")
 
@@ -484,7 +481,7 @@ def execute(args: argparse.Namespace, *, locked_root: Path | None = None) -> tup
         if args.task_command == "poll":
             return poll_local_tasks(client, args.task_id, limit=args.limit), 0
         if args.task_command == "recover":
-            result = recover_tasks(client, args.task_id, limit=args.limit, max_age_hours=args.max_age_hours)
+            result = recover_tasks(client, args.task_id, limit=args.limit)
             return result, 0 if result["ok"] else 4
         if args.task_command == "cancel":
             return cancel_local_task(client, args.task_id)
@@ -556,16 +553,11 @@ def main(*, locked_root: Path | None = None) -> NoReturn:
         payload, exit_code = AsxError(
             "操作未能完成。请保留任务 ID 并检查 Skill 版本，必要时联系服务支持；若任务已提交，请勿直接重复生成。", code="unexpected_error", exit_code=2
         ).payload(), 2
-    legacy_notice = legacy_installation_notice()
-    if legacy_notice:
-        payload["legacy_installation_notice"] = legacy_notice
     if args is not None and args.command == "configure" and sys.stdout.isatty():
         # configure is the one CLI interaction users perform themselves.
         # Keep redirected stdout JSON for callers that consume its existing contract.
         if not payload.get("ok"):
             log(payload["error"]["message"])
-        if legacy_notice:
-            log("检测到旧版 asx 入口，可让 Agent 协助检查并清理；密钥和任务记录需保留。")
     else:
         emit(payload)
     raise SystemExit(exit_code)

@@ -186,7 +186,10 @@ class CLIE2ETestCase(unittest.TestCase):
         self.assertFalse(failed["ok"])
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(failed["error"]["code"], "provider_request_rejected")
-        self.assertIn("quality", failed["error"]["message"])
+        # The service's explanation is shown; its developer text names upstream details.
+        self.assertEqual(failed["error"]["next_step"], "change_request")
+        self.assertIn("提示词", failed["error"]["message"])
+        self.assertNotIn("Supported values", failed["error"]["message"])
         self.assertEqual(failed["billing"]["status"], "released")
         self.assertEqual(failed["billing"]["captured_amount"], "0.00000000")
         self.assertEqual(failed["billing"]["released_amount"], "0.01000000")

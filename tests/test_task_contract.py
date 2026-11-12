@@ -16,12 +16,11 @@ from asxlib.errors import AsxError
 from test_audit_regressions import FakeClient
 
 
-def rejection(code, status, *, replayed=False):
-    """A refusal as the real client reports it for POST /v1/tasks."""
-    error = AsxError("rejected", code=code, http_status=status)
-    error.for_submission = True
-    error.replayed = replayed
-    return error
+def rejection(code, status, next_step, *, task_created=False):
+    """A refusal of POST /v1/tasks carrying the service's own verdict."""
+    return AsxError(
+        "rejected", code=code, http_status=status, task_created=task_created, next_step=next_step,
+    )
 
 
 class ResultClient(FakeClient):
@@ -408,58 +407,75 @@ class TaskContractTests(unittest.TestCase):
         with patch.object(cli, "_client", return_value=self.client):
             return cli.execute(cli.parser().parse_args(arguments))
 
-    def test_known_rejection_cannot_be_recovered_into_new_generation(self):
-        # Known admission rejections must not become repeated paid generation attempts.
-        for code, status in (
-            ("group_model_unavailable", 503), ("unsupported_image_size", 422),
-            ("model_unavailable", 503), ("api_key_spending_limit_exceeded", 402),
-            ("sub2api_rejected", 403), ("user_concurrency_limit_exceeded", 429),
+    def test_refused_submission_is_final_and_recovery_never_submits_it(self):
+        # A refused request must not become a paid task later, whatever its code is.
+        for code, status, step in (
+            ("unsupported_image_size", 422, "change_request"),
+            ("api_key_spending_limit_exceeded", 402, "fix_account"),
+            ("model_unavailable", 503, "retry_later"),
+            ("code_from_a_newer_service", 418, "contact_support"),
         ):
-            error = AsxError("rejected", code=code, http_status=status)
+            error = rejection(code, status, step)
             with self.subTest(code=code), patch.object(self.client, "submit", side_effect=error) as submit:
                 with self.assertRaises(AsxError) as caught:
                     self.execute(["generate", "--prompt", "cat", "--detach", "--output-dir", str(self.root)])
                 local_id = caught.exception.details["local_id"]
                 self.assertNotIn("next_action_args", caught.exception.details)
+                self.assertIs(caught.exception.payload()["error"]["task_created"], False)
                 self.assertEqual(tasks.local_task_status(local_id)["task"]["status"], "failed")
                 tasks.recover_tasks(self.client, local_id)
                 self.assertEqual(submit.call_count, 1)
 
-    def test_refused_replay_of_unanswered_submission_stays_recoverable(self):
-        # The service checks the key before it looks up the Idempotency-Key, so a
-        # refused replay must not close a record whose first attempt may have been accepted.
+    def test_unanswered_submission_is_settled_by_lookup_without_sending_it_again(self):
+        # Replaying an unanswered submission creates the task when the first attempt
+        # never arrived. Recovery asks the service instead, so it can never charge.
+        self.client.reject_submit = True
+        with self.assertRaises(AsxError) as caught:
+            self.execute(["generate", "--prompt", "cat", "--detach", "--output-dir", str(self.root)])
+        local_id = caught.exception.details["local_id"]
+        self.assertEqual(caught.exception.details["next_action_args"], ["task", "recover", local_id])
+        self.client.reject_submit = False
+
+        # Too soon after sending: the request may still be in flight.
+        pending = tasks.recover_tasks(self.client, local_id)
+        self.assertEqual(pending["tasks"][0]["error"]["code"], "submission_pending")
+        self.assertEqual(tasks.local_task_status(local_id)["task"]["status"], "submitting")
+
+        with patch.object(tasks, "SUBMISSION_SETTLE_SECONDS", 0):
+            settled = tasks.recover_tasks(self.client, local_id)
+        task = settled["tasks"][0]
+        self.assertIs(task["task_created"], False)
+        self.assertEqual(task["error"]["code"], "submission_not_created")
+        self.assertNotIn("next_action_args", task)
+        self.assertEqual(tasks.local_task_status(local_id)["task"]["status"], "failed")
+        self.assertEqual(self.client.submitted, [])
+        self.assertEqual(len(self.client.lookups), 2)
+
+    def test_recovery_binds_the_task_an_unanswered_submission_did_create(self):
+        row = self.intent("arrived", status="submitting")
+        # The first attempt reached the service although its answer was lost.
+        self.client.submitted.append((row["request"], row["idempotency_key"]))
+        self.intent("other", status="submitting")
+        result, code = self.execute(["task", "recover", row["local_id"]])
+        self.assertEqual((code, len(result["tasks"])), (0, 1))
+        self.assertEqual(result["tasks"][0]["task_id"], "task_1")
+        self.assertEqual(result["tasks"][0]["status"], "succeeded")
+        self.assertEqual(len(self.client.submitted), 1)
+        self.assertEqual(tasks.local_task_status("local_other")["task"]["status"], "submitting")
+
+    def test_reused_key_with_an_unanswered_attempt_is_looked_up_before_sending(self):
+        # Sending again under the same key is how one request became two tasks.
+        arguments = ["generate", "--prompt", "cat", "--detach", "--output-dir", str(self.root),
+                     "--idempotency-key", "order-1001"]
         self.client.reject_submit = True
         with self.assertRaises(AsxError):
-            self.execute(["generate", "--prompt", "cat", "--detach", "--output-dir", str(self.root)])
-        local_id = tasks.local_tasks_payload()["tasks"][0]["local_id"]
-        with patch.object(self.client, "submit", side_effect=rejection("invalid_api_key", 401)):
-            refused = tasks.recover_tasks(self.client, local_id)
-        self.assertFalse(refused["ok"])
-        self.assertNotIn("task_created", refused["tasks"][0]["error"])
-        self.assertEqual(tasks.local_task_status(local_id)["task"]["status"], "submitting")
+            self.execute(arguments)
         self.client.reject_submit = False
-        recovered = tasks.recover_tasks(self.client, local_id)
-        self.assertEqual(recovered["tasks"][0]["status"], "succeeded")
+        self.client.submitted.append(({"arrived": True}, "order-1001"))
+        result, code = self.execute(arguments)
+        self.assertEqual((code, result["task_id"]), (0, "task_1"))
+        self.assertEqual(self.client.lookups, ["order-1001"])
         self.assertEqual(len(self.client.submitted), 1)
-
-    def test_bulk_recovery_lists_stale_unconfirmed_submissions_without_resubmitting(self):
-        # An unattended recover must not turn a weeks-old refused request into a new paid task.
-        with state.connect_db() as connection:
-            for name, created in (("old", "2026-01-01T00:00:00+00:00"), ("fresh", state.utc_now())):
-                state.create_task_intent(
-                    connection, operation="generate", model=DEFAULT_MODEL,
-                    idempotency_key=f"asx-age-{name}", local_id=f"local_{name}", status="submitting",
-                    request={"task_type": "image.generate", "model": DEFAULT_MODEL, "input": {"prompt": name}},
-                    output_dir=str(self.root / name), base_url=self.client.base_url, created_at=created,
-                )
-            connection.commit()
-        result = tasks.recover_tasks(self.client)
-        by_id = {task["local_id"]: task for task in result["tasks"]}
-        self.assertEqual(by_id["local_old"]["skipped"], "stale")
-        self.assertEqual(by_id["local_old"]["next_action_args"], ["task", "recover", "local_old"])
-        self.assertEqual([key for _body, key in self.client.submitted], ["asx-age-fresh"])
-        tasks.recover_tasks(self.client, "local_old")
-        self.assertEqual([key for _body, key in self.client.submitted], ["asx-age-fresh", "asx-age-old"])
 
     def batch(self, total, **overrides):
         options = {
@@ -480,7 +496,8 @@ class TaskContractTests(unittest.TestCase):
         # A spending limit used to be retried every round for as long as `batch wait` ran.
         batch_id = self.batch(3)
         with patch.object(
-            self.client, "submit", side_effect=rejection("api_key_spending_limit_exceeded", 402),
+            self.client, "submit",
+            side_effect=rejection("api_key_spending_limit_exceeded", 402, "fix_account"),
         ) as submit:
             first = batches.poll_batch(self.client, batch_id)
             batches.poll_batch(self.client, batch_id)
@@ -497,7 +514,9 @@ class TaskContractTests(unittest.TestCase):
 
     def test_blocked_batch_backs_off_then_pauses_instead_of_retrying_forever(self):
         batch_id = self.batch(2)
-        with patch.object(self.client, "submit", side_effect=rejection("model_unavailable", 503)) as submit:
+        with patch.object(
+            self.client, "submit", side_effect=rejection("model_unavailable", 503, "retry_later"),
+        ) as submit:
             batches.poll_batch(self.client, batch_id)
             batches.poll_batch(self.client, batch_id)
             self.assertEqual(submit.call_count, 1)  # the second round is inside the back-off
@@ -522,7 +541,7 @@ class TaskContractTests(unittest.TestCase):
         # Reaching the account's task limit is normal back-pressure, not a failure.
         batch_id = self.batch(3)
         accept = self.client.submit
-        answers = iter([accept, rejection("user_concurrency_limit_exceeded", 429)])
+        answers = iter([accept, rejection("user_concurrency_limit_exceeded", 429, "retry_later")])
 
         def submit(body, key):
             answer = next(answers)
@@ -595,12 +614,14 @@ class TaskContractTests(unittest.TestCase):
         self.assertEqual((code, len(finished["files"])), (0, 1))
         self.assertEqual(len(self.client.submitted), 1)
 
-    def test_unknown_503_keeps_idempotent_recovery_available(self):
+    def test_answer_without_a_verdict_keeps_the_submission_open_for_lookup(self):
+        # A 5xx that does not say whether the task exists must not be read as "no task".
         error = AsxError("unavailable", code="http_503", http_status=503)
         with patch.object(self.client, "submit", side_effect=error), self.assertRaises(AsxError) as caught:
             self.execute(["generate", "--prompt", "cat", "--detach", "--output-dir", str(self.root)])
         local_id = caught.exception.details["local_id"]
         self.assertEqual(caught.exception.details["next_action_args"], ["task", "recover", local_id])
+        self.assertNotIn("task_created", caught.exception.payload()["error"])
         self.assertEqual(tasks.local_task_status(local_id)["task"]["status"], "submitting")
 
     def test_refresh_by_local_or_remote_id_downloads_without_submission(self):
@@ -666,19 +687,6 @@ class TaskContractTests(unittest.TestCase):
         self.assertEqual(self.client.submitted, [])
         self.assertEqual(self.client.asset_attempts, [])
 
-    def test_scoped_recovery_reuses_key_and_leaves_other_intents_untouched(self):
-        chosen = self.intent("chosen")
-        other = self.intent("other")
-        result, code = self.execute(["task", "recover", chosen["local_id"], "--limit", "1"])
-        self.assertEqual(code, 0)
-        self.assertTrue(result["ok"])
-        self.assertEqual(len(result["tasks"]), 1)
-        self.assertEqual(result["tasks"][0]["local_id"], chosen["local_id"])
-        self.assertEqual(self.client.submitted, [(chosen["request"], chosen["idempotency_key"])])
-        unchanged = tasks.local_task_status(other["local_id"])["task"]
-        self.assertEqual(unchanged["status"], "intent")
-        self.assertNotIn("task_id", unchanged)
-
     def test_scoped_recovery_accepts_remote_id_without_resubmitting(self):
         row = self.intent("existing", remote_id="task_existing", status="queued")
         self.intent("pending")
@@ -688,30 +696,17 @@ class TaskContractTests(unittest.TestCase):
         self.assertEqual(result["tasks"][0]["local_id"], row["local_id"])
         self.assertEqual(self.client.submitted, [])
 
-    def test_scoped_recovery_preserves_paused_batch_without_submitting(self):
-        batch_id = batches.create_batch(
-            self.client, operation="generate", prompt="cat", model_selector=None,
-            image_size=None, aspect_ratio=None, quality=None, count=1,
-            output_format=None, references=[], mask=None, total=1, name=None,
-            output_dir=str(self.root / "paused_batch"),
-        )["id"]
+    def test_recovering_an_item_of_a_paused_batch_never_submits_it(self):
+        batch_id = self.batch(1, output_dir=str(self.root / "paused_batch"))
         self.client.reject_submit = True
         batches.poll_batch(self.client, batch_id)
         local_id = tasks.local_tasks_payload()["tasks"][0]["local_id"]
         batches.set_batch_paused(batch_id, True)
         self.client.reject_submit = False
-        result, code = self.execute(["task", "recover", local_id])
-        self.assertEqual(code, 0)
-        self.assertTrue(result["ok"])
-        self.assertEqual(len(result["tasks"]), 1)
-        task = result["tasks"][0]
-        self.assertEqual(task["local_id"], local_id)
-        self.assertTrue(task["paused"])
-        self.assertIn("batch_paused", [warning["code"] for warning in task["warnings"]])
-        self.assertEqual(task["next_action_args"], ["batch", "status", batch_id, "--refresh"])
+        result, _code = self.execute(["task", "recover", local_id])
+        self.assertEqual(result["tasks"][0]["error"]["code"], "submission_pending")
         self.assertEqual(batches.batch_status(batch_id)["batch"]["status"], "paused")
         self.assertEqual(self.client.submitted, [])
-        self.assertEqual(self.client.queried, [])
         self.assertNotIn("task_id", tasks.local_task_status(local_id)["task"])
 
     def test_missing_recovery_id_never_falls_back_to_all_tasks(self):
@@ -781,11 +776,6 @@ class TaskContractTests(unittest.TestCase):
         )
         self.assertEqual(self.client.submitted, [])
         self.assertEqual(self.client.queried, [])
-
-    def test_legacy_recovery_without_identifier_retains_explicit_limit(self):
-        parsed = cli.parser().parse_args(["task", "recover", "--limit", "3"])
-        self.assertIsNone(parsed.task_id)
-        self.assertEqual(parsed.limit, 3)
 
 
 if __name__ == "__main__":

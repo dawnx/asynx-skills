@@ -64,7 +64,6 @@ def known_installations() -> dict[str, Path]:
     return {
         "codex": user_home / ".agents" / "skills" / "asynx-image",
         "claude": user_home / ".claude" / "skills" / "asynx-image",
-        "codex-legacy": user_home / ".codex" / "skills" / "asynx-image",
     }
 
 
@@ -334,8 +333,8 @@ def _selected_targets(selection: str) -> list[Path]:
             for p in dict.fromkeys(candidates.values())
             if p.is_dir() and installation_problem(p) != "source_checkout"
         ]
-    names = ("codex", "codex-legacy") if selection == "codex" else (selection,)
-    return [candidates[n] for n in names if n in candidates and candidates[n].is_dir()]
+    root = candidates.get(selection)
+    return [root] if root is not None and root.is_dir() else []
 
 
 def _allowed_targets() -> list[Path]:

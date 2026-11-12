@@ -26,7 +26,7 @@ def file_lock(path: Path, *, exclusive: bool = True) -> Iterator[None]:
         try:
             handle = path.open("rb")
         except FileNotFoundError:
-            # Older/manual installations may not have an installer-created lock yet.
+            # A manually installed copy has no installer-created lock yet.
             path.parent.mkdir(parents=True, exist_ok=True)
             handle = path.open("a+b")
     with handle:

@@ -55,10 +55,12 @@ python3 "<skill-dir>/scripts/asynx.py" wait "<task-id>"
 
 最近记录跨会话共享，使用前核对。`edit --from-task` 使用该任务的全部本地图片；只选一张时传 `--image`。查询用 `task status --refresh`，等待和补下载用 `wait`；均接受本地或服务端任务 ID，不重新生成。
 
-提交失败时先看错误里的 `task_created`：
+出错时按返回的数据处理，不要凭错误码猜测：
 
-- `task_created: false` 表示服务确认未创建任务、未扣费。`rejection` 为 `request` 时需调整参数或素材；为 `account` 时由用户处理账户、余额或密钥；为 `later` 时可稍后原样重新提交。
-- 没有该字段时，任务可能已受理。按返回的 `next_action_args` 确认原提交（通常是 `task recover <id>`），不要直接重新生成。
+- `error.message` 是服务给用户的说明，直接转述即可。
+- `error.next_step` 说明下一步：`change_request` 需调整参数、提示词或素材；`fix_account` 由用户处理账户、余额或密钥；`retry_later` 可稍后原样重试；`contact_support` 需联系服务支持，重试无效。任务失败时的 `error.next_step` 含义相同。
+- 提交出错且带 `task_created: false`：服务确认未创建任务、未扣费，按 `next_step` 处理后可以重新提交。
+- 提交出错而没有 `task_created`：任务可能已受理。执行返回的 `next_action_args`（`task recover <id>`）确认，不要直接重新生成。`task recover` 只向服务查询，不会提交或扣费：查到原任务就继续等待和下载；确认没有创建时返回 `task_created: false`；返回 `submission_pending` 表示原请求可能仍在途中，稍后再确认。
 
 ## 按需参考
 
@@ -79,6 +81,6 @@ python3 "<skill-dir>/scripts/asynx.py" wait "<task-id>"
 - 成功后直接交付 `files`，用绝对路径预览或提供链接；尺寸、格式等使用返回元数据。普通交付不额外查费用或评审画面，用户要求检查或排障时再展开。
 - 用自然语言说明已知错误、部分失败、下载失败和降级标记；没有原因不推断画质下降。用户明确要求接口结果时可提供脱敏 JSON。
 - 中断等待不等于取消。等待或下载已提交的任务不创建新生成；恢复未确认的提交按返回指引处理原请求。只有用户明确要新结果时才提交新任务。
-- 结果附带警告或更新提示时一并说明，升级与旧入口清理由用户提出。缺密钥时请用户在自己的终端运行 `configure`，不要在对话中索取密钥。
+- 结果附带警告或更新提示时一并说明，升级由用户提出。缺密钥时请用户在自己的终端运行 `configure`，不要在对话中索取密钥。
 
 密钥不得进入对话、命令参数、提示词、日志或项目文件。通过公开 API 或脚本接入工作流，不直接操作 Skill 的数据库与内部状态文件，也不把密钥放入浏览器代码。

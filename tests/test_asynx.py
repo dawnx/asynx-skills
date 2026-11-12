@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).parents[1]
 SCRIPTS = ROOT / "skills" / "asynx-image" / "scripts"
@@ -53,6 +54,9 @@ class FakeAsynxHandler(BaseHTTPRequestHandler):
     submission_count = 0
     submission: dict[str, Any] | None = None
     idempotency_key: str | None = None
+    # The key of a submission the service accepted although its answer was lost.
+    accepted_key: ClassVar[str | None] = None
+    lookups: ClassVar[list[str | None]] = []
     image = VALID_PNG
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -88,11 +92,18 @@ class FakeAsynxHandler(BaseHTTPRequestHandler):
         if self.path == "/v1/tasks/models":
             self._json(200, {"items": [model("gpt-image-2", mask=True), model("gemini-3.1-flash-image")]})
             return
+        if self.path.startswith("/v1/tasks?"):
+            # The exact-key lookup: the task this key created, or no items.
+            key = parse_qs(urlsplit(self.path).query).get("idempotency_key", [None])[0]
+            type(self).lookups.append(key)
+            found = key is not None and key == type(self).accepted_key
+            self._json(200, {"items": [{"id": "task_test"}] if found else [], "next_cursor": None})
+            return
         if self.path.startswith("/v1/tasks/") and "/assets/" not in self.path:
             task_id = self.path.rsplit("/", 1)[-1]
             type(self).task_reads[task_id] = type(self).task_reads.get(task_id, 0) + 1
             status = "running" if type(self).task_reads[task_id] == 1 else "succeeded"
-            self._json(200, self.task(status, task_id))
+            self._json(200, {**self.task(status, task_id), "idempotency_key": type(self).accepted_key})
             return
         if self.path.startswith("/v1/tasks/") and self.path.endswith("/assets/0"):
             self.send_response(200)
@@ -183,10 +194,14 @@ class ServerTestCase(unittest.TestCase):
 
 
 class UnitTestCase(unittest.TestCase):
-    def test_recover_resubmits_persisted_intent_with_same_idempotency_key(self) -> None:
+    def test_recover_finds_the_accepted_task_over_http_without_submitting_again(self) -> None:
+        # Recovery used to replay the request, which creates a task when none existed.
         with tempfile.TemporaryDirectory() as directory:
             FakeAsynxHandler.task_reads = {}
             FakeAsynxHandler.submission_count = 0
+            FakeAsynxHandler.accepted_key = "asx-recover-key"
+            FakeAsynxHandler.lookups = []
+            self.addCleanup(setattr, FakeAsynxHandler, "accepted_key", None)
             state_path = Path(directory) / "state.db"
             server = ThreadingHTTPServer(("127.0.0.1", 0), FakeAsynxHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -205,7 +220,7 @@ class UnitTestCase(unittest.TestCase):
                 ):
                     connection = state.connect_db()
                     try:
-                        intent = state.create_task_intent(
+                        state.create_task_intent(
                             connection,
                             operation="generate",
                             model="gpt-image-2",
@@ -219,17 +234,12 @@ class UnitTestCase(unittest.TestCase):
                     finally:
                         connection.close()
                     result = tasks.recover_tasks(client)
+                final = result
                 self.assertTrue(result["ok"])
-                self.assertEqual(result["tasks"][0]["status"], "running")
-                with patch.dict(
-                    os.environ,
-                    {"ASYNX_STATE_PATH": str(state_path)},
-                    clear=False,
-                ):
-                    final = tasks.poll_local_tasks(client, str(intent["local_id"]))
                 self.assertEqual(final["tasks"][0]["status"], "succeeded")
-                self.assertEqual(FakeAsynxHandler.submission_count, 1)
-                self.assertEqual(intent["idempotency_key"], "asx-recover-key")
+                self.assertEqual(final["tasks"][0]["task_id"], "task_test")
+                self.assertEqual(FakeAsynxHandler.lookups, ["asx-recover-key"])
+                self.assertEqual(FakeAsynxHandler.submission_count, 0)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -343,9 +353,8 @@ class UnitTestCase(unittest.TestCase):
         self.assertEqual(command[-1], installer.PILLOW_REQUIREMENT)
         self.assertFalse(pip.call_args.kwargs["check"])
 
-    def test_api_key_accepts_llmapi_and_legacy_keys(self) -> None:
+    def test_api_key_accepts_llmapi_keys(self) -> None:
         self.assertEqual(config.validate_api_key("sk-provider-key"), "sk-provider-key")
-        self.assertEqual(config.validate_api_key("asx-legacy-key"), "asx-legacy-key")
 
     def test_api_key_rejects_empty_and_whitespace_values(self) -> None:
         for value in ("", "   ", "sk-provider key"):

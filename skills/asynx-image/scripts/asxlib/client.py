@@ -23,7 +23,7 @@ from .constants import (
     TRANSIENT_HTTP_STATUSES,
     VERSION,
 )
-from .errors import AsxError, service_error_message
+from .errors import AsxError, display_text, known_next_step, transport_message
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -77,33 +77,54 @@ def _read_limited(response: Any, *, limit: int, context: str) -> bytes:
     raise AssertionError("unreachable")
 
 
+# Sent with every request: the service explains errors in the caller's language.
+_CLIENT_HEADERS = {"User-Agent": f"asx-skill/{VERSION}", "Accept-Language": "zh-CN"}
+
+
 def _api_error(status: int, raw: bytes, headers: Any) -> AsxError:
+    """An error answer, carrying the service's own guidance when it gave any."""
     request_id = headers.get("X-Request-ID") if headers is not None else None
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        payload = {}
+        payload = None
+    code = f"http_{status}"
+    data: dict[str, Any] = {}
     if isinstance(payload, dict):
-        code = str(payload.get("code") or f"http_{status}")
-        request_id = payload.get("request_id") or request_id
-        data = payload.get("data")
-        task_id = data.get("task_id") if isinstance(data, dict) else None
-        details = data.get("details") if isinstance(data, dict) else None
-        message = service_error_message(code, http_status=status, message=payload.get("message"), details=details)
-    else:
-        code = f"http_{status}"
-        message = service_error_message(code, http_status=status)
-        task_id = None
-        details = None
+        # JSON routes answer with the envelope; file transfers nest the same
+        # fields under "error". Anything else did not come from the service.
+        nested = payload.get("error")
+        body = nested if isinstance(nested, dict) else payload
+        if isinstance(body.get("code"), str) and body["code"]:
+            code = body["code"]
+        request_id = body.get("request_id") or request_id
+        data = body["data"] if isinstance(body.get("data"), dict) else body
+    task_id = data.get("task_id")
+    created = data.get("task_created")
     return AsxError(
-        message,
+        display_text(data.get("user_message")) or transport_message(status),
         code=code,
         exit_code=3,
         http_status=status,
         request_id=request_id if isinstance(request_id, str) else None,
         task_id=task_id if isinstance(task_id, str) else None,
-        details=details,
+        details=data.get("details"),
+        task_created=created if isinstance(created, bool) else None,
+        next_step=known_next_step(data.get("next_step")),
     )
+
+
+def _repeatable(error: AsxError) -> bool:
+    """Whether sending the same request again might get a different answer.
+
+    A submission the service refused is settled for this attempt, and a rate
+    limit it explained is the caller's to wait out. A 5xx, or an answer that
+    did not come from the service, is worth repeating under the same key.
+    """
+    status = error.http_status or 0
+    if error.task_created is False or status not in TRANSIENT_HTTP_STATUSES:
+        return False
+    return status >= 500 or error.next_step is None
 
 
 def _retry_after(headers: Any, attempt: int) -> float:
@@ -206,9 +227,9 @@ class AsynxClient:
             else None
         )
         headers = {
+            **_CLIENT_HEADERS,
             "Accept": "application/json",
             "Authorization": f"Bearer {self.api_key}",
-            "User-Agent": f"asx-skill/{VERSION}",
         }
         if encoded is not None:
             headers["Content-Type"] = "application/json"
@@ -246,15 +267,11 @@ class AsynxClient:
                         exc, limit=MAX_API_RESPONSE_BYTES, context="Asynx API error"
                     )
                     error = _api_error(exc.code, raw, exc.headers)
-                    if (
-                        retry_safe
-                        and error.retry_in_place
-                        and exc.code in TRANSIENT_HTTP_STATUSES
-                        and attempt + 1 < MAX_HTTP_ATTEMPTS
-                    ):
-                        unanswered = unanswered or error.submission_outcome is None
+                    if retry_safe and _repeatable(error) and attempt + 1 < MAX_HTTP_ATTEMPTS:
+                        unanswered = True
                         time.sleep(_retry_after(exc.headers, attempt))
                         continue
+                    # An earlier attempt that got no answer may have been accepted.
                     error.replayed = unanswered
                     raise error from exc
                 except (URLError, TimeoutError, OSError) as exc:
@@ -307,18 +324,38 @@ class AsynxClient:
     def submit(
         self, body: dict[str, Any], idempotency_key: str
     ) -> tuple[dict[str, Any], str | None]:
-        try:
-            return self.request_json(
-                "POST",
-                "/v1/tasks",
-                body=body,
-                idempotency_key=idempotency_key,
-                retry_safe=True,
-            )
-        except AsxError as exc:
-            # Only this request creates tasks, so only its errors report whether one exists.
-            exc.for_submission = True
-            raise
+        return self.request_json(
+            "POST",
+            "/v1/tasks",
+            body=body,
+            idempotency_key=idempotency_key,
+            retry_safe=True,
+        )
+
+    def find_submission(
+        self, idempotency_key: str
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """The task an earlier submission under this key created, or None. Creates nothing."""
+        data, request_id = self.request_json(
+            "GET",
+            f"/v1/tasks?idempotency_key={quote(idempotency_key, safe='')}&limit=2",
+            retry_safe=True,
+        )
+        items = data.get("items")
+        if not isinstance(items, list):
+            raise AsxError("暂时无法确认原提交，请稍后重试；若持续出现，请联系服务支持。", code="invalid_api_response")
+        for item in items:
+            if isinstance(item, dict) and isinstance(item.get("id"), str):
+                task, request_id = self.task(item["id"])
+                # A service that ignores the filter would hand back someone else's
+                # latest task; never bind a submission to a task it did not create.
+                if task.get("idempotency_key") != idempotency_key:
+                    raise AsxError(
+                        "服务未按请求标识返回任务，无法确认原提交。请升级 Asynx 服务后重试，不要重新生成。",
+                        code="idempotency_lookup_unsupported",
+                    )
+                return task, request_id
+        return None, request_id
 
     def quote(self, body: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
         """Price a request with the service's own planner; creates and charges nothing."""
@@ -367,7 +404,7 @@ class AsynxClient:
                     "download_url": download_url,
                 }
             )
-        headers = {"User-Agent": f"asx-skill/{VERSION}"}
+        headers = dict(_CLIENT_HEADERS)
         if _origin(url) == _origin(self.base_url):
             headers["Authorization"] = f"Bearer {self.api_key}"
         opener = build_opener(_NoRedirect())
@@ -405,7 +442,7 @@ class AsynxClient:
                             allow_local=urlsplit(self.base_url).hostname
                             in {"localhost", "127.0.0.1", "::1"},
                         )
-                        headers = {"User-Agent": f"asx-skill/{VERSION}"}
+                        headers = dict(_CLIENT_HEADERS)
                         if _origin(next_url) == _origin(self.base_url):
                             headers["Authorization"] = f"Bearer {self.api_key}"
                         url = next_url
@@ -465,7 +502,7 @@ class AsynxClient:
         complete = False
         try:
             for _redirect in range(MAX_REDIRECTS + 1):
-                headers = {"User-Agent": f"asx-skill/{VERSION}"}
+                headers = dict(_CLIENT_HEADERS)
                 if _origin(url) == _origin(self.base_url):
                     headers["Authorization"] = f"Bearer {self.api_key}"
                 for attempt in range(MAX_HTTP_ATTEMPTS):

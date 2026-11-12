@@ -43,8 +43,8 @@ class LedgerMaintenanceTests(unittest.TestCase):
         environment = patch.dict(os.environ, {"ASYNX_STATE_PATH": str(self.root / "state.db")})
         environment.start()
         self.addCleanup(environment.stop)
-        # Rows are written with plain SQL so they look like a ledger saved by an
-        # older version, whatever the current write path does to new records.
+        # Rows are written with plain SQL so finished records still hold inline
+        # images, whatever the current write path does to new records.
         self.connection = state.connect_db()
         self.addCleanup(self.connection.close)
         state.ensure_batch_schema(self.connection)

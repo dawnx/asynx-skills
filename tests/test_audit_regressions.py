@@ -24,6 +24,7 @@ class FakeClient:
 
     def __init__(self):
         self.submitted = []
+        self.lookups = []
         self.downloaded = []
         self.statuses = {}
         self.reject_submit = False
@@ -41,6 +42,14 @@ class FakeClient:
             raise AsxError("connection interrupted", code="network_error")
         self.submitted.append((body, key))
         return {"id": f"task_{len(self.submitted)}", "status": "queued"}, "submit"
+
+    def find_submission(self, key):
+        # The service's exact-key lookup: the task that key created, or nothing.
+        self.lookups.append(key)
+        for index, (_body, submitted_key) in enumerate(self.submitted, start=1):
+            if submitted_key == key:
+                return self.task(f"task_{index}")
+        return None, "lookup"
 
     def task(self, task_id):
         status = self.statuses.get(task_id, "succeeded")
@@ -112,7 +121,7 @@ class AuditRegressionTests(unittest.TestCase):
         batches.poll_batch(self.client, batch_id)
         self.assertEqual(self.client.submitted, [])
 
-    def test_recovery_honors_legacy_cancellation_with_stale_ledger(self):
+    def test_recovery_honors_batch_cancellation_with_stale_ledger(self):
         batch_id = self.create_batch()
         self.client.reject_submit = True
         batches.poll_batch(self.client, batch_id)
@@ -124,14 +133,19 @@ class AuditRegressionTests(unittest.TestCase):
         self.assertEqual(self.client.submitted, [])
         self.assertEqual(tasks.local_tasks_payload()["tasks"][0]["status"], "canceled")
 
-    def test_uncanceled_batch_intent_is_still_recoverable(self):
+    def test_batch_item_with_an_unanswered_attempt_is_looked_up_before_resending(self):
+        # Resending blindly is how one batch item could become two paid tasks.
         batch_id = self.create_batch()
         self.client.reject_submit = True
         batches.poll_batch(self.client, batch_id)
         self.client.reject_submit = False
-        result = tasks.recover_tasks(self.client)
-        self.assertTrue(result["ok"])
+        with batches.connect_db() as connection:  # the back-off after the failed round has passed
+            connection.execute("UPDATE batches SET blocked_json = NULL WHERE id = ?", (batch_id,))
+            connection.commit()
+        batches.poll_batch(self.client, batch_id)
+        self.assertEqual(len(self.client.lookups), 1)
         self.assertEqual(len(self.client.submitted), 1)
+        self.assertEqual(batches.batch_status(batch_id)["batch"]["status"], "completed")
 
     def test_missing_files_redownload_for_active_and_completed_batches(self):
         for total in (1, 2):

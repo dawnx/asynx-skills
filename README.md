@@ -67,7 +67,7 @@ Windows 环境下将最后一行改为 `py install.py`。
 
 3D 模型可由文字描述或单张图片生成，交付 GLB 文件及预览图，可指定面数上限以及是否生成贴图与 PBR 材质。已生成的模型可检查能否绑定骨骼，再绑定骨骼、套用动画，或转换为 glTF、FBX、USDZ、OBJ、STL、3MF；骨骼绑定、每个动画与每次转换均为单独计费的任务。同一操作有多个可用 3D 模型时须指定模型。参数详情见[3D 模型操作](skills/asynx-image/references/model3d.md)。
 
-等待中断或下载失败时，可继续获取原结果，无需重新生成。提交被服务拒绝时会明确说明任务未创建、未扣费，以及需要调整参数、处理账户还是稍后再试。取消已开始的任务仍可能产生费用。
+等待中断或下载失败时，可继续获取原结果，无需重新生成。提交被服务拒绝时会明确说明任务未创建、未扣费，以及需要调整参数、处理账户还是稍后再试。提交过程中断、不确定是否成功时，Agent 会先向服务查询原任务，不会重复提交。取消已开始的任务仍可能产生费用。
 
 结果默认保存在当前目录的 `generated-images` 下，按日期与描述命名子目录；可在[配置与维护](skills/asynx-image/references/setup.md#本机数据与保存目录)中设置固定的保存目录，或清理本机任务记录（不删除已生成的文件）。
 
@@ -90,7 +90,7 @@ python3 ~/.agents/skills/asynx-image/scripts/asynx.py configure
 
 ## 更新与卸载
 
-可直接要求 Agent“检查 Asynx Skill 更新”或“升级 Asynx Skill”。有新版本时会给出提示，仅在用户要求升级时才会安装。升级保留密钥、任务记录与已生成文件；通过其他工具安装的副本应使用原工具更新。手动更新、回滚及旧版安装处理见[更新说明](skills/asynx-image/references/setup.md#更新与回滚)。
+可直接要求 Agent“检查 Asynx Skill 更新”或“升级 Asynx Skill”。有新版本时会给出提示，仅在用户要求升级时才会安装。升级保留密钥、任务记录与已生成文件；通过其他工具安装的副本应使用原工具更新。手动更新与回滚见[更新说明](skills/asynx-image/references/setup.md#更新与回滚)。
 
 使用本仓库安装器安装的副本，卸载时在克隆的仓库根目录运行：
 
@@ -106,6 +106,6 @@ Windows 使用 `py install.py --uninstall`。其他方式安装的副本，请�
 - [视频操作](skills/asynx-image/references/video.md)：视频参数、参考素材与视频批次。
 - [3D 模型操作](skills/asynx-image/references/model3d.md)：文字或图片生成 GLB 模型，绑定检查、骨骼绑定、动画与格式转换，参数、交付与恢复。
 - [模型与提示词](skills/asynx-image/references/model-prompting.md)：复杂编辑、多参考图及图文排版的提示词建议。
-- [配置与维护](skills/asynx-image/references/setup.md)：自托管地址、诊断、更新与迁移。
+- [配置与维护](skills/asynx-image/references/setup.md)：自托管地址、诊断与更新。
 
 需要接入自有工作流或工作台时，可调用公开 API 或封装脚本命令。任务应通过公开接口管理，请勿直接操作 Skill 的数据库；密钥交由可信后端或本地程序保管。

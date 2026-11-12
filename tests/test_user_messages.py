@@ -17,133 +17,87 @@ sys.path.insert(0, str(ROOT / "skills/asynx-image/scripts"))
 
 from asxlib import cli, config, tasks
 from asxlib.client import _api_error
-from asxlib.errors import AsxError, friendly_task_error
+from asxlib.errors import AsxError, task_error
 
 import install as installer
 
 
+def answer(status, code, **data):
+    """An error envelope as the service sends it."""
+    return _api_error(status, json.dumps({
+        "code": code, "message": "developer-text-with-upstream-secret",
+        "data": {"task_id": None, "details": None, **data}, "request_id": "req_test",
+    }).encode(), {})
+
+
 class UserMessageTests(unittest.TestCase):
-    def test_parameter_feedback_matches_submission_and_terminal_without_retry(self):
-        for details, expected in [
-            ({"field": "input.count", "reason": "count_limit", "maximum": 1}, "最多可生成 1 张"),
-            ({"field": "input.reference_images", "reason": "reference_limit", "maximum": 10}, "参考图 10 张"),
-            ({"field": "input.reference_images", "reason": "total_image_limit", "maximum": 15}, "合计最多 15 张"),
-            ({"field": "input.image_size", "reason": "unsupported_size", "allowed": ["1K", "1.5K", "2K"]}, "1K、1.5K、2K"),
-            ({"field": "input.output_format", "reason": "unsupported_format", "allowed": ["png", "jpeg"]}, "png、jpeg"),
-            ({"field": "input.background", "reason": "transparent_requires_single_alpha_png"}, "单张带 Alpha"),
-            ({"field": "input.extra", "reason": "unsupported_sequential"}, "不支持组图参数"),
-            ({"field": "input.extra", "reason": "unsupported_option"}, "附加参数"),
-            ({"field": "input.quality", "reason": "unsupported_option"}, "质量（quality）"),
-            ({"field": "input.extra.optimize_prompt_options", "reason": "unsupported_option", "allowed": ["standard"]}, "可选值：standard"),
-        ]:
-            with self.subTest(details=details):
-                remote = {"code": "unsupported_image_parameters", "message": "private-provider-text", "details": details}
-                error = _api_error(422, json.dumps({**remote, "data": {"details": details}}).encode(), {})
-                self.assertIn(expected, error.message)
-                self.assertNotIn("private-provider-text", error.message)
-                self.assertTrue(error.submission_rejected)
-                terminal = tasks.task_payload({"id": "parameter-task", "status": "failed", "error": remote}, None)
-                self.assertEqual(terminal["error"]["message"], error.message)
-                self.assertNotIn("next_action_args", terminal)
-                error.task_id = "accepted-task"
-                self.assertFalse(error.submission_rejected)
-        unsafe = friendly_task_error({
-            "code": "unsupported_image_parameters", "message": "private-value",
-            "details": {"reason": "unsupported_format", "allowed": ["private-value"]},
+    def test_service_guidance_is_reported_and_its_developer_text_is_not(self):
+        # The client used to translate codes itself and went stale with every new one.
+        error = answer(
+            402, "code_this_client_has_never_seen", task_created=False,
+            next_step="fix_account", user_message="额度不足，请调整后再提交。",
+        )
+        payload = error.payload()
+        self.assertEqual(payload["error"]["message"], "额度不足，请调整后再提交。")
+        self.assertEqual(payload["error"]["next_step"], "fix_account")
+        self.assertIs(payload["error"]["task_created"], False)
+        self.assertEqual((payload["error"]["code"], payload["request_id"]), ("code_this_client_has_never_seen", "req_test"))
+        self.assertNotIn("upstream-secret", json.dumps(payload, ensure_ascii=False))
+
+    def test_only_the_service_can_say_that_no_task_was_created(self):
+        # A wrong "not created" turns one request into two paid tasks.
+        self.assertTrue(answer(503, "model_unavailable", task_created=False).submission_rejected)
+        for unsettled in (
+            answer(503, "model_unavailable"),                       # the service did not say
+            answer(500, "internal_error", task_created=None),       # it could not tell
+            answer(409, "x", task_created=False, task_id="task_1"),  # a task ID always wins
+            _api_error(502, b"<html>bad gateway</html>", {}),       # not the service at all
+        ):
+            self.assertFalse(unsettled.submission_rejected)
+            self.assertNotIn("task_created", unsettled.payload()["error"])
+        replayed = answer(401, "invalid_api_key", task_created=False)
+        replayed.replayed = True  # an earlier attempt under the same key got no answer
+        self.assertFalse(replayed.submission_rejected)
+
+    def test_answers_without_guidance_get_a_generic_message_and_hostile_text_is_contained(self):
+        proxy = _api_error(502, b"<html>upstream-secret</html>", {})
+        self.assertEqual(proxy.code, "http_502")
+        self.assertRegex(proxy.message, r"[\u4e00-\u9fff]")
+        self.assertNotIn("upstream-secret", proxy.message)
+        self.assertIsNone(proxy.next_step)
+        hostile = answer(422, "x", next_step="run_this_command", user_message="行一\x1b[31m" + "长" * 5000)
+        self.assertIsNone(hostile.next_step)
+        self.assertNotIn("\x1b", hostile.message)
+        self.assertLessEqual(len(hostile.message), 1000)
+        # File transfers nest the same fields under "error".
+        nested = _api_error(410, json.dumps({"error": {
+            "code": "asset_expired", "message": "dev", "next_step": "change_request",
+            "user_message": "结果文件已超过保留期。",
+        }}).encode(), {})
+        self.assertEqual((nested.code, nested.message, nested.next_step),
+                         ("asset_expired", "结果文件已超过保留期。", "change_request"))
+
+    def test_failed_task_reports_the_service_explanation_never_its_developer_text(self):
+        # Administrator wording arrives as user_message; "message" may carry upstream text.
+        shown = task_error({
+            "code": "task_failed", "message": "upstream said: secret-provider-error",
+            "next_step": "change_request", "user_message": "提示词触发了内容策略，请修改后重试。",
+            "phase": "running", "details": {"field": "input.quality"},
         })
-        self.assertNotIn("private-value", unsafe["message"])
-
-    def test_api_errors_preserve_identity_without_echoing_remote_body(self):
-        for code, status in (("invalid_api_key", 401), ("unexpected_service_error", 502), ("busy", 429)):
-            with self.subTest(code=code):
-                error = _api_error(status, json.dumps({
-                    "code": code, "message": "private-service-body-and-key",
-                    "request_id": "req_test", "data": {"task_id": "task_test"},
-                }).encode(), {})
-                payload = error.payload()
-                self.assertEqual(payload["error"]["code"], code)
-                self.assertEqual(payload["error"]["http_status"], status)
-                self.assertEqual(payload["request_id"], "req_test")
-                self.assertEqual(payload["task_id"], "task_test")
-                self.assertNotIn("private-service-body-and-key", json.dumps(payload))
-                self.assertRegex(payload["error"]["message"], r"[\u4e00-\u9fff]")
-
-    def test_model_unavailable_message_hides_configuration_without_inventing_recovery(self):
-        error = _api_error(503, json.dumps({"code": "group_model_unavailable", "data": {"task_id": None}}).encode(), {})
-        self.assertIn("模型暂不可用", error.message)
-        self.assertNotRegex(error.message, "分组|渠道|路由|配置")
-        self.assertTrue(error.submission_rejected)
-        error.task_id = "task_existing"
-        self.assertFalse(error.submission_rejected)
-
-    def test_size_rejection_preserves_safe_options_without_retrying_or_echoing_provider_text(self):
-        details = {"requested_size": "1000x1000", "allowed_sizes": ["1024x1024", "1536x1024"]}
-        remote = {"code": "unsupported_image_size", "message": "private-provider-text", "details": details}
-        error = _api_error(422, json.dumps({**remote, "data": {"details": details}}).encode(), {})
-        self.assertTrue(error.submission_rejected)
-        self.assertIn("1000x1000", error.message)
-        self.assertIn("1536x1024", error.message)
-        self.assertNotIn("private-provider-text", error.message)
-        result = tasks.task_payload({"id": "task_size", "status": "failed", "error": remote}, "req_size")
-        self.assertEqual(result["error"]["details"], details)
-        self.assertEqual(result["error"]["message"], error.message)
-        self.assertNotIn("next_action_args", result)
-        remote["details"] = {"requested_size": "secret", "allowed_sizes": ["https://secret.example"]}
-        self.assertNotIn("secret", friendly_task_error(remote)["message"])
-        remote["details"] = {"size_source": "tier", "requested_tier": "2K",
-                             "requested_aspect_ratio": "16:9", "submitted_size": "2048x1152"}
-        tier_result = tasks.task_payload({"id": "task_tier", "status": "failed", "error": remote}, None)
-        self.assertIn("2K、16:9", tier_result["error"]["message"])
-        self.assertIn("服务支持", tier_result["error"]["message"])
-        self.assertNotIn("next_action_args", tier_result)
-        remote["details"] = {"size_source": "exact", "requested_size": "2000x1000"}
-        exact_result = friendly_task_error(remote)
-        self.assertIn("本地调整", exact_result["message"])
-        self.assertNotIn("2048x", exact_result["message"])
-
-    def test_result_error_does_not_expose_network_details_or_claim_success(self):
-        for code in ("provider_result_unavailable", "invalid_provider_result"):
-            with self.subTest(code=code):
-                result = friendly_task_error({"code": code, "message": "unsafe result URL 198.18.0.14 SSRF"})
-                self.assertEqual(result["code"], code)
-                self.assertNotRegex(result["message"], "198\\.18|SSRF|unsafe|已生成")
-                self.assertIn("避免重复生成", result["message"])
-
-    def test_task_error_keeps_parameter_and_phase_without_echoing_values(self):
-        remote = {
-            "code": "provider_request_rejected", "phase": "submit",
-            "message": "Invalid value for quality: 'private-value'. Supported values are: 'auto'.",
-        }
-        result = tasks.task_payload({"id": "task_test", "status": "failed", "error": remote}, "req_test")
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["error"]["code"], remote["code"])
-        self.assertEqual(result["error"]["phase"], "submit")
-        self.assertIn("quality", result["error"]["message"])
-        self.assertNotIn("private-value", result["error"]["message"])
-        self.assertIn("private-value", remote["message"])
-
-    def test_provider_endpoint_error_does_not_suggest_changing_generation_inputs(self):
-        for status in (404, 405):
-            with self.subTest(status=status):
-                remote = {"code": "provider_endpoint_unavailable", "message": "private upstream URL"}
-                error = _api_error(status, json.dumps(remote).encode(), {})
-                terminal = tasks.task_payload({"id": "endpoint-task", "status": "failed", "error": remote}, None)
-                self.assertEqual(error.message, terminal["error"]["message"])
-                self.assertIn("接口或模型路由不可用", error.message)
-                self.assertNotRegex(error.message, "提示词|素材|参数|private|重新提交")
-                self.assertNotIn("next_action_args", terminal)
-        missing = _api_error(404, json.dumps({"code": "task_not_found"}).encode(), {})
-        self.assertIn("未找到该任务", missing.message)
-        self.assertNotIn("渠道配置", missing.message)
-
-    def test_terminal_error_without_details_does_not_invent_a_cause(self):
+        self.assertEqual(shown, {
+            "code": "task_failed", "message": "提示词触发了内容策略，请修改后重试。",
+            "next_step": "change_request", "phase": "running", "details": {"field": "input.quality"},
+        })
+        bare = task_error({"code": "unknown", "message": "secret-provider-error"}, "failed")
+        self.assertNotIn("secret-provider-error", bare["message"])
+        self.assertEqual(bare["next_step"], "retry_later")
         for status in ("failed", "timeout", "canceled"):
-            error = friendly_task_error(None, status)
-            self.assertEqual(error["code"], f"task_{status}")
-            self.assertRegex(error["message"], r"[\u4e00-\u9fff]")
-        unknown = friendly_task_error({"code": "unknown", "message": "secret-provider-error"}, "failed")
-        self.assertNotIn("secret-provider-error", unknown["message"])
-        self.assertIn("未提供", unknown["message"])
+            self.assertEqual(task_error(None, status)["code"], f"task_{status}")
+        terminal = tasks.task_payload({"id": "task_x", "status": "failed", "error": {
+            "code": "provider_request_rejected", "message": "private", "user_message": "请检查提示词。",
+        }}, None)
+        self.assertEqual(terminal["error"]["message"], "请检查提示词。")
+        self.assertNotIn("next_action_args", terminal)
 
     def test_old_local_remote_error_is_readable_but_download_guidance_is_preserved(self):
         remote_error = {"code": "task_failed", "message": "private-service-message"}
@@ -171,8 +125,7 @@ class UserMessageTests(unittest.TestCase):
                      ["generate", "--prompt", "test", "--unknown", "private-value"]):
             output = io.StringIO()
             with patch.object(sys, "argv", ["asynx.py", *args]), patch.object(cli, "execute") as execute, \
-                 patch.object(cli, "legacy_installation_notice", return_value=None), contextlib.redirect_stdout(output), \
-                 self.assertRaises(SystemExit) as raised:
+                     contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as raised:
                 cli.main()
             self.assertEqual(raised.exception.code, 2)
             payload = json.loads(output.getvalue())
@@ -185,8 +138,7 @@ class UserMessageTests(unittest.TestCase):
         output = io.StringIO()
         with patch.object(sys, "argv", ["asynx.py", "recent"]), \
              patch.object(cli, "execute", side_effect=ValueError("private-exception-body")), \
-             patch.object(cli, "legacy_installation_notice", return_value=None), contextlib.redirect_stdout(output), \
-             self.assertRaises(SystemExit) as raised:
+             contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as raised:
             cli.main()
         self.assertEqual(raised.exception.code, 2)
         self.assertNotIn("private-exception-body", output.getvalue())

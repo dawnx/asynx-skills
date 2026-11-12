@@ -45,7 +45,7 @@ class ModelCacheScopeTests(unittest.TestCase):
             self.assertNotIn(second.api_key, raw)
             self.assertNotIn("0.01", raw)
 
-    def test_legacy_unscoped_catalog_is_ignored(self):
+    def test_unscoped_catalog_is_ignored(self):
         client = AsynxClient("https://catalog.test", "asx-private")
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ, {"ASYNX_CACHE_PATH": str(Path(directory) / "models.json")}
