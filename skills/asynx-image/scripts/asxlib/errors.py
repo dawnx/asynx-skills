@@ -89,6 +89,8 @@ def service_error_message(code: str, *, http_status: int | None = None, message:
             allowed = details.get("allowed")
             safe_values = {
                 "unsupported_size": {"1K", "1.5K", "2K", "3K", "4K"},
+                # Out-of-range exact pixels: the service lists the tiers to choose from.
+                "invalid_dimensions": {"1K", "1.5K", "2K", "3K", "4K"},
                 "unsupported_format": {"png", "jpeg", "webp", "svg", "gif"},
                 "unsupported_background": {"opaque", "transparent", "auto"},
                 "unsupported_option": {"standard", "fast"}
