@@ -1,6 +1,6 @@
 # Asynx Agent Skills
 
-在支持 Agent Skills 且可执行 Python 脚本的 Agent 中，通过自然语言生成或编辑图片、制作 SVG 矢量图与 GIF 动画，并可由文字或图片生成 3D 模型。支持参考图、批量生成、进度查询与中断恢复，亦可在本机完成缩放、裁剪、切图与格式转换。
+在支持 Agent Skills 且可执行 Python 脚本的 Agent 中，通过自然语言生成或编辑图片、制作 SVG 矢量图与 GIF 动画，并可由文字或图片生成 3D 模型，为其绑定骨骼、套用动画与转换格式。支持参考图、批量生成、进度查询与中断恢复，亦可在本机完成缩放、裁剪、切图与格式转换。
 
 ## 安装
 
@@ -46,6 +46,7 @@ Windows 环境下将最后一行改为 `py install.py`。
 - “把这张产品图作为首帧，生成 5 秒的环绕展示视频，伴随轻柔音乐。”
 - “生成一把木质扶手椅的 3D 模型。”
 - “用刚才那张产品图生成 3D 模型，面数控制在 5 万以内。”
+- “给刚才的角色模型绑定骨骼，加一个走路动画，再导出 FBX。”
 - “生成 12 张不同配色的键盘图，先提交，稍后我再查进度。”
 - “继续上次的任务，完成后把结果给我。”
 - “把这张图片裁成正方形，再转成 WebP。”
@@ -64,7 +65,7 @@ Windows 环境下将最后一行改为 `py install.py`。
 
 视频支持指定时长、画幅与分辨率，对白、音效或配乐要求可直接写入描述。支持图片与首尾帧输入；视频、音频参考须提供 URL。参数详情见[视频操作](skills/asynx-image/references/video.md)。
 
-3D 模型可由文字描述或单张图片生成，交付 GLB 文件及预览图，可指定面数上限以及是否生成贴图与 PBR 材质。账户有多个可用 3D 模型时须指定模型。参数详情见[3D 模型操作](skills/asynx-image/references/model3d.md)。
+3D 模型可由文字描述或单张图片生成，交付 GLB 文件及预览图，可指定面数上限以及是否生成贴图与 PBR 材质。已生成的模型可检查能否绑定骨骼，再绑定骨骼、套用动画，或转换为 glTF、FBX、USDZ、OBJ、STL、3MF；骨骼绑定、每个动画与每次转换均为单独计费的任务。同一操作有多个可用 3D 模型时须指定模型。参数详情见[3D 模型操作](skills/asynx-image/references/model3d.md)。
 
 等待中断或下载失败时，可继续获取原结果，无需重新生成。提交被服务拒绝时会明确说明任务未创建、未扣费，以及需要调整参数、处理账户还是稍后再试。取消已开始的任务仍可能产生费用。
 
@@ -103,7 +104,7 @@ Windows 使用 `py install.py --uninstall`。其他方式安装的副本，请�
 
 - [操作参考](skills/asynx-image/references/operations.md)：批量任务、本地图片工具、输入限制与中断恢复。
 - [视频操作](skills/asynx-image/references/video.md)：视频参数、参考素材与视频批次。
-- [3D 模型操作](skills/asynx-image/references/model3d.md)：文字或图片生成 GLB 模型、参数、交付与恢复。
+- [3D 模型操作](skills/asynx-image/references/model3d.md)：文字或图片生成 GLB 模型，绑定检查、骨骼绑定、动画与格式转换，参数、交付与恢复。
 - [模型与提示词](skills/asynx-image/references/model-prompting.md)：复杂编辑、多参考图及图文排版的提示词建议。
 - [配置与维护](skills/asynx-image/references/setup.md)：自托管地址、诊断、更新与迁移。
 

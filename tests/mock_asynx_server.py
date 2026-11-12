@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
 import socket
 import threading
+import zipfile
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -26,13 +28,52 @@ GLB = (
     b"glTF" + (2).to_bytes(4, "little") + (20 + len(_GLB_JSON)).to_bytes(4, "little")
     + len(_GLB_JSON).to_bytes(4, "little") + b"JSON" + _GLB_JSON
 )
-MODEL_3D = {
-    "name": "tripo-h3.1",
-    "modality": "model",
-    "task_types": ["model.generate"],
-    "capabilities": {"task_types": ["model.generate"]},
-    "pricing": {"mode": "per_request", "amount": "0.20000000", "currency": "USD"},
-}
+# A binary FBX header for transport tests, not a loadable scene.
+FBX = b"Kaydara FBX Binary  \x00\x1a\x00" + (7400).to_bytes(4, "little") + bytes(13)
+
+
+def _archive() -> bytes:
+    # A conversion delivered as an archive holding the model. ZipInfo's fixed
+    # entry date keeps the bytes identical in the server and the test process.
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(zipfile.ZipInfo("model.obj"), "v 0 0 0\n")
+    return buffer.getvalue()
+
+
+MODEL_ZIP = _archive()
+
+
+def _model3d(name: str, *task_types: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "modality": "model",
+        "task_types": list(task_types),
+        "capabilities": {"task_types": list(task_types)},
+        "pricing": {"mode": "per_request", "amount": "0.20000000", "currency": "USD"},
+    }
+
+
+MODEL_3D = _model3d("tripo-h3.1", "model.generate")
+# Operators publish the follow-up operations as separate catalog entries.
+MODELS_3D = [
+    MODEL_3D,
+    _model3d("tripo-rig", "model.rig_check", "model.rig"),
+    _model3d("tripo-animate", "model.retarget"),
+    _model3d("tripo-convert", "model.convert"),
+]
+
+
+def _model_file(task: dict[str, Any]) -> tuple[bytes, str]:
+    """The file a 3D task delivers: GLB unless its request names another format."""
+    output = task["input"].get("output")
+    requested = output["formats"][0] if isinstance(output, dict) and output.get("formats") else "glb"
+    if requested == "glb":
+        return GLB, "model/gltf-binary"
+    if requested == "fbx":
+        return FBX, "application/vnd.autodesk.fbx"
+    # Any other conversion arrives as an archive holding the model.
+    return MODEL_ZIP, "application/zip"
 
 
 def _model(name: str, *, mask: bool) -> dict[str, Any]:
@@ -56,7 +97,23 @@ class MockState:
         self.replays = 0
         self.model_requests = 0
 
-    def submit(self, body: dict[str, Any], idempotency_key: str) -> tuple[dict[str, Any], bool, bool]:
+    def markers(self, body: dict[str, Any]) -> str | None:
+        """Test markers for a new task: its prompt, or for a 3D follow-up those of its source.
+
+        ``None`` means the request names a source task that does not exist.
+        """
+        task_input = body.get("input")
+        source = task_input.get("source") if isinstance(task_input, dict) else None
+        if not isinstance(source, dict):
+            prompt = task_input.get("prompt") if isinstance(task_input, dict) else None
+            return prompt if isinstance(prompt, str) else ""
+        with self.lock:
+            task = self.tasks.get(str(source.get("task_id")))
+        return None if task is None else str(task["markers"])
+
+    def submit(
+        self, body: dict[str, Any], idempotency_key: str, markers: str
+    ) -> tuple[dict[str, Any], bool, bool]:
         with self.lock:
             existing_id = self.idempotency.get(idempotency_key)
             if existing_id:
@@ -70,6 +127,7 @@ class MockState:
                 "model": body.get("model"),
                 "input": body.get("input"),
                 "metadata": body.get("metadata", {}),
+                "markers": markers,
                 "status": "queued",
                 "polls": 0,
                 "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -163,18 +221,28 @@ def _public_task(task: dict[str, Any], base_url: str) -> dict[str, Any]:
     if status == "succeeded":
         video = task["task_type"] == "video.generate"
         response["result_quality"] = "expected"
-        if task["task_type"] == "model.generate":
+        if task["task_type"] == "model.rig_check":
+            # A check delivers its answer as data and no files; "not riggable" still succeeds.
+            riggable = "[不可绑定]" not in task["markers"]
+            response["result"] = {
+                "assets": [],
+                "data": {"riggable": riggable, "recommended_rig_type": "biped" if riggable else None},
+            }
+            return response
+        if task["task_type"].startswith("model."):
             links = [f"{base_url}/v1/tasks/{task['id']}/assets/{index}" for index in (0, 1)]
+            content, content_type = _model_file(task)
             response["result"] = {
                 "assets": [{
                     "index": 0, "id": f"asset_{task['id']}", "kind": "model", "role": "output_model",
-                    "content_type": "model/gltf-binary", "size_bytes": len(GLB),
+                    "content_type": content_type, "size_bytes": len(content),
                     "width": None, "height": None, "download_url": links[0],
                 }],
+                # Rigged and animated models come without a preview image.
                 "auxiliary_assets": [{
                     "index": 1, "id": f"asset_{task['id']}_preview", "kind": "image", "role": "output_preview",
                     "content_type": "image/png", "width": 1, "height": 1, "download_url": links[1],
-                }],
+                }] if task["task_type"] in {"model.generate", "model.convert"} else [],
                 "image_count": None,
             }
             return response
@@ -281,7 +349,7 @@ class MockHandler(BaseHTTPRequestHandler):
             with self.server.state.lock:
                 self.server.state.model_requests += 1
             self._ok({"items": [
-                _model("gpt-image-2", mask=True), _model("gemini-3.1-flash-image", mask=False), MODEL_3D,
+                _model("gpt-image-2", mask=True), _model("gemini-3.1-flash-image", mask=False), *MODELS_3D,
             ]})
             return
         if path == "/v1/tasks":
@@ -304,8 +372,10 @@ class MockHandler(BaseHTTPRequestHandler):
             if task is None:
                 self._error(404, "not_found", "Mock Task 不存在")
                 return
-            model3d = task["task_type"] == "model.generate"
-            if match[1] == "preview" and not model3d:
+            model3d = task["task_type"].startswith("model.")
+            if (
+                match[1] == "preview" and task["task_type"] not in {"model.generate", "model.convert"}
+            ) or (match[1] == "asset" and task["task_type"] == "model.rig_check"):
                 self._error(404, "not_found", "Mock 路由不存在")
                 return
             if match[1] in {"asset", "preview"}:
@@ -317,14 +387,14 @@ class MockHandler(BaseHTTPRequestHandler):
                 content = MP4 if video else PNG
                 content_type = "video/mp4" if video else "image/png"
                 if model3d and match[1] == "asset":
-                    prompt = str(task["input"].get("prompt") or "")
+                    content, content_type = _model_file(task)
+                    markers = task["markers"]
+                    follow_up = isinstance(task["input"].get("source"), dict)
                     # Both bodies arrive whole, so only content checks can tell they are not a model.
-                    content = (
-                        GLB[:-4] if "[截断模型]" in prompt
-                        else b"<html>Access denied</html>" if "[非模型文件]" in prompt
-                        else GLB
-                    )
-                    content_type = "model/gltf-binary"
+                    if "[截断模型]" in markers or (follow_up and "[截断后续]" in markers):
+                        content = content[:-4]
+                    elif "[非模型文件]" in markers:
+                        content = b"<html>Access denied</html>"
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(content)))
                 self.end_headers()
@@ -346,7 +416,11 @@ class MockHandler(BaseHTTPRequestHandler):
             if not key:
                 self._error(400, "invalid_idempotency_key", "缺少 Idempotency-Key")
                 return
-            task, replayed, drop = self.server.state.submit(body, key)
+            markers = self.server.state.markers(body)
+            if markers is None:
+                self._error(404, "model_source_not_found", "Mock 来源 Task 不存在")
+                return
+            task, replayed, drop = self.server.state.submit(body, key, markers)
             if drop:
                 try:
                     self.connection.shutdown(socket.SHUT_RDWR)

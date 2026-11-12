@@ -1,6 +1,6 @@
 ---
 name: asynx-image
-description: 通过 Asynx 生成和编辑图片、制作 SVG 矢量图与 GIF 动画、生成视频，由文字或图片生成 3D 模型（GLB），支持参考素材、批量任务、进度查询、中断恢复及本地图片处理。
+description: 通过 Asynx 生成和编辑图片、制作 SVG 矢量图与 GIF 动画、生成视频，由文字或图片生成 3D 模型（GLB）并为其绑定骨骼、套用动画、转换格式，支持参考素材、批量任务、进度查询、中断恢复及本地图片处理。
 ---
 
 # Asynx 图像创作
@@ -72,7 +72,7 @@ python3 "<skill-dir>/scripts/asynx.py" wait "<task-id>"
 | 安装、配置、默认保存目录、清理任务记录、升级或排障 | [配置与维护](references/setup.md) |
 | 模型探索、推荐、提示词优化或复杂构图 | [模型与提示词](references/model-prompting.md) |
 | 视频 | [视频操作](references/video.md) |
-| 3D 模型（文字或图片生成 GLB） | [3D 模型操作](references/model3d.md) |
+| 3D 模型（文字或图片生成 GLB，绑定检查、骨骼绑定、动画、格式转换） | [3D 模型操作](references/model3d.md) |
 
 ## 交付与边界
 

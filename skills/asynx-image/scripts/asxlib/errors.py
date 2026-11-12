@@ -90,6 +90,10 @@ _SERVICE_MESSAGES = {
     "invalid_base64_image": "参考图内容无法解析，请确认文件可正常打开，或重新导出图片。",
     "unsupported_image_format": "参考图需为 PNG、JPEG 或 WebP 格式，请转换格式后重试。",
     "animated_image_not_supported": "不支持动画或多帧图片作为输入，请选取一帧保存为静态图片。",
+    # The earlier task a 3D follow-up names as its source.
+    "model_source_not_found": "未找到来源任务，本次未创建任务。请检查任务 ID，并确认使用的是创建该任务时的账户。",
+    "model_source_not_ready": "来源任务尚未成功完成，或其模型文件已不可用，本次未创建任务。请先确认来源任务的状态。",
+    "model_source_incompatible": "当前没有可用渠道能够处理该来源模型，本次未创建任务。动画须由完成骨骼绑定的同一渠道执行；可稍后再试，持续出现时请联系服务支持。",
     # Existing tasks and their results.
     "task_not_cancelable": "任务已结束，无法取消；是否产生费用以该任务的计费结果为准。",
     "task_content_blocked": "该任务的结果已被停用，无法下载。如有疑问请联系服务支持。",
@@ -214,6 +218,15 @@ def service_error_message(code: str, *, http_status: int | None = None, message:
         for parameter, label in (("quality", "质量"), ("aspect_ratio", "画幅比例"), ("image_size", "图片尺寸")):
             if f"Invalid value for {parameter}:" in message or f"param: {parameter}" in message:
                 return f"生成服务不接受当前的{label}（{parameter}）参数，请按所选模型支持的值调整后再提交。"
+    if code == "model_source_incompatible" and isinstance(details, dict):
+        # A type mismatch names what is accepted; without it no channel can take the source.
+        accepted = details.get("accepted_task_types")
+        known = {"model.generate": "3D 模型生成", "model.rig": "骨骼绑定", "model.retarget": "动画"}
+        if isinstance(accepted, list) and accepted and all(isinstance(name, str) and name in known for name in accepted):
+            return (
+                "来源任务的类型不适用于该操作，本次未创建任务。可作为来源的任务："
+                + "、".join(known[name] for name in accepted) + "。"
+            )
     if code == "sub2api_rejected" and http_status in {401, 403}:
         return "API Key 无效、已停用或无权使用该服务，请在 LLMAPI 控制台检查密钥后，在终端重新配置。"
     if code in _SERVICE_MESSAGES:

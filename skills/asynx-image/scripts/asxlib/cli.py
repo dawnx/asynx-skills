@@ -24,6 +24,13 @@ from .constants import (
 )
 from .errors import AsxError
 from .local_images import execute_local_image
+from .models3d import (
+    CONVERT_FORMATS,
+    MODEL_COMMAND_TASK_TYPES,
+    RIG_TYPES,
+    RIGGED_FORMATS,
+    SKELETON_PROFILES,
+)
 from .output import emit, log
 from .tasks import (
     cancel_local_task,
@@ -174,6 +181,15 @@ def _add_video_input_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--reference-audio", action="append", help="参考音频的 HTTP(S) 链接，可重复传入")
 
 
+def _add_model_task_options(parser: argparse.ArgumentParser, *, operation: str) -> None:
+    parser.add_argument("--model", help=f"3D 模型名称；账户仅有一个可用于{operation}的 3D 模型时可省略")
+    parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help=_OUTPUT_DIR_HELP)
+    parser.add_argument("--idempotency-key", help="自定义请求标识，用于重复提交时去重")
+    parser.add_argument("--detach", action="store_true", help="提交后立即返回，之后通过 wait 等待结果")
+    parser.add_argument("--max-wait", type=float, help=_MAX_WAIT_HELP)
+    parser.add_argument("--quote", action="store_true", help=_QUOTE_HELP)
+
+
 def _add_local_output_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output", required=True, help="输出文件路径")
     parser.add_argument("--format", choices=("png", "jpeg", "jpg", "webp"), help="输出格式，默认按输出文件名后缀推断")
@@ -295,7 +311,7 @@ def parser() -> argparse.ArgumentParser:
     video_generate.add_argument("--max-wait", type=float, help=_MAX_WAIT_HELP)
     video_generate.add_argument("--quote", action="store_true", help=_QUOTE_HELP)
 
-    model = commands.add_parser("model", help="生成 3D 模型")
+    model = commands.add_parser("model", help="生成 3D 模型，并对已生成的模型做绑定检查、骨骼绑定、动画与格式转换")
     model_commands_3d = model.add_subparsers(dest="model_command", required=True)
     model_generate = model_commands_3d.add_parser("generate", help="生成并下载 GLB 3D 模型")
     model_generate.add_argument("--prompt", help="文字生成的模型描述，最多 1024 个字符；与 --image 二选一")
@@ -307,12 +323,30 @@ def parser() -> argparse.ArgumentParser:
     model_generate.add_argument("--max-faces", type=int, help="面数上限（1–2000000），实际面数可能更少")
     model_generate.add_argument("--seed", type=int, help="几何随机种子")
     model_generate.add_argument("--texture-seed", type=int, help="贴图随机种子")
-    model_generate.add_argument("--model", help="3D 模型名称；账户仅有一个可用 3D 模型时可省略")
-    model_generate.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help=_OUTPUT_DIR_HELP)
-    model_generate.add_argument("--idempotency-key", help="自定义请求标识，用于重复提交时去重")
-    model_generate.add_argument("--detach", action="store_true", help="提交后立即返回，之后通过 wait 等待结果")
-    model_generate.add_argument("--max-wait", type=float, help=_MAX_WAIT_HELP)
-    model_generate.add_argument("--quote", action="store_true", help=_QUOTE_HELP)
+    _add_model_task_options(model_generate, operation="生成")
+
+    source_help = "来源任务的本地或服务端任务 ID，须为已成功完成的{}任务"
+    rig_check = model_commands_3d.add_parser("rig-check", help="检查 3D 模型能否绑定骨骼，只返回结论，不交付文件")
+    rig_check.add_argument("--from-task", required=True, help=source_help.format(" 3D 模型生成"))
+    _add_model_task_options(rig_check, operation="绑定检查")
+
+    rig = model_commands_3d.add_parser("rig", help="为 3D 模型绑定骨骼并下载结果")
+    rig.add_argument("--from-task", required=True, help=source_help.format(" 3D 模型生成"))
+    rig.add_argument("--rig-type", choices=RIG_TYPES, help="骨骼类型；省略时由服务决定")
+    rig.add_argument("--skeleton", choices=SKELETON_PROFILES, help="骨骼命名规范，仅用于双足（biped）骨骼；省略时由服务决定")
+    rig.add_argument("--format", choices=RIGGED_FORMATS, help="输出格式，默认 glb")
+    _add_model_task_options(rig, operation="骨骼绑定")
+
+    animate = model_commands_3d.add_parser("animate", help="为已绑定骨骼的 3D 模型套用一个动画并下载结果")
+    animate.add_argument("--from-task", required=True, help=source_help.format("骨骼绑定"))
+    animate.add_argument("--animation", required=True, help="动画标识，例如 preset:walk；每个任务只套用一个动画")
+    animate.add_argument("--format", choices=RIGGED_FORMATS, help="输出格式，默认 glb")
+    _add_model_task_options(animate, operation="动画")
+
+    convert = model_commands_3d.add_parser("convert", help="将 3D 模型转换为其他文件格式并下载结果")
+    convert.add_argument("--from-task", required=True, help=source_help.format(" 3D 模型生成、骨骼绑定或动画"))
+    convert.add_argument("--format", required=True, choices=CONVERT_FORMATS, help="目标格式")
+    _add_model_task_options(convert, operation="格式转换")
 
     status = commands.add_parser("status", help="查询任务在服务端的最新状态")
     status.add_argument("task_id", help="服务端任务 ID")
@@ -474,7 +508,7 @@ def execute(args: argparse.Namespace, *, locked_root: Path | None = None) -> tup
     if args.command == "video":
         return run_submission(client, args, "video.generate")
     if args.command == "model":
-        return run_submission(client, args, "model.generate")
+        return run_submission(client, args, MODEL_COMMAND_TASK_TYPES[args.model_command])
     if args.command == "generate":
         return run_submission(client, args, "image.generate")
     if args.command == "edit":

@@ -442,8 +442,13 @@ class AsynxClient:
         *,
         metrics: dict[str, Any] | None = None,
         max_bytes: int = 512 * 1024 * 1024,
+        model_content_type: str | None = None,
     ) -> str | None:
-        """Stream into a caller-owned temporary file; publication is the caller's job."""
+        """Stream into a caller-owned temporary file; publication is the caller's job.
+
+        ``model_content_type`` is the type the service declared for a 3D result,
+        which most 3D formats need to be recognized at all.
+        """
         from .media_results import media_file_info
 
         if max_bytes <= 0:
@@ -492,7 +497,7 @@ class AsynxClient:
                                     target.write(chunk)
                             if declared is not None and total != declared:
                                 raise OSError("下载响应提前结束，文件未完整传输。")
-                            media_file_info(destination)
+                            media_file_info(destination, model_content_type_hint=model_content_type)
                             if metrics is not None:
                                 metrics.update(
                                     ttfb_seconds=response_started - request_started,

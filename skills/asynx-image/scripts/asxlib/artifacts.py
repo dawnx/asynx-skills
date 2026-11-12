@@ -5,6 +5,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from .media_results import MODEL_FILE_EXTENSIONS
+
 # The prompt is matched on its own: request_json also embeds reference images as
 # base64 Data URLs, and matching the whole document turns random base64 into hits.
 _PROMPT_SQL = "json_extract(t.request_json, '$.input.prompt')"
@@ -37,8 +39,10 @@ def _recent_rows(
     clauses: list[str] = []
     params: list[Any] = []
     if modality:
-        clauses.append("a.mime LIKE ?")
-        params.append(f"{modality}/%")
+        # Not every 3D result has a model/* type: FBX and archives are application/*.
+        others = sorted(name for name in MODEL_FILE_EXTENSIONS if not name.startswith("model/")) if modality == "model" else []
+        clauses.append("(a.mime LIKE ?" + " OR a.mime = ?" * len(others) + ")")
+        params.extend([f"{modality}/%", *others])
     if query and query.strip():
         pattern = f"%{query.strip()}%"
         clauses.append(
@@ -93,7 +97,8 @@ def recent_payload(
                     "model": row["model"],
                     "operation": row["operation"],
                     "task_type": request.get("task_type") if isinstance(request, dict) else None,
-                    "kind": str(row["mime"] or "").split("/", 1)[0] or None,
+                    "kind": "model" if row["mime"] in MODEL_FILE_EXTENSIONS
+                    else str(row["mime"] or "").split("/", 1)[0] or None,
                     "content_type": row["mime"],
                     "created_at": row["created_at"],
                     "missing": not Path(path).is_file(),

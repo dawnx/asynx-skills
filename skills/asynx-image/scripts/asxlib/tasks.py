@@ -32,8 +32,20 @@ from .images import (
     task_input_warnings,
     validate_idempotency_key,
 )
-from .media_results import attach_media_details, media_file_info
-from .models3d import body_from_model_args
+from .media_results import (
+    attach_media_details,
+    incomplete_model_file,
+    media_file_info,
+    model_content_type,
+)
+from .models3d import (
+    MODEL_OPERATION_NAMES,
+    MODEL_SOURCE_TASK_TYPES,
+    RIG_CHECK_TASK_TYPE,
+    body_from_model_args,
+    body_from_model_followup_args,
+    rig_check_answer,
+)
 from .output import log
 from .state import (
     append_event,
@@ -67,9 +79,9 @@ _STATUS_LABELS = {
 }
 _OPERATION_LABELS = {
     "image.generate": "图片生成", "image.edit": "图片编辑", "video.generate": "视频生成",
-    "model.generate": " 3D 模型生成",
+    **{task_type: f" 3D 模型{name}" for task_type, name in MODEL_OPERATION_NAMES.items()},
 }
-# Video and 3D generation take minutes, so their tasks are polled less often.
+# Video and 3D work takes minutes, so their tasks are polled less often.
 _LONG_TASK_PREFIXES = ("video.", "model.")
 
 
@@ -205,10 +217,72 @@ def _is_model_file(path: Path) -> bool:
 
 def _invalid_model_asset(task_id: str) -> AsxError:
     return AsxError(
-        "下载到的文件不是有效的 GLB 3D 模型，未作为结果交付。请稍后通过 wait 重新下载原任务，无需重新生成；"
-        "若持续出现，请保留任务 ID 并联系服务支持。",
+        "下载到的文件不是完整有效的 3D 模型文件，未作为结果交付。请稍后通过 wait 重新下载原任务，"
+        "无需重新生成或重新提交；若持续出现，请保留任务 ID 并联系服务支持。",
         code="invalid_model_asset", task_id=task_id,
     )
+
+
+def _verify_model_download(task_id: str, asset: dict[str, Any], info: dict[str, Any]) -> None:
+    """The service validated the file it stored; this catches a wrong or cut download of it."""
+    declared = model_content_type(asset.get("content_type"))
+    if info["kind"] != "model" or (declared is not None and info["content_type"] != declared):
+        raise _invalid_model_asset(task_id)
+    declared_size = asset.get("size_bytes")
+    if type(declared_size) is int and declared_size != info["size_bytes"]:
+        error = incomplete_model_file("下载到的大小与服务记录的文件大小不符。")
+        error.task_id = task_id
+        raise error
+
+
+def _model_source_task_id(identifier: str, task_type: str) -> str:
+    """Resolve ``--from-task`` to the server task ID a 3D follow-up names as its source.
+
+    A local record that already rules the source out stops the command before
+    anything is submitted; without a record the service decides.
+    """
+    connection = connect_ledger_db()
+    try:
+        row = get_ledger_task(connection, local_task_id=identifier) or get_ledger_task(
+            connection, remote_task_id=identifier
+        )
+    finally:
+        connection.close()
+    if row is None:
+        if identifier.startswith("local_"):
+            raise AsxError(f"本机未找到任务 {identifier}，请检查任务 ID，或通过 task list 查看现有任务。", code="task_not_found")
+        return identifier
+    operation = MODEL_OPERATION_NAMES[task_type]
+    accepted = MODEL_SOURCE_TASK_TYPES[task_type]
+    request = row.get("request")
+    source_type = request.get("task_type") if isinstance(request, dict) else None
+    if source_type not in accepted:
+        raise AsxError(
+            f"任务 {identifier} 不能作为{operation}的来源：需要 "
+            + "、".join(f"3D 模型{MODEL_OPERATION_NAMES[name]}" for name in accepted) + "任务的结果。"
+            + ("格式转换后的模型不能再作为来源。" if source_type == "model.convert" else ""),
+            code="model_source_incompatible",
+            details={"source_task_type": source_type, "accepted_task_types": list(accepted)},
+        )
+    status = str(row.get("status"))
+    remote_id = row.get("remote_task_id")
+    if not isinstance(remote_id, str):
+        raise AsxError(
+            f"来源任务 {identifier} 的提交尚未确认，不能用于{operation}。请先通过 task recover 确认原提交。",
+            code="model_source_not_ready",
+            details={"source_status": status, "next_action_args": ["task", "recover", identifier]},
+        )
+    if status != "succeeded":
+        ended = status in TERMINAL_STATUSES
+        raise AsxError(
+            f"来源任务 {identifier} 未成功完成（本机记录的状态：{_STATUS_LABELS.get(status, status)}），不能用于{operation}。"
+            + ("请改用成功完成的任务。" if ended else "请先等待该任务完成，再提交本操作。"),
+            code="model_source_not_ready",
+            details={"source_status": status} if ended else {
+                "source_status": status, "next_action_args": ["wait", identifier],
+            },
+        )
+    return remote_id
 
 
 def _download_previews(
@@ -314,11 +388,18 @@ def download_assets(
         temporary = _unique_output_path(directory, f"{task_id}-{index}-{secrets.token_hex(4)}", "part")
         save_started = time.perf_counter()
         try:
-            if is_video_task or is_model_task:
+            if is_model_task:
+                declared_type = model_content_type(asset.get("content_type"))
+                client.asset_to_file(
+                    task_id, index, temporary, download_url, metrics=asset_metrics,
+                    model_content_type=declared_type,
+                )
+                file_info = media_file_info(temporary, model_content_type_hint=declared_type)
+                _verify_model_download(task_id, asset, file_info)
+            elif is_video_task:
                 client.asset_to_file(task_id, index, temporary, download_url, metrics=asset_metrics)
                 file_info = media_file_info(temporary)
-                if is_model_task and file_info["kind"] != "model":
-                    raise _invalid_model_asset(task_id)
+            if is_video_task or is_model_task:
                 actual_mime = str(file_info["content_type"])
                 has_video = has_video or file_info["kind"] == "video"
                 extension = str(file_info["extension"])
@@ -479,6 +560,9 @@ def _local_task_payload(row: dict[str, Any]) -> dict[str, Any]:
         for key in ("result_quality", "result", "deadline_at", "started_at", "finished_at"):
             if remote.get(key) is not None:
                 payload[key] = remote[key]
+        payload["rig_check"] = rig_check_answer(
+            {"task_type": task_type, "status": row.get("status"), "result": remote.get("result")}
+        )
     _task_followup(payload)
     return {key: value for key, value in payload.items() if value is not None}
 
@@ -487,6 +571,9 @@ def _task_followup(payload: dict[str, Any]) -> None:
     identifier = payload.get("local_id") or payload.get("task_id")
     status = payload.get("status")
     if not identifier or status in {"failed", "timeout", "canceled", "orphaned"}:
+        return
+    if payload.get("rig_check") is not None:
+        # The answer is the whole result: there is nothing left to wait for or download.
         return
     if status in {"intent", "submitting", "unknown"} and not payload.get("task_id"):
         payload["next_action"] = "task recover"
@@ -944,6 +1031,7 @@ def task_payload(
         "request_id": request_id,
         "schema_version": 1,
         "local_id": local_id,
+        "rig_check": rig_check_answer(task),
     }
     if files is not None:
         payload["files"] = files
@@ -966,6 +1054,18 @@ def _download_task_result(
     expected_ratio: str | None = None,
     metrics: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], int]:
+    if task.get("task_type") == RIG_CHECK_TASK_TYPE:
+        # A check answers with data and delivers no files, so an empty asset list is not a failure.
+        payload = task_payload(task, request_id, local_id=local_id)
+        payload["files"] = []
+        if "rig_check" in payload:
+            return payload, 0
+        payload["ok"] = False
+        payload["error"] = {
+            "code": "missing_rig_check_result", "phase": "result",
+            "message": "绑定检查已完成，但服务未返回检查结果。请稍后通过 wait 重新查询原任务，无需重新提交。",
+        }
+        return payload, 4
     files: list[str] = []
     download_error: dict[str, Any] | None = None
     preview_warnings: list[dict[str, Any]] = []
@@ -1099,7 +1199,7 @@ def run_submission(
     initial_delay = initial_poll_delay_seconds() if not args.detach else 0.0
     wait_bound = wait_limit(args)
     log(f"正在准备{_OPERATION_LABELS[task_type]}……")
-    references = args.reference if task_type in {"image.generate", "video.generate"} else args.image
+    references = args.reference if task_type in {"image.generate", "video.generate"} else getattr(args, "image", None)
     from_task = getattr(args, "from_task", None)
     if task_type == "image.edit" and from_task:
         if references:
@@ -1113,7 +1213,11 @@ def run_submission(
                 raise AsxError("GIF/SVG 结果不能直接作为编辑输入；请明确选择静态图片，不会自动取首帧或栅格化。", code="unsupported_edit_source")
         finally:
             connection.close()
-    if task_type == "model.generate":
+    if task_type in MODEL_SOURCE_TASK_TYPES:
+        body, model, catalog_request_id = body_from_model_followup_args(
+            client, args, task_type, _model_source_task_id(str(from_task), task_type)
+        )
+    elif task_type == "model.generate":
         if from_task:
             if args.image:
                 raise AsxError("--from-task 与 --image 不能同时使用。", code="conflicting_model_inputs")
