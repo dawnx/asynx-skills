@@ -1,4 +1,4 @@
-"""Media signatures and delivery metadata without video decoding dependencies."""
+"""Media signatures and delivery metadata without video or 3D decoding dependencies."""
 
 from __future__ import annotations
 
@@ -33,8 +33,16 @@ def media_file_info(path: Path) -> dict[str, Any]:
         kind, content_type, extension = "image", "image/svg+xml", "svg"
     elif _is_mp4(header, size):
         kind, content_type, extension = "video", "video/mp4", "mp4"
+    elif header[:4] == b"glTF":
+        # Binary glTF declares its total length at bytes 8..12; anything else is a partial file.
+        if len(header) < 12 or int.from_bytes(header[8:12], "little") != size:
+            raise AsxError(
+                "3D 模型文件不完整：GLB 文件头声明的长度与实际大小不符。请通过 wait 重新下载原任务，无需重新生成。",
+                code="incomplete_model_file",
+            )
+        kind, content_type, extension = "model", "model/gltf-binary", "glb"
     else:
-        raise AsxError("无法识别结果文件格式，目前支持 PNG、JPEG、WebP、GIF、SVG 图片和 MP4 视频。", code="unsupported_media_format")
+        raise AsxError("无法识别结果文件格式，目前支持 PNG、JPEG、WebP、GIF、SVG 图片、MP4 视频和 GLB 3D 模型。", code="unsupported_media_format")
     return {
         "kind": kind, "content_type": content_type, "extension": extension,
         "size_bytes": size, "sha256": digest.hexdigest(),
@@ -61,10 +69,11 @@ def attach_media_details(
     expected_ratio: str | None = None,
     task: dict[str, Any] | None = None,
 ) -> None:
-    """Expose video files without presenting requested properties as measured facts."""
+    """Expose video and 3D files without presenting requested properties as measured facts."""
     image_paths: list[str] = []
     media: list[dict[str, Any]] = []
     videos: list[dict[str, Any]] = []
+    models: list[dict[str, Any]] = []
     for value in files:
         try:
             info = media_file_info(Path(value))
@@ -78,9 +87,13 @@ def attach_media_details(
         media.append(details)
         if info["kind"] == "image":
             image_paths.append(value)
+        elif info["kind"] == "model":
+            models.append({**details, "format": info["extension"]})
         else:
             videos.append({**details, "format": info["extension"]})
-    # A poster belongs to the same video task but need not share its aspect ratio.
-    attach_image_details(payload, image_paths, expected_ratio=None if videos else expected_ratio)
+    # A poster or preview belongs to the same task but need not share its aspect ratio.
+    attach_image_details(payload, image_paths, expected_ratio=None if videos or models else expected_ratio)
     payload["videos"] = videos
+    if models or str((task or {}).get("task_type", "")).startswith("model."):
+        payload["models"] = models
     payload["media"] = media

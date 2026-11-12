@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import re
 import secrets
 import sqlite3
 import time
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, cast
 
 from .client import AsynxClient
+from .config import default_output_root
 from .constants import (
     DEFAULT_BATCH_SUBMISSIONS_PER_POLL,
     DEFAULT_MODEL,
@@ -40,7 +44,13 @@ from .state import (
 from .state import (
     update_task as update_state_task,
 )
-from .tasks import download_assets, index_downloaded_artifacts
+from .tasks import (
+    download_assets,
+    index_downloaded_artifacts,
+    quote_payload,
+    unanswered_attempt,
+    wait_limit,
+)
 from .videos import _media_url, build_video_task, prepare_video_image
 
 
@@ -73,6 +83,151 @@ def _item_id(batch_id: str, sequence: int) -> str:
 
 def _item_key(batch_id: str, sequence: int) -> str:
     return f"asx-{batch_id}-{sequence:06d}"
+
+
+# A batch whose submissions keep failing backs off, then pauses itself: an
+# unattended ``batch wait`` must not resubmit the same refused request forever.
+BLOCKED_ROUNDS_BEFORE_PAUSE = 5
+_ITEM_KEY = "_asx_template_overrides"
+_IMAGE_ITEM_FIELDS = {"prompt", "aspect_ratio", "image_size", "size", "quality", "count"}
+_VIDEO_ITEM_FIELDS = {"prompt", "aspect_ratio", "duration", "resolution"}
+_PRICE_FIELDS = ("image_size", "size", "aspect_ratio", "quality", "count", "duration", "resolution")
+MAX_ITEMS_FILE_BYTES = 4 * 1024 * 1024
+MAX_QUOTE_GROUPS = 20
+
+
+def _blocked(batch: sqlite3.Row) -> dict[str, Any] | None:
+    try:
+        value = json.loads(batch["blocked_json"]) if batch["blocked_json"] else None
+    except (ValueError, TypeError, IndexError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _set_blocked(connection: sqlite3.Connection, batch_id: str, value: dict[str, Any] | None) -> None:
+    connection.execute(
+        "UPDATE batches SET blocked_json = ? WHERE id = ?",
+        (_json(value) if value is not None else None, batch_id),
+    )
+
+
+def _item_request(template: dict[str, Any], item_body: dict[str, Any]) -> dict[str, Any]:
+    """The request one batch item sends: the template, its overrides, or its own body."""
+    body = dict(item_body)
+    overrides = body.pop(_ITEM_KEY, None)
+    if not body.pop("_asx_inherit_template", False) and overrides is None:
+        return body
+    request = json.loads(_json(template))
+    request["metadata"] = body.get("metadata", {})
+    if isinstance(overrides, dict):
+        value = request["input"]
+        value.update(overrides)
+        if "size" in overrides:
+            value.pop("image_size", None)
+            value.pop("aspect_ratio", None)
+        elif "image_size" in overrides or "aspect_ratio" in overrides:
+            value.pop("size", None)
+    return request
+
+
+def _positive_number(value: Any) -> bool:
+    return type(value) in (int, float) and math.isfinite(float(value)) and float(value) > 0
+
+
+def read_items_file(path: str, *, video: bool) -> list[dict[str, Any]]:
+    """Read one batch item per line (JSON Lines) or a JSON array of items.
+
+    An item is a prompt string or an object with ``prompt`` and optional
+    overrides of the batch's shared parameters.
+    """
+    source = Path(path).expanduser()
+    try:
+        if source.stat().st_size > MAX_ITEMS_FILE_BYTES:
+            raise AsxError("清单文件超过 4 MiB，请拆分为多个批次。", code="invalid_items_file")
+        text = source.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise AsxError(f"清单文件读取失败，请检查路径与编码（UTF-8）：{source}", code="invalid_items_file") from exc
+    try:
+        if text.lstrip().startswith("["):
+            entries = [(index, value) for index, value in enumerate(json.loads(text), start=1)]
+        else:
+            entries = [
+                (number, json.loads(line))
+                for number, line in enumerate(text.splitlines(), start=1) if line.strip()
+            ]
+    except (ValueError, TypeError) as exc:
+        raise AsxError(
+            "清单文件须为 JSON Lines（每行一个 JSON 对象或字符串）或 JSON 数组。", code="invalid_items_file"
+        ) from exc
+    if not 1 <= len(entries) <= MAX_BATCH_ITEMS:
+        raise AsxError(f"清单须包含 1–{MAX_BATCH_ITEMS} 项。", code="invalid_batch_size")
+    allowed = _VIDEO_ITEM_FIELDS if video else _IMAGE_ITEM_FIELDS
+    items: list[dict[str, Any]] = []
+    for number, entry in entries:
+        item = {"prompt": entry} if isinstance(entry, str) else entry
+        problem: str | None = None
+        if not isinstance(item, dict) or not isinstance(item.get("prompt"), str):
+            problem = "缺少 prompt"
+        elif set(item) - allowed:
+            problem = "不支持的字段 " + "、".join(sorted(set(item) - allowed))
+        elif not 1 <= len(item["prompt"].strip()) <= (5000 if video else 32_000):
+            problem = "prompt 为空或过长"
+        elif "size" in item and ("image_size" in item or "aspect_ratio" in item):
+            problem = "size 不能与 image_size/aspect_ratio 同时指定"
+        elif "size" in item and not (
+            isinstance(item["size"], str) and re.fullmatch(r"auto|[1-9]\d*x[1-9]\d*", item["size"])
+        ):
+            problem = "size 须为 auto 或 宽x高"
+        elif "count" in item and not (type(item["count"]) is int and 1 <= item["count"] <= 10):
+            problem = "count 须为 1–10 的整数"
+        elif "duration" in item and not _positive_number(item["duration"]):
+            problem = "duration 须为正数"
+        elif "resolution" in item and item["resolution"] not in ("720p", "1080p", "2K"):
+            problem = "resolution 须为 720p、1080p 或 2K"
+        else:
+            for key in ("aspect_ratio", "image_size", "quality"):
+                if key in item and not (isinstance(item[key], str) and 0 < len(item[key].strip()) <= 32):
+                    problem = f"{key} 须为非空文本"
+        if problem:
+            raise AsxError(f"清单第 {number} 项无效：{problem}。", code="invalid_items_file")
+        items.append({key: value.strip() if isinstance(value, str) and key != "prompt" else value
+                      for key, value in item.items()})
+    return items
+
+
+def quote_batch(client: AsynxClient, template: dict[str, Any], items: list[dict[str, Any]] | None, total: int) -> dict[str, Any]:
+    """Price a batch before creating it: one service quote per distinct priced shape."""
+    from decimal import Decimal
+
+    groups: dict[str, tuple[dict[str, Any], int]] = {}
+    shapes: list[dict[str, Any] | None] = list(items) if items is not None else [None]
+    for overrides in shapes:
+        request = _item_request(template, {_ITEM_KEY: overrides} if overrides else {"_asx_inherit_template": True})
+        request.pop("metadata", None)
+        key = _json({name: request["input"].get(name) for name in _PRICE_FIELDS})
+        body, count = groups.get(key, (request, 0))
+        groups[key] = (body, count + (1 if items is not None else total))
+    if len(groups) > MAX_QUOTE_GROUPS:
+        raise AsxError(
+            f"清单中的尺寸、数量等计价参数组合超过 {MAX_QUOTE_GROUPS} 种，无法一次报价；请拆分批次。",
+            code="too_many_quote_groups",
+        )
+    amount = Decimal(0)
+    breakdown: list[dict[str, Any]] = []
+    payload: dict[str, Any] = {}
+    for key, (body, count) in groups.items():
+        payload = quote_payload(client, body, tasks=count)
+        amount += Decimal(payload["quote"]["total_amount"])
+        breakdown.append({
+            "parameters": {name: value for name, value in json.loads(key).items() if value is not None},
+            "tasks": count,
+            "amount_per_task": payload["quote"]["amount_per_task"],
+            "total_amount": payload["quote"]["total_amount"],
+        })
+    payload["quote"].pop("amount_per_task", None)
+    payload["quote"].update(tasks=sum(item["tasks"] for item in breakdown), total_amount=str(amount), groups=breakdown)
+    payload["message"] = "仅报价，未创建批次，也未产生费用。实际扣费以各任务完成后的计费结果为准。"
+    return payload
 
 
 def _available_files(raw: str | None) -> list[str]:
@@ -116,6 +271,26 @@ def batch_summary(connection: sqlite3.Connection, batch: sqlite3.Row) -> dict[st
         sum(counts.get(status, 0) for status in ("succeeded", "failed", "timeout", "canceled"))
         - pending_download
     )
+    blocked = _blocked(batch)
+    auto_paused = bool(blocked and blocked.get("auto_paused") and batch["status"] == "paused")
+    summary = _summary_fields(batch, counts, total, finished, pending_download, unsuccessful)
+    if blocked:
+        summary["submission_blocked"] = {
+            key: blocked[key] for key in ("code", "message", "since", "rounds", "retry_at", "auto_paused")
+            if blocked.get(key) is not None
+        }
+    if blocked and auto_paused:
+        summary["action_required"] = (
+            f"批次已自动暂停，未再提交剩余项目：{blocked.get('message') or '提交持续失败。'}"
+            "问题处理后请恢复批次（batch resume），再继续等待。"
+        )
+    return summary
+
+
+def _summary_fields(
+    batch: sqlite3.Row, counts: dict[str, int], total: int, finished: int,
+    pending_download: int, unsuccessful: int,
+) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "id": batch["id"],
@@ -195,9 +370,15 @@ def _insert_items(
     total: int,
     now: str,
     inherit_template: bool = False,
+    overrides: list[dict[str, Any]] | None = None,
 ) -> None:
     for sequence in range(first_sequence, first_sequence + total):
         item_body = {"_asx_inherit_template": True} if inherit_template else json.loads(_json(body))
+        if overrides is not None:
+            # Stored as differences from the template, so shared reference images are
+            # kept once. The marker is deliberately not "_asx_inherit_template": a
+            # version that predates it must fail the item, not send the template prompt.
+            item_body = {_ITEM_KEY: overrides[sequence - first_sequence]}
         item_body["metadata"] = {
             "asx_batch_id": batch_id,
             "asx_item_id": _item_id(batch_id, sequence),
@@ -242,7 +423,11 @@ def create_batch(
     last_frame: str | None = None,
     reference_videos: list[str] | None = None,
     reference_audios: list[str] | None = None,
+    items: list[dict[str, Any]] | None = None,
+    quote_only: bool = False,
 ) -> dict[str, Any]:
+    if items is not None:
+        total = len(items)
     if not 1 <= total <= MAX_BATCH_ITEMS:
         raise AsxError(
             f"批次数量须为 1–{MAX_BATCH_ITEMS}，请调整 --total。", code="invalid_batch_size"
@@ -273,10 +458,15 @@ def create_batch(
             keep_reference_original=keep_reference_original,
             options=options,
         )
+    if quote_only:
+        return quote_batch(client, body, items, total)
     batch_id = _new_batch_id()
     now = utc_now()
     resolved_output_dir = str(
-        (Path(output_dir).expanduser() if output_dir else Path(DEFAULT_OUTPUT_DIR) / batch_id).resolve()
+        (
+            Path(output_dir).expanduser() if output_dir
+            else Path(default_output_root(DEFAULT_OUTPUT_DIR)).expanduser() / batch_id
+        ).resolve()
     )
     batch_name = name.strip() if name and name.strip() else batch_id
     connection = connect_db()
@@ -304,6 +494,7 @@ def create_batch(
             total=total,
             now=now,
             inherit_template=True,
+            overrides=items,
         )
         connection.commit()
         summary = batch_summary(connection, get_batch(connection, batch_id))
@@ -616,7 +807,8 @@ def _attach_batch_results(
     download_errors: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     seen: set[str] = set()
-    template_ratio = requested_aspect_ratio(_template(batch))
+    template = _template(batch)
+    charged, billed, currency = Decimal(0), 0, "USD"
     for row in rows:
         identity = {"sequence": row["sequence"], "task_id": row["task_id"]}
         error = _item_error(row)
@@ -638,16 +830,20 @@ def _attach_batch_results(
         elif error and row["status"] not in {"failed", "timeout", "canceled"}:
             warnings.append({**identity, **error})
         remote = json.loads(row["remote_json"]) if row["remote_json"] else {}
+        billing = remote.get("billing")
+        if isinstance(billing, dict) and billing.get("actual_amount") is not None:
+            try:
+                charged += Decimal(str(billing["actual_amount"]))
+                billed += 1
+                currency = str(billing.get("currency") or currency)
+            except InvalidOperation:
+                pass
         if remote.get("result_quality") == "degraded":
             warnings.append({
                 **identity, "code": "result_degraded", "result_quality": "degraded",
                 "message": "该结果被服务标记为降级，请确认是否符合预期。",
             })
-        item_body = json.loads(row["body_json"])
-        ratio = (
-            template_ratio if item_body.get("_asx_inherit_template")
-            else requested_aspect_ratio(item_body)
-        )
+        ratio = requested_aspect_ratio(_item_request(template, json.loads(row["body_json"])))
         new_files = [path for path in available if path not in seen]
         seen.update(new_files)
         files.extend(new_files)
@@ -664,6 +860,9 @@ def _attach_batch_results(
             "code": "batch_download_incomplete",
             "message": "部分结果尚未完成下载，请继续等待或刷新该批次；请勿重新提交生成任务。",
         })
+    if billed:
+        # What this batch has actually cost so far, from each task's own billing record.
+        summary["billing"] = {"currency": currency, "actual_amount": str(charged), "billed_tasks": billed}
     if failures:
         paused_notice = summary.get("action_required", "") if batch["status"] == "paused" else ""
         summary["action_required"] = (
@@ -751,7 +950,11 @@ def poll_batch(
         if batch["status"] == "paused" and not _refresh_only:
             if _include_results:
                 _attach_batch_results(connection, batch, summary)
-            return {"ok": not summary["partial"], "batch": summary, "paused": True}
+            stopped = bool((summary.get("submission_blocked") or {}).get("auto_paused"))
+            return {
+                "ok": not summary["partial"] and not stopped, "batch": summary, "paused": True,
+                **({"auto_paused": True} if stopped else {}),
+            }
         if (
             batch["status"] == "completed"
             or (batch["status"] == "canceled" and not batch["cancel_requested"])
@@ -771,7 +974,14 @@ def poll_batch(
         artifact_warnings: list[dict[str, Any]] = []
         asset_downloads: list[dict[str, Any]] = []
         refresh_errors: list[dict[str, Any]] = []
-        pending = connection.execute(
+        template = _template(batch)
+        blocked = _blocked(batch)
+        auto_paused = False
+        backing_off = bool(
+            blocked and isinstance(blocked.get("retry_at"), str)
+            and blocked["retry_at"] > utc_now()
+        )
+        pending = [] if backing_off else connection.execute(
             "SELECT * FROM batch_items WHERE batch_id = ? AND status = 'pending' "
             "AND EXISTS (SELECT 1 FROM batches WHERE id = batch_id "
             "AND cancel_requested = 0 AND status = 'active') "
@@ -790,16 +1000,14 @@ def poll_batch(
             if claim.rowcount != 1:
                 continue
             connection.commit()
+            replay = False
             try:
-                body = json.loads(item["body_json"])
-                if body.pop("_asx_inherit_template", False):
-                    template = _template(batch)
-                    template["metadata"] = body.get("metadata", {})
-                    body = template
+                body = _item_request(template, json.loads(item["body_json"]))
                 local_task_id = f"batchitem_{int(item['id'])}"
+                replay = unanswered_attempt(get_state_task(connection, local_task_id))
                 intent = create_task_intent(
                     connection,
-                    operation=("video.generate" if _template(batch).get("task_type") == "video.generate" else str(batch["operation"])),
+                    operation=("video.generate" if template.get("task_type") == "video.generate" else str(batch["operation"])),
                     model=str(batch["model"]),
                     idempotency_key=str(item["idempotency_key"]),
                     request=body,
@@ -808,6 +1016,8 @@ def poll_batch(
                     local_id=local_task_id,
                     status="submitting",
                 )
+                if not intent.get("remote_task_id") and intent.get("status") != "submitting":
+                    update_state_task(connection, local_task_id, status="submitting")
                 connection.commit()
                 if cancel_blocked_batch_intent(connection, str(item["idempotency_key"])):
                     connection.commit()
@@ -864,26 +1074,65 @@ def poll_batch(
                     request_id=request_id,
                     error=friendly_task_error(task.get("error"), status=status) if status in {"failed", "timeout", "canceled"} else None,
                 )
+                if blocked is not None:
+                    blocked = None
+                    _set_blocked(connection, batch["id"], None)
                 connection.commit()
                 submitted += 1
             except AsxError as exc:
                 canceled = cancel_blocked_batch_intent(connection, str(item["idempotency_key"]))
-                if exc.submission_rejected:
-                    rejected_intent = get_state_task(connection, f"batchitem_{int(item['id'])}")
-                    if rejected_intent is not None and not rejected_intent.get("remote_task_id"):
-                        update_state_task(connection, str(rejected_intent["local_id"]), status="failed", error=exc.payload().get("error"))
+                exc.replayed = exc.replayed or replay
+                outcome = exc.submission_outcome if exc.for_submission else None
+                # Only a request the service will refuse again fails its item. Anything
+                # else leaves the item pending, to be sent later under the same key.
+                refused = outcome == "request" or (
+                    not exc.for_submission and exc.http_status in {400, 404, 410, 422}
+                )
+                unsent_intent = get_state_task(connection, f"batchitem_{int(item['id'])}")
+                if unsent_intent is not None and not unsent_intent.get("remote_task_id") and not canceled:
+                    if refused:
+                        update_state_task(connection, str(unsent_intent["local_id"]), status="failed", error=exc.payload().get("error"))
+                    elif outcome is not None:
+                        # Definitely not created: the next attempt starts clean, not as a replay.
+                        update_state_task(connection, str(unsent_intent["local_id"]), status="intent")
                 _update_item(
                     connection,
                     int(item["id"]),
-                    status=(
-                        "canceled" if canceled
-                        else "failed" if exc.submission_rejected or exc.http_status in {400, 404, 410, 422}
-                        else "pending"
-                    ),
+                    status="canceled" if canceled else "failed" if refused else "pending",
                     error=exc.payload().get("error"),
                 )
+                # The remaining items would meet the same answer: stop this round.
+                waiting_for_slot = outcome == "later" and exc.http_status == 429 and not canceled
+                log(
+                    f"批次 {batch['id']} 第 {item['sequence']} 项暂未提交，等待空闲名额后继续。"
+                    if waiting_for_slot
+                    else f"批次 {batch['id']} 第 {item['sequence']} 项提交失败：{exc.message}"
+                )
+                if canceled or refused:
+                    connection.commit()
+                    continue
+                if not waiting_for_slot:
+                    rounds = int((blocked or {}).get("rounds") or 0) + 1
+                    auto_paused = outcome == "account" or rounds >= BLOCKED_ROUNDS_BEFORE_PAUSE
+                    delay = min(10 * 2 ** (rounds - 1), 120)
+                    blocked = {
+                        "code": exc.code,
+                        "message": exc.message,
+                        "since": (blocked or {}).get("since") or utc_now(),
+                        "rounds": rounds,
+                        "retry_at": (datetime.now(UTC) + timedelta(seconds=delay)).isoformat(timespec="seconds"),
+                        "auto_paused": auto_paused,
+                    }
+                    _set_blocked(connection, batch["id"], blocked)
+                    if auto_paused:
+                        connection.execute(
+                            "UPDATE batches SET status = 'paused', updated_at = ? "
+                            "WHERE id = ? AND status = 'active'",
+                            (utc_now(), batch["id"]),
+                        )
+                        log(f"批次 {batch['id']} 已自动暂停：{exc.message}")
                 connection.commit()
-                log(f"批次 {batch['id']} 第 {item['sequence']} 项提交失败：{exc.message}")
+                break
 
         remote_items = connection.execute(
             "SELECT * FROM batch_items WHERE batch_id = ? AND status IN "
@@ -902,7 +1151,7 @@ def poll_batch(
             batch_local_task_id = str(state_task_row["local_id"]) if state_task_row else None
             try:
                 task, request_id = client.task(remote_task_id)
-                task.setdefault("task_type", _template(batch).get("task_type"))
+                task.setdefault("task_type", template.get("task_type"))
             except AsxError as exc:
                 refresh_errors.append({
                     "sequence": item["sequence"], "task_id": remote_task_id,
@@ -1001,7 +1250,7 @@ def poll_batch(
                         continue
                 if files and not batch_local_task_id:
                     artifact_warning = index_downloaded_artifacts(
-                        task, files, operation=("video.generate" if _template(batch).get("task_type") == "video.generate" else batch["operation"])
+                        task, files, operation=("video.generate" if template.get("task_type") == "video.generate" else batch["operation"])
                     )
                     if artifact_warning:
                         artifact_warnings.append(artifact_warning)
@@ -1037,7 +1286,13 @@ def poll_batch(
             })
         if _include_results:
             _attach_batch_results(connection, get_batch(connection, batch["id"]), result)
-        return {"ok": not bool(result.get("partial") or refresh_errors), "batch": result}
+        outcome_payload: dict[str, Any] = {
+            "ok": not bool(result.get("partial") or refresh_errors or auto_paused), "batch": result,
+        }
+        if auto_paused:
+            outcome_payload["paused"] = True
+            outcome_payload["auto_paused"] = True
+        return outcome_payload
     finally:
         connection.close()
 
@@ -1055,7 +1310,7 @@ def set_batch_paused(batch_id: str | None, paused: bool) -> dict[str, Any]:
             raise AsxError("该批次已结束或已取消，无法暂停或继续；如需更多结果请新建批次。", code="batch_finished")
         status = "paused" if paused else "active"
         connection.execute(
-            "UPDATE batches SET status = ?, updated_at = ? WHERE id = ?",
+            "UPDATE batches SET status = ?, blocked_json = NULL, updated_at = ? WHERE id = ?",
             (status, utc_now(), batch["id"]),
         )
         connection.commit()
@@ -1138,17 +1393,27 @@ def wait_for_batch(
     if max_wait < 0:
         raise AsxError("最长等待时间不能为负数；--max-wait 设为 0 表示不限时。", code="invalid_max_wait")
     started = time.monotonic()
-    while True:
-        result = poll_batch(client, batch_id, _include_results=False)
-        batch = result["batch"]
-        if result.get("paused"):
-            return _finish_batch_result(result)
-        if batch["status"] in {"completed", "canceled"} and not batch["pending_download"]:
-            return _finish_batch_result(result)
-        if max_wait and time.monotonic() - started >= max_wait:
-            result["wait_timeout"] = True
-            return _finish_batch_result(result)
-        time.sleep(interval)
+    known_id = batch_id
+    try:
+        while True:
+            result = poll_batch(client, batch_id, _include_results=False)
+            batch = result["batch"]
+            known_id = batch["id"]
+            if result.get("paused"):
+                return _finish_batch_result(result)
+            if batch["status"] in {"completed", "canceled"} and not batch["pending_download"]:
+                return _finish_batch_result(result)
+            if max_wait and time.monotonic() - started >= max_wait:
+                result["wait_timeout"] = True
+                return _finish_batch_result(result)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        raise AsxError(
+            "等待已中断，已提交的任务未取消，剩余项目尚未提交。请继续等待该批次，无需重新创建。",
+            code="interrupted",
+            exit_code=130,
+            details={"next_action_args": ["batch", "wait", *([known_id] if known_id else [])]},
+        ) from None
 
 
 def execute_batch(
@@ -1186,14 +1451,14 @@ def execute_batch(
         return result, 0 if result["ok"] else 4
     if action == "wait":
         result = wait_for_batch(
-            client, args.batch_id, interval=args.interval, max_wait=args.max_wait
+            client, args.batch_id, interval=args.interval, max_wait=wait_limit(args)
         )
         return result, 0 if result["ok"] else 4
     if action == "cancel":
         return cancel_batch(client, args.batch_id), 0
     if action == "create":
         duration = getattr(args, "duration", None)
-        log("正在创建批次并提交任务……")
+        log("正在计算批次报价……" if getattr(args, "quote", False) else "正在创建批次并提交任务……")
         references = args.reference if args.operation in {"generate", "video.generate"} else args.image
         if args.operation == "video.generate" and args.image:
             raise AsxError("视频参考图请通过 --reference 或 --first-frame 传入。", code="conflicting_batch_options")
@@ -1204,10 +1469,19 @@ def execute_batch(
             raise AsxError("图片批次不支持视频参数。", code="conflicting_batch_options")
         if args.operation == "edit" and not references:
             raise AsxError("编辑批次至少需要一张输入图片。", code="missing_edit_image")
+        items_file = getattr(args, "items_file", None)
+        if (args.prompt is None) == (items_file is None):
+            raise AsxError(
+                "请提供 --prompt（同一描述生成多份）或 --items-file（每项一条描述），二者选一。",
+                code="conflicting_batch_options",
+            )
+        items = read_items_file(items_file, video=args.operation == "video.generate") if items_file else None
+        if items is not None and args.total != 1:
+            raise AsxError("使用 --items-file 时任务数由清单决定，请不要同时指定 --total。", code="conflicting_batch_options")
         created = create_batch(
             client,
             operation=args.operation,
-            prompt=args.prompt,
+            prompt=args.prompt if items is None else items[0]["prompt"],
             model_selector=args.model,
             image_size=args.image_size,
             aspect_ratio=args.aspect_ratio,
@@ -1226,7 +1500,11 @@ def execute_batch(
             first_frame=getattr(args, "first_frame", None), last_frame=getattr(args, "last_frame", None),
             reference_videos=getattr(args, "reference_video", None),
             reference_audios=getattr(args, "reference_audio", None),
+            items=items,
+            quote_only=bool(getattr(args, "quote", False)),
         )
+        if getattr(args, "quote", False):
+            return created, 0
         for warning in created.get("warnings", []):
             log(f"提示：{warning['message']}")
         progressed = poll_batch(client, created["id"], submissions_limit=args.limit)

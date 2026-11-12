@@ -114,6 +114,38 @@ def initial_poll_delay_seconds() -> float:
     return delay
 
 
+def max_wait_seconds() -> float:
+    """Upper bound for one command's wait; 0 waits until the task's own deadline."""
+    raw = os.environ.get("ASYNX_MAX_WAIT_SECONDS")
+    value = raw if raw is not None else read_config().get("max_wait_seconds", 0)
+    try:
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise TypeError
+        limit = float(value)
+        if not math.isfinite(limit) or not 0 <= limit <= 86_400:
+            raise ValueError
+    except (TypeError, ValueError) as exc:
+        raise AsxError(
+            "单次等待上限须为 0–86400 之间的秒数（0 表示等到任务截止），请检查 max_wait_seconds "
+            "或环境变量 ASYNX_MAX_WAIT_SECONDS。",
+            code="invalid_max_wait",
+        ) from exc
+    return limit
+
+
+def default_output_root(fallback: str) -> str:
+    """Where results go when a command names no directory: environment, then config."""
+    value = os.environ.get("ASYNX_OUTPUT_DIR") or read_config().get("output_dir")
+    if value is None or value == "":
+        return fallback
+    if not isinstance(value, str) or not value.strip():
+        raise AsxError(
+            "默认保存目录须为目录路径，请检查 output_dir 或环境变量 ASYNX_OUTPUT_DIR。",
+            code="invalid_output_dir",
+        )
+    return str(Path(value.strip()).expanduser())
+
+
 def validate_base_url(value: str) -> str:
     candidate = value.strip().rstrip("/")
     parts = urlsplit(candidate)
@@ -252,7 +284,10 @@ def config_status() -> dict[str, Any]:
             normalized_base_url = "<invalid>"
     overrides = [
         name
-        for name in ("ASYNX_API_KEY", "ASYNX_BASE_URL", "ASYNX_CONFIG_PATH")
+        for name in (
+            "ASYNX_API_KEY", "ASYNX_BASE_URL", "ASYNX_CONFIG_PATH",
+            "ASYNX_OUTPUT_DIR", "ASYNX_MAX_WAIT_SECONDS",
+        )
         if os.environ.get(name)
     ]
     canonical = config_path()
@@ -449,11 +484,11 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             capable = [
                 model
                 for model in models
-                if {"image.generate", "image.edit", "video.generate"}.intersection(model.get("task_types", []))
+                if {"image.generate", "image.edit", "video.generate", "model.generate"}.intersection(model.get("task_types", []))
             ]
             if not capable:
                 raise AsxError(
-                    "连接正常，但当前没有可用的图片或视频模型。请稍后重试或联系服务支持。",
+                    "连接正常，但当前没有可用的图片、视频或 3D 模型。请稍后重试或联系服务支持。",
                     code="no_media_models",
                     exit_code=3,
                 )
@@ -461,6 +496,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
                 "ok": True,
                 "image_model_count": sum(bool({"image.generate", "image.edit"}.intersection(model.get("task_types", []))) for model in capable),
                 "video_model_count": sum("video.generate" in model.get("task_types", []) for model in capable),
+                "model3d_model_count": sum("model.generate" in model.get("task_types", []) for model in capable),
                 "request_id": request_id,
             }
         except AsxError as exc:
@@ -478,7 +514,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             {
                 "name": "api_verification",
                 "ok": verification["ok"],
-                "message": "连接检查通过，已获取可用的图片或视频模型；本次未提交生成任务。"
+                "message": "连接检查通过，已获取可用的图片、视频或 3D 模型；本次未提交生成任务。"
                 if verification["ok"]
                 else "连接检查未通过，请按下列提示处理。",
             }

@@ -217,6 +217,7 @@ class AsynxClient:
 
         url = self._url(path)
         opener = build_opener(_NoRedirect())
+        unanswered = False
         for _redirect in range(MAX_REDIRECTS + 1):
             redirected = False
             for attempt in range(MAX_HTTP_ATTEMPTS):
@@ -247,15 +248,18 @@ class AsynxClient:
                     error = _api_error(exc.code, raw, exc.headers)
                     if (
                         retry_safe
-                        and not error.submission_rejected
+                        and error.retry_in_place
                         and exc.code in TRANSIENT_HTTP_STATUSES
                         and attempt + 1 < MAX_HTTP_ATTEMPTS
                     ):
+                        unanswered = unanswered or error.submission_outcome is None
                         time.sleep(_retry_after(exc.headers, attempt))
                         continue
+                    error.replayed = unanswered
                     raise error from exc
                 except (URLError, TimeoutError, OSError) as exc:
                     if retry_safe and attempt + 1 < MAX_HTTP_ATTEMPTS:
+                        unanswered = True
                         time.sleep(_retry_after(None, attempt))
                         continue
                     raise AsxError(
@@ -282,7 +286,7 @@ class AsynxClient:
         items = data.get("items")
         if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
             raise AsxError("暂时无法获取可用模型列表，请稍后重试；若持续出现，请联系服务支持。", code="invalid_model_catalog")
-        media_models = [item for item in items if item.get("modality") in {"image", "video"}]
+        media_models = [item for item in items if item.get("modality") in {"image", "video", "model"}]
         return media_models, request_id
 
     def model_guide(self, model: str, *, examples: bool = False) -> tuple[dict[str, Any], str | None]:
@@ -303,13 +307,22 @@ class AsynxClient:
     def submit(
         self, body: dict[str, Any], idempotency_key: str
     ) -> tuple[dict[str, Any], str | None]:
-        return self.request_json(
-            "POST",
-            "/v1/tasks",
-            body=body,
-            idempotency_key=idempotency_key,
-            retry_safe=True,
-        )
+        try:
+            return self.request_json(
+                "POST",
+                "/v1/tasks",
+                body=body,
+                idempotency_key=idempotency_key,
+                retry_safe=True,
+            )
+        except AsxError as exc:
+            # Only this request creates tasks, so only its errors report whether one exists.
+            exc.for_submission = True
+            raise
+
+    def quote(self, body: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+        """Price a request with the service's own planner; creates and charges nothing."""
+        return self.request_json("POST", "/v1/tasks/quote", body=body, retry_safe=True)
 
     def task(self, task_id: str) -> tuple[dict[str, Any], str | None]:
         return self.request_json("GET", f"/v1/tasks/{quote(task_id, safe='')}", retry_safe=True)

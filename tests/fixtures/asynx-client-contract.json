@@ -337,5 +337,210 @@
         }
       }
     ]
+  },
+  "task_submission": {
+    "path": "/v1/tasks",
+    "rule": "An error response to POST /v1/tasks without data.task_id means this request created no task when its HTTP status is a 4xx other than unconfirmed_4xx_statuses, or a 5xx whose code is in rejected_5xx_codes; any other 5xx, and those 4xx statuses, leave creation unconfirmed and the client must replay the same Idempotency-Key. Among confirmed rejections, 429 and the listed 5xx codes may succeed later unchanged, 401/402/403 with a code outside request_403_codes concern the account or key, and every other 4xx requires a changed request.",
+    "unconfirmed_4xx_statuses": [
+      408,
+      425
+    ],
+    "rejected_5xx_codes": [
+      "callback_secret_unavailable",
+      "group_model_unavailable",
+      "legacy_key_group_required",
+      "login_unavailable",
+      "model_unavailable",
+      "risk_unavailable",
+      "storage_integrity_failed",
+      "sub2api_invalid_response",
+      "sub2api_not_configured",
+      "sub2api_rejected",
+      "sub2api_unavailable"
+    ],
+    "request_403_codes": [
+      "group_selection_forbidden",
+      "risk_blocked",
+      "risk_bypass_forbidden"
+    ],
+    "user_facing_errors": {
+      "account_unavailable": [
+        403
+      ],
+      "animated_image_not_supported": [
+        400
+      ],
+      "api_key_concurrency_limit_exceeded": [
+        429
+      ],
+      "api_key_spending_limit_exceeded": [
+        402
+      ],
+      "asset_expired": [
+        410
+      ],
+      "asset_unavailable": [
+        503
+      ],
+      "asynx_group_changed": [
+        409
+      ],
+      "asynx_group_unavailable": [
+        403
+      ],
+      "base64_image_too_large": [
+        413
+      ],
+      "base64_payload_too_large": [
+        413
+      ],
+      "billing_key_required": [
+        409
+      ],
+      "conflicting_image_dimensions": [
+        422
+      ],
+      "credential_owner_conflict": [
+        409
+      ],
+      "group_model_unavailable": [
+        404,
+        503
+      ],
+      "idempotency_conflict": [
+        409
+      ],
+      "identity_email_conflict": [
+        409
+      ],
+      "image_count_limit_exceeded": [
+        422
+      ],
+      "image_pixel_limit_exceeded": [
+        413
+      ],
+      "input_count_limit_exceeded": [
+        422
+      ],
+      "insufficient_scope": [
+        403
+      ],
+      "internal_error": [
+        500
+      ],
+      "invalid_api_key": [
+        401
+      ],
+      "invalid_base64_image": [
+        400
+      ],
+      "invalid_idempotency_key": [
+        400
+      ],
+      "invalid_image_size": [
+        422
+      ],
+      "invalid_user": [
+        403
+      ],
+      "legacy_key_group_required": [
+        503
+      ],
+      "llmapi_group_not_allowed": [
+        403
+      ],
+      "model_not_found": [
+        404
+      ],
+      "model_not_priced": [
+        422
+      ],
+      "model_unavailable": [
+        503
+      ],
+      "not_found": [
+        404
+      ],
+      "output_format_unavailable": [
+        422
+      ],
+      "pricing_usage_required": [
+        400
+      ],
+      "request_body_too_large": [
+        413
+      ],
+      "risk_blocked": [
+        403
+      ],
+      "risk_input_too_large": [
+        413
+      ],
+      "risk_unavailable": [
+        503
+      ],
+      "source_user_inactive": [
+        403
+      ],
+      "storage_integrity_failed": [
+        503
+      ],
+      "sub2api_account_required": [
+        403
+      ],
+      "sub2api_invalid_response": [
+        502
+      ],
+      "sub2api_not_configured": [
+        503
+      ],
+      "sub2api_rejected": [
+        401,
+        403,
+        502
+      ],
+      "sub2api_unavailable": [
+        503
+      ],
+      "sub2api_user_required": [
+        403
+      ],
+      "task_not_cancelable": [
+        409
+      ],
+      "transparent_background_unavailable": [
+        422
+      ],
+      "unsupported_asset_delivery": [
+        422
+      ],
+      "unsupported_extra_parameter": [
+        400
+      ],
+      "unsupported_image_format": [
+        400
+      ],
+      "unsupported_image_parameters": [
+        422
+      ],
+      "unsupported_image_size": [
+        400
+      ],
+      "unsupported_model_capability": [
+        422
+      ],
+      "unsupported_video_resolution": [
+        400
+      ],
+      "user_concurrency_limit_exceeded": [
+        429
+      ],
+      "user_inactive": [
+        403
+      ],
+      "validation_error": [
+        422
+      ]
+    }
   }
 }

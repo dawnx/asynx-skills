@@ -13,6 +13,22 @@ python3 "<skill-dir>/scripts/asynx.py" batch add "<batch-id>" --total 5 --prompt
 
 创建和追加会开始提交任务。`--total` 每次可创建或追加 1–1000 项，`--count` 是每个图片任务的输出张数。`create`、`add`、`poll` 单次默认最多提交 4 项，可用 `--limit` 调整。批量编辑使用 `batch create --operation edit --image "<图片路径>"`。
 
+每项描述或参数不同时，用清单一次建好，不要逐项 `batch add`：
+
+```bash
+python3 "<skill-dir>/scripts/asynx.py" batch create --items-file "/absolute/path/items.jsonl" --aspect-ratio 16:9
+```
+
+清单为 JSON Lines（每行一项）或 JSON 数组，最多 1000 项。每项是一条提示词字符串，或含 `prompt` 的对象；对象可覆盖 `aspect_ratio`、`image_size`、`size`、`quality`、`count`（视频批次为 `duration`、`resolution`、`aspect_ratio`），其余参数与参考图沿用命令行。`--items-file` 与 `--prompt`、`--total` 不同时使用。
+
+```text
+"红色机械键盘，白底产品图"
+{"prompt": "同款键盘，深绿色外壳", "image_size": "2K"}
+{"prompt": "同款键盘，方形主图", "size": "1024x1024"}
+```
+
+`batch create ... --quote` 只返回整批的服务报价（按计价参数分组列出），不创建批次、不提交、不扣费。批次结果中的 `billing` 汇总已完成任务的实际扣费。
+
 | 命令 | 作用 |
 | --- | --- |
 | `batch list` | 列出本机批次 |
@@ -27,16 +43,28 @@ python3 "<skill-dir>/scripts/asynx.py" batch add "<batch-id>" --total 5 --prompt
 
 使用当前对话确认的批次 ID。返回 `batch.files` 可直接交付，失败与下载问题见返回详情；单项失败不重做整批。进程停止后，未提交项目不会自动推进。
 
+提交受阻时批次不会无限重试：
+
+- 账户并发已满时，剩余项目保持待提交，下一轮继续，批次不暂停。
+- 账户、余额或密钥问题会立即自动暂停批次；模型暂不可用或网络持续失败时先逐轮延长间隔，连续 5 轮仍失败后自动暂停。
+- 自动暂停时返回 `auto_paused: true`，原因见 `batch.submission_blocked` 与 `action_required`。向用户说明原因，问题解决后执行 `batch resume` 再 `batch wait`；未提交的项目不会丢失，也不会重复提交已受理的项目。
+- 只有服务确认该请求本身不被接受（参数、素材等）时，才把对应项目记为失败。
+
 ## 任务恢复与取消
 
 | 情况 | 操作 |
 | --- | --- |
 | 生成完成但下载失败、文件丢失 | `wait <id>` 获取原结果 |
-| 提交中断、尚未确认是否受理 | `task recover <id>` 确认原提交，再按返回指引继续 |
+| 提交中断、尚未确认是否受理 | `task recover <id>` 用原请求标识确认原提交，再按返回指引继续 |
+| 错误带 `task_created: false` | 服务确认未创建、未扣费，无需恢复；按 `rejection` 处理后重新提交 |
 | 用户要求取消 | `task cancel <id>`；批次使用 `batch cancel <id>` |
 | 本地记录不足，需查远端历史 | `history --limit 20` |
 
-`task recover` 不带 ID 会处理多条记录，仅用于用户明确要求批量恢复；批次继续使用批次命令。取消请求不保证远端立即停止，已开始的任务可能继续计费。
+`task recover` 不带 ID 会处理多条记录，仅用于用户明确要求批量恢复；批次继续使用批次命令。恢复会用原请求标识重新发送：原提交已受理时返回原任务，未受理时会创建任务并计费。因此不带 ID 时只重新发送 24 小时内的记录（`--max-age-hours` 可调），更早的以 `skipped: "stale"` 列出，由用户决定逐个恢复或用 `task cancel <id>` 取消该记录。
+
+恢复时若被拒绝而记录仍保持未确认，属于正常情况：此前的提交结果不明，一次拒绝不能证明原任务不存在。待账户或服务恢复后再次 `task recover <id>` 即可得到确定结果。
+
+取消请求不保证远端立即停止，已开始的任务可能继续计费。
 
 ## 本地图片工具
 
@@ -74,7 +102,9 @@ python3 "<skill-dir>/scripts/asynx.py" batch add "<batch-id>" --total 5 --prompt
 
 ## 生成参数
 
-模型、尺寸及默认值遵循 [SKILL.md](../SKILL.md#生成与编辑)。单任务 `--count` 为 1–10 张，更多数量使用批次；`--output-dir` 指定保存目录。静态图仅在用户要求自动尺寸时传 `--size auto`；GIF 未指定任何尺寸时由脚本明确补 `size=auto`，避免服务补入静态图档位。
+模型、尺寸及默认值遵循 [SKILL.md](../SKILL.md#生成与编辑)。单任务 `--count` 为 1–10 张，更多数量使用批次。静态图仅在用户要求自动尺寸时传 `--size auto`。
+
+未指定 `--output-dir` 时，结果保存到默认目录下以“日期-描述-短 ID”命名的子目录；默认目录为当前目录的 `generated-images`，可在[配置](setup.md#本机数据与保存目录)中调整。用户指定了保存位置时传 `--output-dir`。
 
 ### 高级图片参数与结果格式
 
@@ -86,10 +116,10 @@ python3 "<skill-dir>/scripts/asynx.py" generate --prompt "小猫挥手，无缝�
 | 参数 | 用途 |
 | --- | --- |
 | `--background transparent` | 请求透明背景，位图使用 PNG/WebP；SVG 也可透明，JPEG 不支持 |
-| `--quality` | GPT Image 2.5/2.6 省略时补充 `high`，显式值优先。仅按模型名识别（`gpt-image-2.5`、`gpt-image-2.6` 及其 Sunburst/Flare、带日期版本）；其他模型和自定义模型名省略时不补值，需要时显式指定 |
+| `--quality` | 显式值优先。省略时脚本仅为按模型名识别出的 GPT Image 2.5/2.6（含 Sunburst/Flare 与带日期版本）补 `high`；其他模型和自定义模型名不补值，需要时显式指定 |
 | `--complexity`、`--moderation`、`--safety-identifier` | 按需传入所选服务支持的值 |
 | `--output-compression` | 压缩参数 0–100，适用于 JPEG/WebP |
-| `--frame-count`、`--frame-duration-ms` | 客户端通用边界2–64帧、20–2000ms，不是模型能力承诺；OpenAI GPT Image GIF 限2–16帧，默认9帧、200ms |
+| `--frame-count`、`--frame-duration-ms` | 仅用于 GIF。客户端只校验通用边界（2–64 帧、20–2000 ms），模型实际范围见 [GIF 动画](#gif-动画) |
 | `--svg-model`、`--svg-reasoning-effort` | 仅在用户要求时覆盖 SVG 编写模型或推理强度 |
 | `--markup "<标注.png>"` | 仅用于编辑；原图与标注支持本地文件或 Data URL，不支持 HTTP(S) URL。标注须为等大透明通道 PNG，与原图同步缩放，不能同时使用 `--mask` |
 | `--params-file "<参数.json>"` | 提供嵌套高级参数；命令参数覆盖同名字段，`size` 与档位/比例的互斥规则仍适用 |
@@ -102,12 +132,15 @@ python3 "<skill-dir>/scripts/asynx.py" generate --prompt "小猫挥手，无缝�
 
 ### GIF 动画
 
-OpenAI GPT Image 支持 `generate` 或以静态图为输入的 `edit` 请求 GIF；不得将 GIF/SVG 文件直接作为静态参考图输入。帧参数仅用于 GIF，其他格式携带时脚本直接拒绝；OpenAI GIF 不支持 Mask 或自定义 `output_compression`。客户端仅校验通用类型/资源边界，不以模型名称猜测协议或建立厂商白名单；Asynx 服务按所选适配器检查协议组合，其他服务的支持范围以其文档为准。客户端接受某值不代表官方模型支持该值。
+`generate`，或以静态图为输入的 `edit`，都可请求 GIF；GIF/SVG 文件不能作为参考图输入。帧参数仅用于 GIF，其他格式携带时脚本直接拒绝。这不等于修改已有 GIF 的帧或时序。
 
-GIF 未指定任何尺寸时，单任务和新建批次均保存 `size=auto`；编辑 GIF 不自动继承原图比例。显式 `--size` 与 `--image-size`/`--aspect-ratio` 互斥，明确参数不会被自动尺寸覆盖。批次追加先继承原模板尺寸再应用覆盖；查询、等待、恢复已受理任务不重算其保存参数。
+尺寸：未指定任何尺寸时，单任务和新建批次均保存 `size=auto`，编辑也不继承原图比例；显式 `--size` 与 `--image-size`/`--aspect-ratio` 互斥，明确参数不会被自动尺寸覆盖。批次追加先继承原模板尺寸再应用覆盖；查询、等待、恢复已受理任务不重算其保存参数。
 
-官方 GIF 支持 `size=auto` 或宽高均为16倍数的正像素尺寸，但帧数、每帧尺寸和输出数量共同受请求总像素预算及模型边界限制；文档未公开完整数值预算。不要把静态图尺寸上限当作 GIF 承诺，也不要保证 auto 一定返回512×512或指定比例。参数被拒绝后不自动猜尺寸重提。
+客户端只校验通用类型与资源边界，不按模型名猜测协议；所选模型是否支持 GIF 及参数组合由服务判断，客户端接受某值不代表模型支持。被拒绝后不自动猜尺寸重提。
 
-官方指南给出的帧时长为20–2000ms，按10ms取整；Images API Reference另写编码延迟上限655,350ms。当前客户端按指南保留20–2000ms校验，不将编码上限解释为已验证的生成范围。GIF 不支持图片流式预览和 partial images。质量与 complexity 分别控制渲染与规划，均不提供骨骼或逐帧姿态强约束，增加帧数不保证动作正确或循环无缝。
+OpenAI GPT Image 的已知限制（2026-11-07 核对[官方 GIF 指南](https://developers.openai.com/api/docs/guides/image-generation#generate-animated-gif-output)，以官方文档和模型说明为准）：
 
-参考（2026-11-07核对）：[官方GIF指南](https://developers.openai.com/api/docs/guides/image-generation#generate-animated-gif-output)、[生成参数](https://developers.openai.com/api/reference/resources/images/methods/generate)、[编辑参数](https://developers.openai.com/api/reference/resources/images/methods/edit)。
+- 2–16 帧，默认 9 帧、200 ms；帧时长 20–2000 ms，按 10 ms 取整。
+- `size` 为 `auto` 或宽高均为 16 倍数的像素尺寸。帧数、每帧尺寸与输出数量共同受请求总像素预算限制，文档未公开完整数值；不要把静态图尺寸上限当作 GIF 承诺，也不保证 `auto` 返回某个固定尺寸或比例。
+- 不支持 Mask、自定义 `output_compression`、流式预览与 partial images。
+- 质量与 complexity 分别控制渲染与规划，均不提供骨骼或逐帧姿态约束；增加帧数不保证动作正确或循环无缝。

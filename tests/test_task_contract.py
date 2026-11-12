@@ -16,6 +16,14 @@ from asxlib.errors import AsxError
 from test_audit_regressions import FakeClient
 
 
+def rejection(code, status, *, replayed=False):
+    """A refusal as the real client reports it for POST /v1/tasks."""
+    error = AsxError("rejected", code=code, http_status=status)
+    error.for_submission = True
+    error.replayed = replayed
+    return error
+
+
 class ResultClient(FakeClient):
     def __init__(self):
         super().__init__()
@@ -402,7 +410,11 @@ class TaskContractTests(unittest.TestCase):
 
     def test_known_rejection_cannot_be_recovered_into_new_generation(self):
         # Known admission rejections must not become repeated paid generation attempts.
-        for code, status in (("group_model_unavailable", 503), ("unsupported_image_size", 422)):
+        for code, status in (
+            ("group_model_unavailable", 503), ("unsupported_image_size", 422),
+            ("model_unavailable", 503), ("api_key_spending_limit_exceeded", 402),
+            ("sub2api_rejected", 403), ("user_concurrency_limit_exceeded", 429),
+        ):
             error = AsxError("rejected", code=code, http_status=status)
             with self.subTest(code=code), patch.object(self.client, "submit", side_effect=error) as submit:
                 with self.assertRaises(AsxError) as caught:
@@ -412,6 +424,176 @@ class TaskContractTests(unittest.TestCase):
                 self.assertEqual(tasks.local_task_status(local_id)["task"]["status"], "failed")
                 tasks.recover_tasks(self.client, local_id)
                 self.assertEqual(submit.call_count, 1)
+
+    def test_refused_replay_of_unanswered_submission_stays_recoverable(self):
+        # The service checks the key before it looks up the Idempotency-Key, so a
+        # refused replay must not close a record whose first attempt may have been accepted.
+        self.client.reject_submit = True
+        with self.assertRaises(AsxError):
+            self.execute(["generate", "--prompt", "cat", "--detach", "--output-dir", str(self.root)])
+        local_id = tasks.local_tasks_payload()["tasks"][0]["local_id"]
+        with patch.object(self.client, "submit", side_effect=rejection("invalid_api_key", 401)):
+            refused = tasks.recover_tasks(self.client, local_id)
+        self.assertFalse(refused["ok"])
+        self.assertNotIn("task_created", refused["tasks"][0]["error"])
+        self.assertEqual(tasks.local_task_status(local_id)["task"]["status"], "submitting")
+        self.client.reject_submit = False
+        recovered = tasks.recover_tasks(self.client, local_id)
+        self.assertEqual(recovered["tasks"][0]["status"], "succeeded")
+        self.assertEqual(len(self.client.submitted), 1)
+
+    def test_bulk_recovery_lists_stale_unconfirmed_submissions_without_resubmitting(self):
+        # An unattended recover must not turn a weeks-old refused request into a new paid task.
+        with state.connect_db() as connection:
+            for name, created in (("old", "2026-01-01T00:00:00+00:00"), ("fresh", state.utc_now())):
+                state.create_task_intent(
+                    connection, operation="generate", model=DEFAULT_MODEL,
+                    idempotency_key=f"asx-age-{name}", local_id=f"local_{name}", status="submitting",
+                    request={"task_type": "image.generate", "model": DEFAULT_MODEL, "input": {"prompt": name}},
+                    output_dir=str(self.root / name), base_url=self.client.base_url, created_at=created,
+                )
+            connection.commit()
+        result = tasks.recover_tasks(self.client)
+        by_id = {task["local_id"]: task for task in result["tasks"]}
+        self.assertEqual(by_id["local_old"]["skipped"], "stale")
+        self.assertEqual(by_id["local_old"]["next_action_args"], ["task", "recover", "local_old"])
+        self.assertEqual([key for _body, key in self.client.submitted], ["asx-age-fresh"])
+        tasks.recover_tasks(self.client, "local_old")
+        self.assertEqual([key for _body, key in self.client.submitted], ["asx-age-fresh", "asx-age-old"])
+
+    def batch(self, total, **overrides):
+        options = {
+            "operation": "generate", "prompt": "cat", "model_selector": None, "image_size": None,
+            "aspect_ratio": None, "quality": None, "count": 1, "output_format": None, "references": [],
+            "mask": None, "total": total, "name": None, "output_dir": str(self.root / "batch"),
+            **overrides,
+        }
+        return batches.create_batch(self.client, **options)["id"]
+
+    def item_statuses(self, batch_id):
+        with batches.connect_db() as connection:
+            return [row[0] for row in connection.execute(
+                "SELECT status FROM batch_items WHERE batch_id = ? ORDER BY sequence", (batch_id,)
+            )]
+
+    def test_account_rejection_pauses_batch_without_failing_or_resending_items(self):
+        # A spending limit used to be retried every round for as long as `batch wait` ran.
+        batch_id = self.batch(3)
+        with patch.object(
+            self.client, "submit", side_effect=rejection("api_key_spending_limit_exceeded", 402),
+        ) as submit:
+            first = batches.poll_batch(self.client, batch_id)
+            batches.poll_batch(self.client, batch_id)
+            self.assertEqual(submit.call_count, 1)
+        self.assertFalse(first["ok"])
+        self.assertTrue(first["auto_paused"])
+        self.assertEqual(first["batch"]["status"], "paused")
+        self.assertIn("batch resume", first["batch"]["action_required"])
+        self.assertEqual(self.item_statuses(batch_id), ["pending"] * 3)
+        batches.set_batch_paused(batch_id, False)
+        resumed = batches.poll_batch(self.client, batch_id)
+        self.assertNotIn("submission_blocked", resumed["batch"])
+        self.assertEqual(len(self.client.submitted), 3)
+
+    def test_blocked_batch_backs_off_then_pauses_instead_of_retrying_forever(self):
+        batch_id = self.batch(2)
+        with patch.object(self.client, "submit", side_effect=rejection("model_unavailable", 503)) as submit:
+            batches.poll_batch(self.client, batch_id)
+            batches.poll_batch(self.client, batch_id)
+            self.assertEqual(submit.call_count, 1)  # the second round is inside the back-off
+            for _round in range(batches.BLOCKED_ROUNDS_BEFORE_PAUSE + 3):
+                with batches.connect_db() as connection:
+                    blocked = json.loads(connection.execute(
+                        "SELECT blocked_json FROM batches WHERE id = ?", (batch_id,)
+                    ).fetchone()[0])
+                    blocked["retry_at"] = "2000-01-01T00:00:00+00:00"
+                    connection.execute(
+                        "UPDATE batches SET blocked_json = ? WHERE id = ?", (json.dumps(blocked), batch_id)
+                    )
+                    connection.commit()
+                batches.poll_batch(self.client, batch_id)
+            self.assertEqual(submit.call_count, batches.BLOCKED_ROUNDS_BEFORE_PAUSE)
+        summary = batches.batch_status(batch_id)["batch"]
+        self.assertEqual(summary["status"], "paused")
+        self.assertTrue(summary["submission_blocked"]["auto_paused"])
+        self.assertEqual(self.item_statuses(batch_id), ["pending", "pending"])
+
+    def test_concurrency_limit_holds_remaining_items_without_pausing_the_batch(self):
+        # Reaching the account's task limit is normal back-pressure, not a failure.
+        batch_id = self.batch(3)
+        accept = self.client.submit
+        answers = iter([accept, rejection("user_concurrency_limit_exceeded", 429)])
+
+        def submit(body, key):
+            answer = next(answers)
+            if isinstance(answer, AsxError):
+                raise answer
+            return answer(body, key)
+
+        with patch.object(self.client, "submit", side_effect=submit) as limited:
+            result = batches.poll_batch(self.client, batch_id)
+            self.assertEqual(limited.call_count, 2)
+        self.assertEqual(result["batch"]["status"], "active")
+        self.assertNotIn("submission_blocked", result["batch"])
+        self.assertEqual(self.item_statuses(batch_id), ["succeeded", "pending", "pending"])
+        batches.poll_batch(self.client, batch_id)
+        self.assertEqual(len(self.client.submitted), 3)
+
+    def test_items_file_sends_each_prompt_with_its_own_overrides(self):
+        items = self.root / "items.jsonl"
+        items.write_text(
+            '"red cat"\n{"prompt": "blue cat", "image_size": "2K"}\n'
+            '{"prompt": "green cat", "size": "1024x1024", "quality": "low"}\n',
+            encoding="utf-8",
+        )
+        arguments = ["batch", "create", "--items-file", str(items), "--aspect-ratio", "16:9",
+                     "--output-dir", str(self.root / "listed")]
+        with self.assertRaises(AsxError):
+            self.execute([*arguments, "--prompt", "cat"])
+        result, code = self.execute(arguments)
+        self.assertEqual(code, 0)
+        self.assertEqual(result["batch"]["total"], 3)
+        inputs = [body["input"] for body, _key in self.client.submitted]
+        self.assertEqual([value["prompt"] for value in inputs], ["red cat", "blue cat", "green cat"])
+        self.assertEqual([value.get("aspect_ratio") for value in inputs], ["16:9", "16:9", None])
+        self.assertEqual([value.get("image_size") for value in inputs], [None, "2K", None])
+        self.assertEqual((inputs[2]["size"], inputs[2]["quality"]), ("1024x1024", "low"))
+
+    def test_quote_prices_a_request_without_submitting_or_recording_it(self):
+        quoted = []
+
+        def quote(body):
+            quoted.append(body["input"])
+            price = "0.13" if body["input"].get("image_size") == "2K" else "0.10"
+            return {"model": body["model"], "currency": "USD", "charge_amount": price}, "quote"
+
+        self.client.quote = quote
+        single, code = self.execute(["generate", "--prompt", "cat", "--quote"])
+        self.assertEqual((code, single["submitted"], single["quote"]["total_amount"]), (0, False, "0.10"))
+        items = self.root / "items.json"
+        items.write_text(json.dumps(["a", "b", {"prompt": "c", "image_size": "2K"}]), encoding="utf-8")
+        batch, code = self.execute(["batch", "create", "--items-file", str(items), "--quote"])
+        self.assertEqual((code, batch["quote"]["tasks"], batch["quote"]["total_amount"]), (0, 3, "0.33"))
+        self.assertEqual(len(quoted), 3)  # one per distinct priced shape, not one per item
+        self.assertEqual(self.client.submitted, [])
+        self.assertEqual(tasks.local_tasks_payload()["tasks"], [])
+        self.assertEqual(batches.list_batches()["batches"], [])
+
+    def test_wait_limit_returns_the_running_task_without_cancelling_it(self):
+        # A host that kills long commands gets a resumable answer instead of no output.
+        self.client.statuses["task_1"] = "running"
+        with patch.dict(os.environ, {"ASYNX_INITIAL_POLL_DELAY_SECONDS": "0"}):
+            running, code = self.execute([
+                "generate", "--prompt", "cat", "--max-wait", "0.05", "--output-dir", str(self.root / "bounded"),
+            ])
+        self.assertEqual((code, running["ok"], running["status"]), (0, True, "running"))
+        self.assertTrue(running["wait_timeout"])
+        self.assertEqual(running["next_action_args"], ["wait", running["local_id"]])
+        self.assertEqual(self.client.statuses["task_1"], "running")
+        self.client.statuses["task_1"] = "succeeded"
+        finished, code = self.execute(running["next_action_args"])
+        self.assertEqual((code, len(finished["files"])), (0, 1))
+        self.assertEqual(len(self.client.submitted), 1)
 
     def test_unknown_503_keeps_idempotent_recovery_available(self):
         error = AsxError("unavailable", code="http_503", http_status=503)

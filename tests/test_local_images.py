@@ -105,7 +105,7 @@ class LocalImagesTestCase(unittest.TestCase):
         )
         result = subprocess.run(
             [sys.executable, str(CLI), "image", "info", str(self.source)],
-            cwd=ROOT,
+            cwd=self.root,
             env=environment,
             text=True,
             capture_output=True,

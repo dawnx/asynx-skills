@@ -23,7 +23,23 @@ python3 "<skill-dir>/scripts/asynx.py" doctor --verify
 
 旧版本曾按 `XDG_CONFIG_HOME` 保存配置，新版安装器与配置命令会尝试迁移至固定位置，并保留旧文件。不得因发现多份文件而直接删除，应按诊断显示的实际来源处理。
 
-新提交的单任务默认等待 20 秒后首次查询，之后图片约每 4 秒、视频约每 10 秒查询一次。需要调整时，可在上述配置文件中设置 `"initial_poll_delay_seconds": 20`（0–300 秒）；环境变量 `ASYNX_INITIAL_POLL_DELAY_SECONDS` 优先。普通调用无需传参。后台提交、已有任务查询/恢复及批次推进不额外增加该等待；提交响应已是终态时也直接返回。
+新提交的单任务默认等待 20 秒后首次查询，之后图片约每 4 秒、视频与 3D 模型约每 10 秒查询一次。需要调整时，可在上述配置文件中设置 `"initial_poll_delay_seconds": 20`（0–300 秒）；环境变量 `ASYNX_INITIAL_POLL_DELAY_SECONDS` 优先。普通调用无需传参。后台提交、已有任务查询/恢复及批次推进不额外增加该等待；提交响应已是终态时也直接返回。
+
+## 本机数据与保存目录
+
+未指定 `--output-dir` 时，结果保存到默认目录下按任务命名的子目录。默认目录为运行命令时所在目录的 `generated-images`；需要固定位置时，在配置文件中设置 `"output_dir": "/absolute/path"`，环境变量 `ASYNX_OUTPUT_DIR` 优先。命令行的 `--output-dir` 始终优先于两者。
+
+宿主对单条命令有时长上限时，可设置 `"max_wait_seconds": 100`（0–86400，0 表示等到任务截止）作为等待上限的默认值，环境变量 `ASYNX_MAX_WAIT_SECONDS` 优先，命令行 `--max-wait` 再优先。到时命令返回仍在运行的任务，任务不会取消。
+
+任务记录保存在本机数据库（macOS/Linux 为 `~/.local/state/asx/state.db`，Windows 为 `%LOCALAPPDATA%\Asynx\state.db`）。任务结束后，记录中内嵌的参考图数据会自动替换为摘要；未确认的提交保留完整请求，以便恢复。用户要求清理时：
+
+```bash
+python3 "<skill-dir>/scripts/asynx.py" prune --dry-run
+python3 "<skill-dir>/scripts/asynx.py" prune
+python3 "<skill-dir>/scripts/asynx.py" prune --older-than-days 90
+```
+
+`prune` 精简历史记录并压缩数据库；加 `--older-than-days` 时还会删除更早的已结束任务与已结束批次的记录。两者都不删除任何结果文件，也不触碰未结束的任务或批次；被删除记录对应的文件仍在原处，但不再出现在 `recent` 与 `task list` 中。先用 `--dry-run` 向用户说明将处理的数量，再执行。
 
 ## 安装与卸载
 

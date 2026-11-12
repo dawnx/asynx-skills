@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import sqlite3
 import stat
@@ -89,6 +90,7 @@ class StateTestCase(unittest.TestCase):
         database = self.directory / "legacy-core.db"
         old = sqlite3.connect(database)
         old.execute("CREATE TABLE tasks (id INTEGER PRIMARY KEY, status TEXT)")
+        old.execute("INSERT INTO tasks (id, status) VALUES (7, 'submitting')")
         old.execute("CREATE TABLE batches (id TEXT PRIMARY KEY)")
         old.commit()
         old.close()
@@ -99,6 +101,14 @@ class StateTestCase(unittest.TestCase):
                 row["name"] for row in connection.execute("PRAGMA table_info(tasks)")
             }
             self.assertIn("local_id", columns)
+            # The unreadable ledger may hold the only record of an unconfirmed
+            # submission: it is set aside, never dropped.
+            kept = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'legacy_tasks_%'"
+            ).fetchone()[0]
+            self.assertEqual(
+                tuple(connection.execute(f'SELECT id, status FROM "{kept}"').fetchone()), (7, "submitting")
+            )
             self.assertIsNotNone(
                 connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='batches'"
@@ -120,6 +130,24 @@ class StateTestCase(unittest.TestCase):
                 request={"prompt": "different"},
             )
         self.assertEqual(caught.exception.code, "idempotency_conflict")
+
+    def test_finished_task_drops_inline_images_yet_still_matches_its_own_replay(self) -> None:
+        # The ledger grew by the size of every reference image; slimming must not turn
+        # a repeated request under the same key into an idempotency conflict.
+        def request(pixel: bytes) -> dict[str, object]:
+            image = "data:image/png;base64," + base64.b64encode(pixel * 64).decode()
+            return {"task_type": "image.edit", "model": "m", "input": {"prompt": "cat", "images": [image]}}
+
+        intent = {"operation": "edit", "model": "m", "idempotency_key": "asx-slim", "output_dir": "out", "base_url": "u"}
+        row = state.create_task_intent(self.connection, request=request(b"a"), **intent)
+        self.assertIn(";base64,", state.get_task(self.connection, row["local_id"])["request_json"])
+        finished = state.update_task(self.connection, row["local_id"], status="succeeded")
+        self.assertNotIn(";base64,", finished["request_json"])
+        self.assertEqual(finished["request"]["input"]["prompt"], "cat")
+        again = state.create_task_intent(self.connection, request=request(b"a"), **intent)
+        self.assertEqual(again["local_id"], row["local_id"])
+        with self.assertRaises(AsxError):
+            state.create_task_intent(self.connection, request=request(b"b"), **intent)
 
     def test_bind_update_and_events_round_trip_json(self) -> None:
         task = self._task()

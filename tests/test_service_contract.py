@@ -14,8 +14,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "skills/asynx-image/scripts"))
 
-from asxlib import images
-from asxlib.errors import _SERVICE_MESSAGES, service_error_message
+from asxlib import errors, images
+from asxlib.errors import _SERVICE_MESSAGES, AsxError, service_error_message
 
 CONTRACT = json.loads(
     (Path(__file__).parent / "fixtures" / "asynx-client-contract.json").read_text(encoding="utf-8")
@@ -97,6 +97,31 @@ class ServiceContractTests(unittest.TestCase):
             details={"field": "input.image_size", "reason": "unsupported_size", "allowed": ["private-upstream"]},
         )
         self.assertNotIn("private-upstream", unsafe)
+
+    def test_submission_rejection_table_matches_the_service(self):
+        # A code missing here is replayed forever; a code wrongly listed here drops a paid task.
+        submission = CONTRACT["task_submission"]
+        self.assertEqual(errors.REJECTED_5XX_CODES, frozenset(submission["rejected_5xx_codes"]))
+        self.assertEqual(errors.REQUEST_403_CODES, frozenset(submission["request_403_codes"]))
+        self.assertEqual(errors.UNCONFIRMED_4XX_STATUSES, frozenset(submission["unconfirmed_4xx_statuses"]))
+        for code, statuses in submission["user_facing_errors"].items():
+            for status in statuses:
+                with self.subTest(code=code, status=status):
+                    outcome = AsxError("", code=code, http_status=status).submission_outcome
+                    if status >= 500:
+                        self.assertEqual(outcome, "later" if code in submission["rejected_5xx_codes"] else None)
+                    else:
+                        self.assertIsNotNone(outcome)
+
+    def test_every_user_facing_service_error_has_its_own_message(self):
+        # Otherwise the user reads "no reason provided" for a spending limit or an expired file.
+        for code, statuses in CONTRACT["task_submission"]["user_facing_errors"].items():
+            for status in statuses:
+                with self.subTest(code=code, status=status):
+                    self.assertNotEqual(
+                        service_error_message(code, http_status=status),
+                        service_error_message("code-the-client-does-not-know", http_status=status),
+                    )
 
     def test_guide_fields_and_statuses_match_the_client_parser(self):
         guide = CONTRACT["model_guide"]

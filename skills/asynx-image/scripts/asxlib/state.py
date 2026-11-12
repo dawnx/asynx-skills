@@ -43,6 +43,7 @@ _TASK_FIELDS = frozenset(
     }
 )
 _JSON_FIELDS = {"request_json", "remote_json", "error_json", "billing"}
+_FINISHED_STATUSES = frozenset({"succeeded", "failed", "timeout", "canceled", "orphaned"})
 _JSON_ALIASES = {
     "request_json": "request",
     "remote_json": "remote",
@@ -113,6 +114,13 @@ def _decode(value: str | None) -> Any:
         # This should only be reachable with a database edited outside this
         # module.  Preserve the value so diagnostics do not lose information.
         return value
+
+
+def _comparable_request(serialized: str) -> str:
+    """Requests are equal when their content is: finished records keep image digests only."""
+    from .maintenance import slim_json
+
+    return slim_json(serialized) or serialized
 
 
 def _timestamp(value: str | None) -> str:
@@ -204,12 +212,21 @@ def init_schema(connection: sqlite3.Connection) -> None:
                 rebuild = True
                 break
     if rebuild:
-        # v1 is intentionally destructive for an unversioned/old ledger.  Do
-        # not touch unrelated tables such as the legacy batch tables.
-        connection.executescript(
-            "DROP TABLE IF EXISTS assets; DROP TABLE IF EXISTS task_events; "
-            "DROP TABLE IF EXISTS tasks; PRAGMA user_version = 0;"
-        )
+        # An unversioned ledger cannot be read by v1, but it may still hold the
+        # only record of an unconfirmed submission. Set it aside instead of
+        # dropping it; unrelated tables such as the batch tables stay in place.
+        suffix = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+        for table in ("assets", "task_events", "tasks"):
+            if table in existing_tables:
+                for (index,) in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? "
+                    "AND sql IS NOT NULL",
+                    (table,),
+                ).fetchall():
+                    connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+                connection.execute(f'ALTER TABLE "{table}" RENAME TO "legacy_{table}_{suffix}"')
+        connection.execute("PRAGMA user_version = 0")
+        connection.commit()
     if version in (0, SCHEMA_VERSION):
         connection.executescript(
             """
@@ -289,7 +306,8 @@ def ensure_batch_schema(connection: sqlite3.Connection) -> None:
             template_json TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            cancel_requested INTEGER NOT NULL DEFAULT 0
+            cancel_requested INTEGER NOT NULL DEFAULT 0,
+            blocked_json TEXT
         );
         CREATE TABLE IF NOT EXISTS batch_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -316,6 +334,10 @@ def ensure_batch_schema(connection: sqlite3.Connection) -> None:
         connection.execute(
             "ALTER TABLE batches ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
         )
+        connection.commit()
+    if "blocked_json" not in columns:
+        # Why submission is backing off or was paused automatically; NULL when clear.
+        connection.execute("ALTER TABLE batches ADD COLUMN blocked_json TEXT")
         connection.commit()
 
 
@@ -354,7 +376,7 @@ def create_task_intent(
     ).fetchone()
     if existing is not None:
         if (
-            existing["request_json"] != serialized_request
+            _comparable_request(existing["request_json"]) != _comparable_request(serialized_request)
             or existing["operation"] != operation
             or existing["model"] != model
         ):
@@ -390,7 +412,9 @@ def create_task_intent(
         raced = connection.execute(
             "SELECT * FROM tasks WHERE idempotency_key = ?", (idempotency_key,)
         ).fetchone()
-        if raced is not None and raced["request_json"] == serialized_request:
+        if raced is not None and _comparable_request(raced["request_json"]) == _comparable_request(
+            serialized_request
+        ):
             return _row_dict(raced)
         raise AsxError("本地任务记录存在冲突，保存失败；请先通过 task list 查看已有任务。", code="task_state_conflict") from exc
     row = connection.execute("SELECT * FROM tasks WHERE local_id = ?", (candidate_id,)).fetchone()
@@ -529,6 +553,19 @@ def update_task(
     row = connection.execute("SELECT * FROM tasks WHERE local_id = ?", (local_task_id,)).fetchone()
     if row is None:
         raise AsxError(f"本机未找到任务 {local_task_id}，请检查任务 ID。", code="task_not_found")
+    if row["status"] in _FINISHED_STATUSES and ";base64," in row["request_json"]:
+        # Only an unfinished submission is replayed from its body. Once a task has
+        # ended, keep each inline image's digest and size instead of its bytes.
+        from .maintenance import slim_json
+
+        slimmed = slim_json(row["request_json"])
+        if slimmed is not None:
+            connection.execute(
+                "UPDATE tasks SET request_json = ? WHERE local_id = ?", (slimmed, local_task_id)
+            )
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE local_id = ?", (local_task_id,)
+            ).fetchone()
     return _row_dict(row)
 
 

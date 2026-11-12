@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -28,9 +30,13 @@ VALID_PNG = base64.b64decode(
 
 class CLIE2ETestCase(unittest.TestCase):
     def setUp(self) -> None:
+        # Every process runs inside the temporary directory: the default output
+        # directory is relative to the working directory, not to the repository.
+        self.temporary = tempfile.TemporaryDirectory()
+        self.temp_path = Path(self.temporary.name)
         self.server = subprocess.Popen(
             [sys.executable, str(SERVER), "--port", "0"],
-            cwd=ROOT,
+            cwd=self.temp_path,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -40,8 +46,6 @@ class CLIE2ETestCase(unittest.TestCase):
         if not self.base_url:
             stderr = self.server.stderr.read() if self.server.stderr else ""
             self.fail(f"Mock Asynx 服务启动失败：{stderr}")
-        self.temporary = tempfile.TemporaryDirectory()
-        self.temp_path = Path(self.temporary.name)
         self.environment = os.environ.copy()
         self.environment.update(
             {
@@ -77,7 +81,7 @@ class CLIE2ETestCase(unittest.TestCase):
             environment.pop("ASYNX_BASE_URL", None)
         result = subprocess.run(
             [sys.executable, str(CLI), *arguments],
-            cwd=ROOT,
+            cwd=self.temp_path,
             env=environment,
             text=True,
             capture_output=True,
@@ -361,6 +365,31 @@ class CLIE2ETestCase(unittest.TestCase):
             {task["task_type"]: task["input"].get("quality") for task in history["tasks"]},
             {"image.generate": "high", "image.edit": "high"},
         )
+
+    def test_recent_query_does_not_match_base64_of_reference_images(self) -> None:
+        # Stored requests embed reference images as Data URLs, so searching the
+        # whole request turned arbitrary base64 into hits for ordinary words.
+        generated = self.run_cli("generate", "--prompt", "黄铜台灯")
+        encoded = base64.b64encode(VALID_PNG).decode()
+        with contextlib.closing(sqlite3.connect(self.temp_path / "state.db")) as ledger:
+            request = json.loads(ledger.execute("SELECT request_json FROM tasks").fetchone()[0])
+            request["input"]["reference_images"] = [f"data:image/png;base64,{encoded}"]
+            ledger.execute("UPDATE tasks SET request_json = ?", (json.dumps(request),))
+            ledger.commit()
+
+        by_prompt = self.run_cli("recent", "--query", "台灯", with_credentials=False)
+        by_base64 = self.run_cli("recent", "--query", encoded[8:32], with_credentials=False)
+        # A word in a parent directory ("Application Support") used to match every result.
+        by_parent_directory = self.run_cli(
+            "recent", "--query", self.temp_path.name, with_credentials=False
+        )
+
+        self.assertEqual(
+            [item["task_id"] for item in by_prompt["artifacts"]], [generated["task_id"]]
+        )
+        self.assertEqual(by_base64["artifacts"], [])
+        self.assertIn(self.temp_path.name, generated["files"][0])
+        self.assertEqual(by_parent_directory["artifacts"], [])
 
     def test_real_cli_processes_resume_append_edit_cancel_and_history(self) -> None:
         source = self.temp_path / "source.png"

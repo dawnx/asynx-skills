@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .client import AsynxClient
-from .config import initial_poll_delay_seconds
+from .config import default_output_root, initial_poll_delay_seconds, max_wait_seconds
 from .constants import (
     DEFAULT_OUTPUT_DIR,
     KNOWN_STATUSES,
@@ -33,6 +33,7 @@ from .images import (
     validate_idempotency_key,
 )
 from .media_results import attach_media_details, media_file_info
+from .models3d import body_from_model_args
 from .output import log
 from .state import (
     append_event,
@@ -64,7 +65,23 @@ _STATUS_LABELS = {
     "canceling": "正在取消", "succeeded": "已完成", "failed": "生成失败",
     "timeout": "已超时", "canceled": "已取消",
 }
-_OPERATION_LABELS = {"image.generate": "图片生成", "image.edit": "图片编辑", "video.generate": "视频生成"}
+_OPERATION_LABELS = {
+    "image.generate": "图片生成", "image.edit": "图片编辑", "video.generate": "视频生成",
+    "model.generate": " 3D 模型生成",
+}
+# Video and 3D generation take minutes, so their tasks are polled less often.
+_LONG_TASK_PREFIXES = ("video.", "model.")
+
+
+def _output_root() -> str:
+    return default_output_root(DEFAULT_OUTPUT_DIR)
+
+
+def _task_folder(local_id: str, prompt: Any) -> str:
+    """Name a task's default folder so a person can find it: date, subject, short ID."""
+    words = re.sub(r"[^\w]+", "-", prompt if isinstance(prompt, str) else "").strip("-_")[:32].strip("-_")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return "-".join(part for part in (stamp, words, local_id[-6:]) if part)
 
 
 class TaskStatusClient(Protocol):
@@ -89,7 +106,12 @@ def wait_for_terminal(
     sleep: Callable[[float], None] = time.sleep,
     initial_delay: float = MAX_TASK_POLL_DELAY_SECONDS,
     poll_interval: float | None = None,
+    max_wait: float = 0,
 ) -> tuple[dict[str, Any], str | None]:
+    """Poll until the task ends, or until ``max_wait`` seconds pass (0: no bound).
+
+    A bounded wait returns the still-running task; nothing is canceled.
+    """
     task_id = task.get("id")
     if not isinstance(task_id, str):
         raise AsxError("服务未返回任务 ID，暂时无法确认提交结果。请保留本地任务记录，通过 task recover 确认，避免重复生成。", code="invalid_task_response")
@@ -98,11 +120,12 @@ def wait_for_terminal(
     client_deadline = (
         deadline + timedelta(seconds=30)
         if deadline
-        else datetime.now(UTC) + timedelta(minutes=65 if str(task.get("task_type", "")).startswith("video.") else 20)
+        else datetime.now(UTC) + timedelta(minutes=65 if str(task.get("task_type", "")).startswith(_LONG_TASK_PREFIXES) else 20)
     )
-    interval = poll_interval or (10.0 if str(task.get("task_type", "")).startswith("video.") else MAX_TASK_POLL_DELAY_SECONDS)
+    interval = poll_interval or (10.0 if str(task.get("task_type", "")).startswith(_LONG_TASK_PREFIXES) else MAX_TASK_POLL_DELAY_SECONDS)
     delay = initial_delay
     last_status: str | None = None
+    stop_at = time.monotonic() + max_wait if max_wait > 0 else None
     while True:
         status = task.get("status")
         if not isinstance(status, str) or status not in KNOWN_STATUSES:
@@ -125,12 +148,27 @@ def wait_for_terminal(
                 request_id=request_id,
                 details={"next_action_args": ["wait", task_id]},
             )
-        sleep(delay)
-        delay = interval + random.uniform(0.0, interval * 0.15)
+        if stop_at is not None:
+            remaining = stop_at - time.monotonic()
+            if remaining <= 0:
+                return task, request_id
+            delay = min(delay, remaining)
         try:
+            sleep(delay)
+            delay = interval + random.uniform(0.0, interval * 0.15)
             task, request_id = client.task(task_id)
             if original_task_type:
                 task.setdefault("task_type", original_task_type)
+        except KeyboardInterrupt:
+            # The host stopped this command, not the task: report which one to resume.
+            raise AsxError(
+                "等待已中断，任务未取消，仍在服务端继续。请继续等待原任务，无需重新生成。",
+                code="interrupted",
+                exit_code=130,
+                task_id=task_id,
+                request_id=request_id,
+                details={"next_action_args": ["wait", task_id]},
+            ) from None
         except AsxError as exc:
             exc.task_id = task_id
             if exc.details is None:
@@ -158,6 +196,56 @@ def _unique_output_path(directory: Path, base_name: str, extension: str) -> Path
     return directory / f"{safe_name}.{extension}"
 
 
+def _is_model_file(path: Path) -> bool:
+    try:
+        return bool(media_file_info(path)["kind"] == "model")
+    except (OSError, AsxError):
+        return False
+
+
+def _invalid_model_asset(task_id: str) -> AsxError:
+    return AsxError(
+        "下载到的文件不是有效的 GLB 3D 模型，未作为结果交付。请稍后通过 wait 重新下载原任务，无需重新生成；"
+        "若持续出现，请保留任务 ID 并联系服务支持。",
+        code="invalid_model_asset", task_id=task_id,
+    )
+
+
+def _download_previews(
+    client: AsynxClient,
+    task: dict[str, Any],
+    output_dir: str,
+    files: list[str],
+    *,
+    prefix: str | None,
+    metrics: list[dict[str, Any]] | None,
+    local_task_id: str | None,
+    warnings: list[dict[str, Any]] | None,
+) -> None:
+    """Fetch a 3D task's optional preview images; a missing or failed one never fails delivery."""
+    result = task["result"]
+    auxiliary = result.get("auxiliary_assets")
+    model_indices = {asset["index"] for asset in result["assets"]}
+    for asset in auxiliary if isinstance(auxiliary, list) else []:
+        if (
+            not isinstance(asset, dict) or asset.get("kind") != "image"
+            or not isinstance(asset.get("index"), int) or asset["index"] in model_indices
+        ):
+            continue
+        try:
+            # Saved exactly like an image task's asset: verified by content, cached by index.
+            download_assets(
+                client, {"id": task["id"], "result": {"assets": [asset]}}, output_dir,
+                prefix=prefix, metrics=metrics, local_task_id=local_task_id, completed_files=files,
+            )
+        except (AsxError, OSError, sqlite3.Error):
+            if warnings is not None:
+                warnings.append({
+                    "code": "preview_unavailable",
+                    "message": "3D 模型已保存，但预览图未能下载，不影响模型文件；需要预览图时可通过 wait 补下载。",
+                })
+
+
 def download_assets(
     client: AsynxClient,
     task: dict[str, Any],
@@ -167,6 +255,7 @@ def download_assets(
     metrics: list[dict[str, Any]] | None = None,
     local_task_id: str | None = None,
     completed_files: list[str] | None = None,
+    warnings: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     task_id = task.get("id")
     result = task.get("result")
@@ -181,6 +270,7 @@ def download_assets(
     directory.mkdir(parents=True, exist_ok=True)
     files: list[str] = completed_files if completed_files is not None else []
     is_video_task = str(task.get("task_type", "")).startswith("video.")
+    is_model_task = str(task.get("task_type", "")).startswith("model.")
     has_video = False
     cached_assets: dict[int, dict[str, Any]] = {}
     if local_task_id:
@@ -204,7 +294,10 @@ def download_assets(
         download_url = asset.get("download_url") if isinstance(asset.get("download_url"), str) else None
         cached = cached_assets.get(index)
         cached_path = cached.get("path") if cached else None
-        if isinstance(cached_path, str) and cached_path and Path(cached_path).is_file():
+        # A damaged local model is replaced from the original task, never delivered as-is.
+        if isinstance(cached_path, str) and cached_path and Path(cached_path).is_file() and (
+            not is_model_task or _is_model_file(Path(cached_path))
+        ):
             if is_video_task:
                 has_video = has_video or media_file_info(Path(cached_path))["kind"] == "video"
             files.append(cached_path)
@@ -221,9 +314,11 @@ def download_assets(
         temporary = _unique_output_path(directory, f"{task_id}-{index}-{secrets.token_hex(4)}", "part")
         save_started = time.perf_counter()
         try:
-            if is_video_task:
+            if is_video_task or is_model_task:
                 client.asset_to_file(task_id, index, temporary, download_url, metrics=asset_metrics)
                 file_info = media_file_info(temporary)
+                if is_model_task and file_info["kind"] != "model":
+                    raise _invalid_model_asset(task_id)
                 actual_mime = str(file_info["content_type"])
                 has_video = has_video or file_info["kind"] == "video"
                 extension = str(file_info["extension"])
@@ -243,6 +338,10 @@ def download_assets(
             )
             path.parent.mkdir(parents=True, exist_ok=True)
             os.replace(temporary, path)
+        except AsxError as exc:
+            if is_model_task and exc.code == "unsupported_media_format":
+                raise _invalid_model_asset(task_id) from exc
+            raise
         except OSError as exc:
             raise AsxError("结果文件保存失败，请检查输出目录的写入权限和剩余空间，然后继续下载原任务。", code="output_write_failed") from exc
         finally:
@@ -274,6 +373,11 @@ def download_assets(
             "任务返回了附件，但没有可交付的 MP4 视频。已下载的文件仍保留，请检查原任务。",
             code="missing_video_asset", task_id=task_id,
         )
+    if is_model_task:
+        _download_previews(
+            client, task, output_dir, files, prefix=prefix, metrics=metrics,
+            local_task_id=local_task_id, warnings=warnings,
+        )
     return files
 
 
@@ -303,7 +407,7 @@ def index_downloaded_artifacts(
                 model=str(task.get("model") or "unknown"),
                 idempotency_key=key,
                 request=request,
-                output_dir=str(Path(files[0]).parent) if files else DEFAULT_OUTPUT_DIR,
+                output_dir=str(Path(files[0]).parent) if files else _output_root(),
                 status="succeeded",
             )
             bind_remote_task(
@@ -400,10 +504,13 @@ def _persist_task_intent(
     model: str,
     idempotency_key: str,
     output_dir: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bool]:
+    """Record the submission first; also report whether it replays an unanswered attempt."""
     local_id = f"local_{secrets.token_hex(12)}"
+    task_input = body.get("input")
+    prompt = task_input.get("prompt") if isinstance(task_input, dict) else None
     resolved_output_dir = (
-        str((Path(DEFAULT_OUTPUT_DIR) / local_id).resolve())
+        str((Path(_output_root()).expanduser() / _task_folder(local_id, prompt)).resolve())
         if output_dir == DEFAULT_OUTPUT_DIR
         else str(Path(output_dir).expanduser().resolve())
     )
@@ -420,11 +527,24 @@ def _persist_task_intent(
             local_id=local_id,
             status="submitting",
         )
+        replay = unanswered_attempt(row) and str(row["local_id"]) != local_id
+        if not row.get("remote_task_id") and row.get("status") != "submitting":
+            row = update_task(connection, str(row["local_id"]), status="submitting")
         append_event(connection, str(row["local_id"]), "submit_started")
         connection.commit()
-        return row
+        return row, replay
     finally:
         connection.close()
+
+
+def unanswered_attempt(row: dict[str, Any] | None) -> bool:
+    """Whether this record was sent before without a definite answer.
+
+    If so the task may already exist, and a refusal of the replay cannot settle it.
+    """
+    if row is None or row.get("remote_task_id"):
+        return False
+    return str(row.get("status")) in {"submitting", "unknown"}
 
 
 def _bind_submission(
@@ -544,7 +664,7 @@ def sync_local_task(
     finally:
         connection.close()
     if status == "succeeded" and download:
-        target_dir = output_dir or str(row.get("output_dir") or DEFAULT_OUTPUT_DIR)
+        target_dir = output_dir or str(row.get("output_dir") or _output_root())
         delivered, code = _download_task_result(
             client, task, request_id, target_dir, local_id=local_id,
             expected_ratio=requested_aspect_ratio(row.get("request")),
@@ -575,17 +695,34 @@ def refresh_task(client: AsynxClient, identifier: str) -> tuple[dict[str, Any], 
         raise AsxError(f"本机未找到任务：{identifier}", code="task_not_found")
     task, request_id = client.task(identifier)
     if task.get("status") == "succeeded":
-        return _download_task_result(client, task, request_id, DEFAULT_OUTPUT_DIR)
+        return _download_task_result(client, task, request_id, _output_root())
     payload = task_payload(task, request_id)
     return payload, 0 if payload["ok"] else 4
 
 
 def recover_tasks(
-    client: AsynxClient, identifier: str | None = None, *, limit: int = 50
+    client: AsynxClient, identifier: str | None = None, *, limit: int = 50,
+    max_age_hours: float = 24,
 ) -> dict[str, Any]:
+    """Confirm unbound submissions by replaying them with their original key.
+
+    A replay creates the task when the first attempt never reached the service,
+    so without an explicit ID only recent records are replayed.
+    """
+    if max_age_hours <= 0:
+        raise AsxError("恢复时限须为正数（小时）。", code="invalid_recover_age")
+    replay_after = datetime.now(UTC) - timedelta(hours=max_age_hours)
     connection = connect_ledger_db()
     try:
-        rows = [_task_identifier_row(connection, identifier)] if identifier else list_ledger_tasks(connection, limit=limit)
+        if identifier:
+            rows = [_task_identifier_row(connection, identifier)]
+        else:
+            # Look at unfinished records only: newer finished tasks must not push an
+            # unconfirmed submission out of the window that is examined.
+            rows = [
+                row for row in list_ledger_tasks(connection, limit=1000)
+                if str(row.get("status")) not in TERMINAL_STATUSES
+            ][:limit]
     finally:
         connection.close()
     results: list[dict[str, Any]] = []
@@ -597,8 +734,24 @@ def recover_tasks(
             if status != "succeeded":
                 results.append(_local_task_payload(row))
                 continue
+        replay = unanswered_attempt(row)
         try:
             if not row.get("remote_task_id"):
+                created = parse_deadline(row.get("created_at"))
+                if not identifier and (created is None or created < replay_after):
+                    stale = _local_task_payload(row)
+                    stale.update(
+                        skipped="stale",
+                        warnings=[{
+                            "code": "stale_unconfirmed_submission",
+                            "message": (
+                                f"该提交已超过 {max_age_hours:g} 小时仍未确认，未自动重新提交。"
+                                "仍需要时请指定该任务 ID 恢复（可能创建并计费），不需要时可取消该记录。"
+                            ),
+                        }],
+                    )
+                    results.append(stale)
+                    continue
                 connection = connect_ledger_db()
                 try:
                     blocked = cancel_blocked_batch_intent(connection, str(row["idempotency_key"]))
@@ -639,6 +792,7 @@ def recover_tasks(
             synced, _code = sync_local_task(client, str(row["local_id"]))
             results.append(synced)
         except AsxError as exc:
+            exc.replayed = exc.replayed or replay
             if exc.submission_rejected and not row.get("remote_task_id"):
                 _record_submit_error(str(row["local_id"]), exc)
                 row = {**row, "status": "failed"}
@@ -814,11 +968,21 @@ def _download_task_result(
 ) -> tuple[dict[str, Any], int]:
     files: list[str] = []
     download_error: dict[str, Any] | None = None
+    preview_warnings: list[dict[str, Any]] = []
     try:
         download_assets(
             client, task, output_dir, local_task_id=local_id,
-            metrics=metrics, completed_files=files,
+            metrics=metrics, completed_files=files, warnings=preview_warnings,
         )
+    except KeyboardInterrupt:
+        identifier = local_id or task.get("id")
+        raise AsxError(
+            "下载被中断，生成已完成，已保存的文件仍可使用。请继续下载原任务，无需重新生成。",
+            code="interrupted",
+            exit_code=130,
+            task_id=task.get("id") if isinstance(task.get("id"), str) else None,
+            details={"next_action_args": ["wait", identifier]} if identifier else None,
+        ) from None
     except AsxError as exc:
         download_error = exc.payload()["error"]
     except (OSError, sqlite3.Error):
@@ -827,6 +991,8 @@ def _download_task_result(
         task, request_id, files=files, local_id=local_id, expected_ratio=expected_ratio,
     )
     payload["download_status"] = "failed" if download_error else "downloaded"
+    if preview_warnings:
+        payload.setdefault("warnings", []).extend(preview_warnings)
     if not local_id and files:
         warning = index_downloaded_artifacts(task, files)
         if warning:
@@ -878,11 +1044,60 @@ def _update_local_snapshot(
         connection.close()
 
 
+def quote_payload(client: AsynxClient, body: dict[str, Any], *, tasks: int = 1) -> dict[str, Any]:
+    """Ask the service what a prepared request would cost; nothing is submitted or saved."""
+    from decimal import Decimal, InvalidOperation
+
+    data, request_id = client.quote(body)
+    try:
+        amount = Decimal(str(data["charge_amount"]))
+    except (KeyError, InvalidOperation, ValueError) as exc:
+        raise AsxError("服务返回的报价不完整，请稍后重试；若持续出现，请联系服务支持。", code="invalid_quote_response") from exc
+    quote: dict[str, Any] = {
+        "model": data.get("model") or body.get("model"),
+        "currency": data.get("currency") or "USD",
+        "amount_per_task": str(amount),
+        "tasks": tasks,
+        "total_amount": str(amount * tasks),
+        "pricing": data.get("pricing"),
+        "price_source": data.get("price_source"),
+    }
+    payload: dict[str, Any] = {
+        "ok": True,
+        "schema_version": 1,
+        "submitted": False,
+        "quote": {key: value for key, value in quote.items() if value is not None},
+        "message": "仅报价，未提交任务，也未产生费用。实际扣费以任务完成后的计费结果为准。",
+    }
+    if request_id:
+        payload["request_id"] = request_id
+    return payload
+
+
+def wait_limit(args: argparse.Namespace) -> float:
+    explicit = getattr(args, "max_wait", None)
+    if explicit is None:
+        return max_wait_seconds()
+    if explicit < 0:
+        raise AsxError("等待上限不能为负数；0 表示等到任务截止。", code="invalid_max_wait")
+    return float(explicit)
+
+
+def _still_running(payload: dict[str, Any]) -> dict[str, Any]:
+    payload["wait_timeout"] = True
+    payload.setdefault("warnings", []).append({
+        "code": "wait_limit_reached",
+        "message": "已达到本次等待上限，任务仍在服务端继续，未被取消。请继续等待原任务，无需重新生成。",
+    })
+    return payload
+
+
 def run_submission(
     client: AsynxClient, args: argparse.Namespace, task_type: str
 ) -> tuple[dict[str, Any], int]:
     started_at = time.perf_counter()
     initial_delay = initial_poll_delay_seconds() if not args.detach else 0.0
+    wait_bound = wait_limit(args)
     log(f"正在准备{_OPERATION_LABELS[task_type]}……")
     references = args.reference if task_type in {"image.generate", "video.generate"} else args.image
     from_task = getattr(args, "from_task", None)
@@ -898,7 +1113,27 @@ def run_submission(
                 raise AsxError("GIF/SVG 结果不能直接作为编辑输入；请明确选择静态图片，不会自动取首帧或栅格化。", code="unsupported_edit_source")
         finally:
             connection.close()
-    if task_type == "video.generate":
+    if task_type == "model.generate":
+        if from_task:
+            if args.image:
+                raise AsxError("--from-task 与 --image 不能同时使用。", code="conflicting_model_inputs")
+            connection = connect_ledger_db()
+            try:
+                paths = ledger_task_paths(connection, from_task)
+            finally:
+                connection.close()
+            if len(paths) != 1 or media_file_info(Path(paths[0]))["content_type"] not in {
+                "image/png", "image/jpeg", "image/webp",
+            }:
+                raise AsxError(
+                    "请选择一张 PNG、JPEG 或 WebP 图片作为参考图，通过 --image 传入路径；"
+                    "不能直接使用多张结果、动画、视频或 3D 模型。",
+                    code="ambiguous_model_source",
+                )
+            args = argparse.Namespace(**vars(args))
+            args.image = paths[0]
+        body, model, catalog_request_id = body_from_model_args(client, args)
+    elif task_type == "video.generate":
         if from_task:
             if args.first_frame:
                 raise AsxError("--from-task 与 --first-frame 不能同时使用。", code="conflicting_video_inputs")
@@ -935,10 +1170,15 @@ def run_submission(
     input_warnings = task_input_warnings(body)
     for warning in input_warnings:
         log(f"提示：{warning['message']}")
+    if getattr(args, "quote", False):
+        quoted = quote_payload(client, body)
+        if input_warnings:
+            quoted["warnings"] = input_warnings
+        return quoted, 0
     idempotency_key = validate_idempotency_key(
         args.idempotency_key or f"asx-{secrets.token_hex(16)}"
     )
-    local_row = _persist_task_intent(
+    local_row, replay = _persist_task_intent(
         client,
         body,
         operation=task_type.removeprefix("image."),
@@ -958,7 +1198,16 @@ def run_submission(
             task.setdefault("task_type", task_type)
             _bind_submission(client, local_id, task, request_id)
         task.setdefault("task_type", task_type)
+    except KeyboardInterrupt:
+        # Stopped mid-request: only a replay under the same key can tell whether it arrived.
+        raise AsxError(
+            "提交被中断，尚未确认服务是否已受理。请恢复该记录确认原提交，不要直接重新生成。",
+            code="interrupted",
+            exit_code=130,
+            details={"local_id": local_id, "next_action_args": ["task", "recover", local_id]},
+        ) from None
     except AsxError as exc:
+        exc.replayed = exc.replayed or replay
         _record_submit_error(local_id, exc)
         if exc.details is None:
             exc.details = {}
@@ -984,10 +1233,13 @@ def run_submission(
         if input_warnings:
             payload["warnings"] = input_warnings
         return payload, 0 if payload["ok"] else 4
+    # Printed at acceptance so a host that stops this command still shows what to resume.
+    log(f"任务已受理：{task.get('id')}（本地记录 {local_id}）。若本命令被中断，请用 wait {local_id} 继续，不要重新生成。")
     task, request_id = wait_for_terminal(
         client, task, request_id,
         initial_delay=MAX_TASK_POLL_DELAY_SECONDS if local_row.get("remote_task_id") else initial_delay,
-        poll_interval=10.0 if task_type == "video.generate" else None,
+        poll_interval=10.0 if task_type.startswith(_LONG_TASK_PREFIXES) else None,
+        max_wait=wait_bound,
     )
     _update_local_snapshot(local_id, task, request_id)
     finished_at = time.perf_counter()
@@ -997,6 +1249,8 @@ def run_submission(
         payload["timings"] = timings
         if input_warnings:
             payload["warnings"] = input_warnings
+        if task.get("status") not in TERMINAL_STATUSES:
+            return _still_running(payload), 0
         return payload, 4
     asset_metrics: list[dict[str, Any]] = []
     payload, code = _download_task_result(
@@ -1037,6 +1291,8 @@ def models_payload(client: AsynxClient, operation: str, *, modality: str = "imag
                     "capabilities",
                     "pricing",
                     "official_discount_percent",
+                    "image_parameters",
+                    "price_source",
                 )
                 if model.get(key) is not None
             }
@@ -1073,7 +1329,7 @@ def history_payload(
 
 
 def wait_and_download(
-    client: AsynxClient, task_id: str, output_dir: str = DEFAULT_OUTPUT_DIR
+    client: AsynxClient, task_id: str, output_dir: str = DEFAULT_OUTPUT_DIR, *, max_wait: float = 0,
 ) -> tuple[dict[str, Any], int]:
     ledger_connection = connect_ledger_db()
     try:
@@ -1084,13 +1340,15 @@ def wait_and_download(
         ledger_connection.close()
     if local_row is not None:
         task, request_id = _remote_task_for_row(client, local_row)
-        task, request_id = wait_for_terminal(client, task, request_id)
+        task, request_id = wait_for_terminal(client, task, request_id, max_wait=max_wait)
         local_id = str(local_row["local_id"])
         _update_local_snapshot(local_id, task, request_id)
+        if task.get("status") not in TERMINAL_STATUSES:
+            return _still_running(task_payload(task, request_id, local_id=local_id)), 0
         if task.get("status") != "succeeded":
             return task_payload(task, request_id, local_id=local_id), 4
         target_dir = (
-            str(local_row.get("output_dir") or DEFAULT_OUTPUT_DIR)
+            str(local_row.get("output_dir") or _output_root())
             if output_dir == DEFAULT_OUTPUT_DIR
             else output_dir
         )
@@ -1106,13 +1364,17 @@ def wait_and_download(
         }
         return payload, code
     task, request_id = client.task(task_id)
-    task, request_id = wait_for_terminal(client, task, request_id)
+    task, request_id = wait_for_terminal(client, task, request_id, max_wait=max_wait)
+    if task.get("status") not in TERMINAL_STATUSES:
+        return _still_running(task_payload(task, request_id)), 0
     if task.get("status") != "succeeded":
         return task_payload(task, request_id), 4
     download_started = time.perf_counter()
     remote_asset_metrics: list[dict[str, Any]] = []
     payload, code = _download_task_result(
-        client, task, request_id, output_dir, metrics=remote_asset_metrics,
+        client, task, request_id,
+        _output_root() if output_dir == DEFAULT_OUTPUT_DIR else output_dir,
+        metrics=remote_asset_metrics,
     )
     payload["timings"] = {
         "download_seconds": round(time.perf_counter() - download_started, 3),

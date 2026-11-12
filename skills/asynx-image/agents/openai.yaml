@@ -1,6 +1,6 @@
 interface:
   display_name: "Asynx 图像创作"
-  short_description: "生成图片、SVG 矢量图与 GIF 动画，支持图片编辑和批量任务"
+  short_description: "生成图片、SVG、GIF 动画、视频与 3D 模型，支持图片编辑和批量任务"
   default_prompt: "请使用 $asynx-image 处理我的图片、SVG 或 GIF 动画需求。"
 
 policy:

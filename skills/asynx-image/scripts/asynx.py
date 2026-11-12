@@ -50,6 +50,16 @@ if __name__ == "__main__":
         )
         raise SystemExit(2) from None
     try:
+        import signal
+
+        def _stop(_signal: int, _frame: object) -> None:
+            # A host that stops the command still gets the JSON naming the task to resume.
+            raise KeyboardInterrupt
+
+        for name in ("SIGTERM", "SIGHUP"):
+            if hasattr(signal, name):
+                signal.signal(getattr(signal, name), _stop)
+
         from asxlib.cli import main
 
         main(locked_root=root if managed else None)

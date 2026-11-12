@@ -19,6 +19,20 @@ PNG = base64.b64decode(
 )
 # A small MP4 container fixture for transport tests, not a playable movie.
 MP4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isommp42" + b"\x00\x00\x00\x0cmdatTEST"
+# A minimal binary glTF container for transport tests, not a renderable model:
+# magic, version 2, total length (little-endian uint32), then one JSON chunk.
+_GLB_JSON = b'{"asset":{"version":"2.0"}} '
+GLB = (
+    b"glTF" + (2).to_bytes(4, "little") + (20 + len(_GLB_JSON)).to_bytes(4, "little")
+    + len(_GLB_JSON).to_bytes(4, "little") + b"JSON" + _GLB_JSON
+)
+MODEL_3D = {
+    "name": "tripo-h3.1",
+    "modality": "model",
+    "task_types": ["model.generate"],
+    "capabilities": {"task_types": ["model.generate"]},
+    "pricing": {"mode": "per_request", "amount": "0.20000000", "currency": "USD"},
+}
 
 
 def _model(name: str, *, mask: bool) -> dict[str, Any]:
@@ -149,6 +163,21 @@ def _public_task(task: dict[str, Any], base_url: str) -> dict[str, Any]:
     if status == "succeeded":
         video = task["task_type"] == "video.generate"
         response["result_quality"] = "expected"
+        if task["task_type"] == "model.generate":
+            links = [f"{base_url}/v1/tasks/{task['id']}/assets/{index}" for index in (0, 1)]
+            response["result"] = {
+                "assets": [{
+                    "index": 0, "id": f"asset_{task['id']}", "kind": "model", "role": "output_model",
+                    "content_type": "model/gltf-binary", "size_bytes": len(GLB),
+                    "width": None, "height": None, "download_url": links[0],
+                }],
+                "auxiliary_assets": [{
+                    "index": 1, "id": f"asset_{task['id']}_preview", "kind": "image", "role": "output_preview",
+                    "content_type": "image/png", "width": 1, "height": 1, "download_url": links[1],
+                }],
+                "image_count": None,
+            }
+            return response
         response["result"] = {
             "assets": [
                 {
@@ -251,7 +280,9 @@ class MockHandler(BaseHTTPRequestHandler):
         if path == "/v1/tasks/models":
             with self.server.state.lock:
                 self.server.state.model_requests += 1
-            self._ok({"items": [_model("gpt-image-2", mask=True), _model("gemini-3.1-flash-image", mask=False)]})
+            self._ok({"items": [
+                _model("gpt-image-2", mask=True), _model("gemini-3.1-flash-image", mask=False), MODEL_3D,
+            ]})
             return
         if path == "/v1/tasks":
             query = parse_qs(parsed.query)
@@ -273,14 +304,28 @@ class MockHandler(BaseHTTPRequestHandler):
             if task is None:
                 self._error(404, "not_found", "Mock Task 不存在")
                 return
-            if match[1] == "asset":
+            model3d = task["task_type"] == "model.generate"
+            if match[1] == "preview" and not model3d:
+                self._error(404, "not_found", "Mock 路由不存在")
+                return
+            if match[1] in {"asset", "preview"}:
                 if task["status"] != "succeeded":
                     self._error(409, "task_not_succeeded", "Task 尚未成功")
                     return
                 self.send_response(200)
                 video = task["task_type"] == "video.generate"
                 content = MP4 if video else PNG
-                self.send_header("Content-Type", "video/mp4" if video else "image/png")
+                content_type = "video/mp4" if video else "image/png"
+                if model3d and match[1] == "asset":
+                    prompt = str(task["input"].get("prompt") or "")
+                    # Both bodies arrive whole, so only content checks can tell they are not a model.
+                    content = (
+                        GLB[:-4] if "[截断模型]" in prompt
+                        else b"<html>Access denied</html>" if "[非模型文件]" in prompt
+                        else GLB
+                    )
+                    content_type = "model/gltf-binary"
+                self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(content)))
                 self.end_headers()
                 self.wfile.write(content)
@@ -331,6 +376,8 @@ def re_task(path: str) -> tuple[str, str] | None:
         return parts[2], "cancel"
     if len(parts) == 5 and parts[:2] == ["v1", "tasks"] and parts[3:] == ["assets", "0"]:
         return parts[2], "asset"
+    if len(parts) == 5 and parts[:2] == ["v1", "tasks"] and parts[3:] == ["assets", "1"]:
+        return parts[2], "preview"
     return None
 
 

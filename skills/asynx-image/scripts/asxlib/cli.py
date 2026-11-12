@@ -38,6 +38,7 @@ from .tasks import (
     run_submission,
     task_payload,
     wait_and_download,
+    wait_limit,
 )
 
 
@@ -52,6 +53,11 @@ class _ArgumentParser(argparse.ArgumentParser):
         else:
             description = "命令参数无法识别或不完整。"
         raise AsxError(description + "请运行对应命令的 --help 查看用法。", code="invalid_arguments")
+
+
+_OUTPUT_DIR_HELP = "结果保存目录；省略时保存到默认目录（可用配置项 output_dir 或 ASYNX_OUTPUT_DIR 调整）下按日期与描述命名的子目录"
+_MAX_WAIT_HELP = "本次命令最多等待的秒数，到时返回仍在运行的任务而不取消；省略时等到任务截止，可用配置项 max_wait_seconds 设定默认值"
+_QUOTE_HELP = "只向服务查询本次请求的价格，不提交任务、不产生费用"
 
 
 def _add_extended_image_options(parser: argparse.ArgumentParser) -> None:
@@ -75,9 +81,11 @@ def _add_image_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--quality", help="生成质量；GPT Image 2.5/2.6（按模型名识别）省略时为 high，其他模型及自定义模型名不补值；显式值优先")
     parser.add_argument("--count", type=int, default=1, help="本次生成数量，1–10 张")
     parser.add_argument("--output-format", choices=("png", "jpeg", "webp", "svg", "gif"), help="输出文件格式")
-    parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="结果保存目录")
+    parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help=_OUTPUT_DIR_HELP)
     parser.add_argument("--idempotency-key", help="自定义请求标识，用于重复提交时去重")
     parser.add_argument("--detach", action="store_true", help="提交后立即返回，之后通过 wait 等待结果")
+    parser.add_argument("--max-wait", type=float, help=_MAX_WAIT_HELP)
+    parser.add_argument("--quote", action="store_true", help=_QUOTE_HELP)
     parser.add_argument(
         "--keep-reference-original",
         action="store_true",
@@ -90,7 +98,13 @@ def _add_batch_creation_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--operation", choices=("generate", "edit", "video.generate"), default="generate", help="批次类型"
     )
-    parser.add_argument("--prompt", required=True, help="提示词或编辑指令")
+    parser.add_argument("--prompt", help="提示词或编辑指令；所有任务使用同一描述时填写，与 --items-file 二选一")
+    parser.add_argument(
+        "--items-file",
+        help="每项一条描述的清单：JSON Lines（每行一个字符串或含 prompt 的对象）或 JSON 数组；"
+        "对象可覆盖 aspect_ratio、image_size、size、quality、count（视频为 duration、resolution、aspect_ratio）",
+    )
+    parser.add_argument("--quote", action="store_true", help="只查询整个批次的预计费用，不创建批次、不提交任务")
     parser.add_argument("--model", help="模型名称或唯一片段")
     parser.add_argument("--image-size", help="尺寸档位，例如 1K、2K、4K；未指定时省略，由服务端采用默认设置")
     parser.add_argument("--aspect-ratio", help="画幅比例，例如 1:1、16:9")
@@ -101,8 +115,8 @@ def _add_batch_creation_options(parser: argparse.ArgumentParser) -> None:
         choices=("png", "jpeg", "webp", "svg", "gif"),
         help="输出格式",
     )
-    parser.add_argument("--total", type=int, default=1, help="批次中的任务数量")
-    parser.add_argument("--output-dir", help="结果保存目录，默认在 generated-images 下为批次创建子目录")
+    parser.add_argument("--total", type=int, default=1, help="批次中的任务数量；使用 --items-file 时由清单决定")
+    parser.add_argument("--output-dir", help="结果保存目录，默认在默认保存目录下为批次创建子目录")
     parser.add_argument("--name", help="批次名称")
     parser.add_argument(
         "--limit",
@@ -216,7 +230,7 @@ def _add_local_image_commands(commands: argparse._SubParsersAction[argparse.Argu
 
 
 def parser() -> argparse.ArgumentParser:
-    result: argparse.ArgumentParser = _ArgumentParser(description="通过 Asynx 生成图片和视频")
+    result: argparse.ArgumentParser = _ArgumentParser(description="通过 Asynx 生成图片、视频和 3D 模型")
     result.add_argument("--version", action="version", version=VERSION)
     commands = result.add_subparsers(dest="command", required=True)
     _add_local_image_commands(commands)
@@ -250,7 +264,7 @@ def parser() -> argparse.ArgumentParser:
     doctor_command.add_argument("--updates", action="store_true", help="同时检查 Skill 更新")
     models = commands.add_parser("models", help="列出可用模型，默认仅列出图片模型")
     models.add_argument("--operation", choices=("all", "generate", "edit"), default="all", help="按用途筛选")
-    models.add_argument("--modality", choices=("image", "video", "all"), default="image", help="图片模型、视频模型或全部")
+    models.add_argument("--modality", choices=("image", "video", "model", "all"), default="image", help="图片模型、视频模型、3D 模型（model）或全部")
     model_commands = models.add_subparsers(dest="models_command")
     describe = model_commands.add_parser("describe", help="读取当前账户可用的模型说明")
     describe.add_argument("--model", required=True, help="模型名称或别名")
@@ -275,16 +289,38 @@ def parser() -> argparse.ArgumentParser:
     video_generate.add_argument("--aspect-ratio", help="画幅比例，默认 16:9")
     video_generate.add_argument("--reference", action="append", default=[], help="参考图路径或 URL，可重复传入")
     video_generate.add_argument("--from-task", help="将该任务唯一一张本地图片用作首帧")
-    video_generate.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="结果保存目录")
+    video_generate.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help=_OUTPUT_DIR_HELP)
     video_generate.add_argument("--idempotency-key", help="自定义请求标识，用于重复提交时去重")
     video_generate.add_argument("--detach", action="store_true", help="提交后立即返回，之后通过 wait 等待结果")
+    video_generate.add_argument("--max-wait", type=float, help=_MAX_WAIT_HELP)
+    video_generate.add_argument("--quote", action="store_true", help=_QUOTE_HELP)
+
+    model = commands.add_parser("model", help="生成 3D 模型")
+    model_commands_3d = model.add_subparsers(dest="model_command", required=True)
+    model_generate = model_commands_3d.add_parser("generate", help="生成并下载 GLB 3D 模型")
+    model_generate.add_argument("--prompt", help="文字生成的模型描述，最多 1024 个字符；与 --image 二选一")
+    model_generate.add_argument("--image", help="图片生成的参考图，本地路径或 HTTP(S) 链接，仅一张；与 --prompt 二选一")
+    model_generate.add_argument("--from-task", help="将该任务唯一一张本地图片用作参考图")
+    model_generate.add_argument("--negative-prompt", help="不希望出现的内容，仅文字生成可用，最多 255 个字符")
+    model_generate.add_argument("--no-texture", action="store_true", help="不生成贴图，仅输出几何体")
+    model_generate.add_argument("--no-pbr", action="store_true", help="不生成 PBR 材质")
+    model_generate.add_argument("--max-faces", type=int, help="面数上限（1–2000000），实际面数可能更少")
+    model_generate.add_argument("--seed", type=int, help="几何随机种子")
+    model_generate.add_argument("--texture-seed", type=int, help="贴图随机种子")
+    model_generate.add_argument("--model", help="3D 模型名称；账户仅有一个可用 3D 模型时可省略")
+    model_generate.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help=_OUTPUT_DIR_HELP)
+    model_generate.add_argument("--idempotency-key", help="自定义请求标识，用于重复提交时去重")
+    model_generate.add_argument("--detach", action="store_true", help="提交后立即返回，之后通过 wait 等待结果")
+    model_generate.add_argument("--max-wait", type=float, help=_MAX_WAIT_HELP)
+    model_generate.add_argument("--quote", action="store_true", help=_QUOTE_HELP)
 
     status = commands.add_parser("status", help="查询任务在服务端的最新状态")
     status.add_argument("task_id", help="服务端任务 ID")
 
     wait = commands.add_parser("wait", help="等待任务完成并下载结果")
     wait.add_argument("task_id", help="本地任务 ID 或服务端任务 ID")
-    wait.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="结果保存目录")
+    wait.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="结果保存目录；省略时沿用该任务提交时的目录")
+    wait.add_argument("--max-wait", type=float, help=_MAX_WAIT_HELP)
 
     history = commands.add_parser("history", help="查询服务端历史任务")
     history.add_argument("--status", choices=tuple(sorted(KNOWN_STATUSES)), help="按状态筛选")
@@ -295,7 +331,7 @@ def parser() -> argparse.ArgumentParser:
     recent.add_argument("--query", help="按任务 ID、提示词、模型或文件名筛选")
     recent.add_argument("--limit", type=int, default=20, help="返回条数")
     recent.add_argument("--latest", action="store_true", help="仅返回最近一个结果")
-    recent.add_argument("--modality", choices=("image", "video"), help="仅返回图片或视频")
+    recent.add_argument("--modality", choices=("image", "video", "model"), help="仅返回图片、视频或 3D 模型")
 
     task = commands.add_parser("task", help="管理本机任务记录")
     task_commands = task.add_subparsers(dest="task_command", required=True)
@@ -311,8 +347,19 @@ def parser() -> argparse.ArgumentParser:
     task_recover = task_commands.add_parser("recover", help="确认提交中断的原任务，可能补提交请求")
     task_recover.add_argument("task_id", nargs="?", help="仅处理指定任务；省略时检查最近一批记录")
     task_recover.add_argument("--limit", type=int, default=50, help="未指定 ID 时最多检查的任务数")
+    task_recover.add_argument(
+        "--max-age-hours", type=float, default=24,
+        help="未指定 ID 时，只重新提交这段时间内创建的未确认记录；更早的仅列出，不自动提交",
+    )
     task_cancel = task_commands.add_parser("cancel", help="请求取消服务端的任务")
     task_cancel.add_argument("task_id")
+
+    prune = commands.add_parser("prune", help="精简本机任务记录，不删除任何结果文件")
+    prune.add_argument(
+        "--older-than-days", type=int,
+        help="同时删除这些天之前已结束的任务与批次记录；省略时只移除已结束任务中内嵌的参考图数据",
+    )
+    prune.add_argument("--dry-run", action="store_true", help="只统计将精简的内容，不做任何修改")
 
     asset = commands.add_parser("asset", help="查看本机结果文件")
     asset_commands = asset.add_subparsers(dest="asset_command", required=True)
@@ -338,7 +385,7 @@ def parser() -> argparse.ArgumentParser:
     batch_wait = batch_commands.add_parser("wait", help="继续提交剩余项目并等待结果")
     batch_wait.add_argument("batch_id", nargs="?", help="批次 ID，省略时使用最近的活动批次")
     batch_wait.add_argument("--interval", type=float, default=10, help="轮询间隔秒数")
-    batch_wait.add_argument("--max-wait", type=float, default=0, help="最长等待秒数，0 表示不限时")
+    batch_wait.add_argument("--max-wait", type=float, help="最长等待秒数，0 表示不限时；省略时使用配置项 max_wait_seconds（默认不限时）")
 
     batch_status = batch_commands.add_parser("status", help="查看批次进度")
     batch_status.add_argument("batch_id", nargs="?", help="批次 ID，省略时使用最近的活动批次")
@@ -387,6 +434,10 @@ def execute(args: argparse.Namespace, *, locked_root: Path | None = None) -> tup
         return payload, 0 if payload["ok"] else 2
     if args.command == "recent":
         return recent_payload(args.query, args.limit, latest=args.latest, modality=args.modality), 0
+    if args.command == "prune":
+        from .maintenance import prune_state
+
+        return prune_state(older_than_days=args.older_than_days, dry_run=args.dry_run), 0
     if args.command == "task":
         if args.task_command == "list":
             return local_tasks_payload(status=args.status, limit=args.limit), 0
@@ -399,7 +450,7 @@ def execute(args: argparse.Namespace, *, locked_root: Path | None = None) -> tup
         if args.task_command == "poll":
             return poll_local_tasks(client, args.task_id, limit=args.limit), 0
         if args.task_command == "recover":
-            result = recover_tasks(client, args.task_id, limit=args.limit)
+            result = recover_tasks(client, args.task_id, limit=args.limit, max_age_hours=args.max_age_hours)
             return result, 0 if result["ok"] else 4
         if args.task_command == "cancel":
             return cancel_local_task(client, args.task_id)
@@ -422,6 +473,8 @@ def execute(args: argparse.Namespace, *, locked_root: Path | None = None) -> tup
         return models_payload(client, args.operation, modality=args.modality), 0
     if args.command == "video":
         return run_submission(client, args, "video.generate")
+    if args.command == "model":
+        return run_submission(client, args, "model.generate")
     if args.command == "generate":
         return run_submission(client, args, "image.generate")
     if args.command == "edit":
@@ -430,7 +483,7 @@ def execute(args: argparse.Namespace, *, locked_root: Path | None = None) -> tup
         task, request_id = client.task(args.task_id)
         return task_payload(task, request_id), 0
     if args.command == "wait":
-        return wait_and_download(client, args.task_id, args.output_dir)
+        return wait_and_download(client, args.task_id, args.output_dir, max_wait=wait_limit(args))
     if args.command == "history":
         return history_payload(client, status=args.status, model=args.model, limit=args.limit), 0
     if args.command == "batch":
@@ -444,7 +497,7 @@ def main(*, locked_root: Path | None = None) -> NoReturn:
         args = parser().parse_args()
         payload, exit_code = execute(args, locked_root=locked_root)
         if exit_code == 0 and payload.get("ok") and (
-            (args.command in {"generate", "edit", "video", "wait"} and payload.get("status") == "succeeded")
+            (args.command in {"generate", "edit", "video", "model", "wait"} and payload.get("status") == "succeeded")
             or (args.command == "batch" and payload.get("batch", {}).get("status") == "completed")
         ):
             from .updates import automatic_update_notice

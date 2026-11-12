@@ -49,7 +49,7 @@ def run_cli(
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
     result = subprocess.run(
         [sys.executable, str(script), *arguments],
-        cwd=ROOT,
+        cwd=environment["HOME"],
         env=environment,
         stdin=subprocess.DEVNULL,
         text=True,
@@ -335,7 +335,7 @@ class ConfigurationCLITestCase(unittest.TestCase):
                         f"save_config({secret!r}, 'https://asynx.llmapi.site/api')"
                     ),
                 ],
-                cwd=ROOT,
+                cwd=home,
                 env=environment,
                 text=True,
                 capture_output=True,
