@@ -368,6 +368,30 @@ def create_task_intent(
     return _row_dict(row)
 
 
+def unconfirmed_twin(
+    connection: sqlite3.Connection, *, operation: str, request: Mapping[str, Any], base_url: str
+) -> dict[str, Any] | None:
+    """The latest single submission of this same request that never got an answer.
+
+    Sending the request again under a new key would create a second paid task
+    if the first one did arrive. Batch items are tracked by their batch.
+    """
+    batch_keys = (
+        "AND idempotency_key NOT IN (SELECT idempotency_key FROM batch_items) "
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'batch_items'"
+        ).fetchone()
+        else ""
+    )
+    row = connection.execute(
+        "SELECT * FROM tasks WHERE status = 'submitting' AND remote_task_id IS NULL "
+        "AND operation = ? AND base_url = ? AND request_json = ? "
+        f"{batch_keys}ORDER BY created_at DESC LIMIT 1",
+        (operation, base_url, _json(request)),
+    ).fetchone()
+    return _row_dict(row) if row is not None else None
+
+
 def get_task(
     connection: sqlite3.Connection,
     local_task_id: str | None = None,

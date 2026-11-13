@@ -52,6 +52,7 @@ from .state import (
     cancel_blocked_batch_intent,
     create_task_intent,
     list_assets,
+    unconfirmed_twin,
     update_task,
     upsert_asset,
     utc_now,
@@ -1221,6 +1222,30 @@ def _still_running(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _refuse_unconfirmed_twin(client: AsynxClient, body: dict[str, Any], operation: str) -> None:
+    """Stop a request whose earlier identical submission is still unconfirmed.
+
+    Running the command again after an interruption is how one request becomes
+    two paid tasks, so the earlier record has to be settled first.
+    """
+    connection = connect_ledger_db()
+    try:
+        twin = unconfirmed_twin(
+            connection, operation=operation, request=body, base_url=client.base_url
+        )
+    finally:
+        connection.close()
+    if twin is None:
+        return
+    local_id = str(twin["local_id"])
+    raise AsxError(
+        "相同的请求此前已提交过一次，尚未确认服务是否受理，本次没有发送。"
+        "请先确认原提交：已受理则继续等待原任务，确认未创建后再重新生成。",
+        code="unconfirmed_submission_exists",
+        details={"local_id": local_id, "next_action_args": ["task", "recover", local_id]},
+    )
+
+
 def run_submission(
     client: AsynxClient, args: argparse.Namespace, task_type: str
 ) -> tuple[dict[str, Any], int]:
@@ -1301,6 +1326,8 @@ def run_submission(
     prepared_at = time.perf_counter()
     if getattr(args, "quote", False):
         return quote_payload(client, body), 0
+    if not args.idempotency_key:
+        _refuse_unconfirmed_twin(client, body, task_type.removeprefix("image."))
     idempotency_key = validate_idempotency_key(
         args.idempotency_key or f"asx-{secrets.token_hex(16)}"
     )

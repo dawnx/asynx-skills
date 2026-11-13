@@ -462,6 +462,30 @@ class TaskContractTests(unittest.TestCase):
         self.assertEqual(len(self.client.submitted), 1)
         self.assertEqual(tasks.local_task_status("local_other")["task"]["status"], "submitting")
 
+    def test_same_request_is_not_sent_again_while_its_first_submission_is_unconfirmed(self):
+        # Rerunning the command after a lost answer is how one request became two paid tasks.
+        arguments = ["generate", "--prompt", "cat", "--detach", "--output-dir", str(self.root)]
+        self.client.reject_submit = True
+        with self.assertRaises(AsxError) as lost:
+            self.execute(arguments)
+        local_id = lost.exception.details["local_id"]
+        self.client.reject_submit = False
+        with self.assertRaises(AsxError) as stopped:
+            self.execute(arguments)
+        self.assertEqual(stopped.exception.code, "unconfirmed_submission_exists")
+        self.assertEqual(
+            stopped.exception.details["next_action_args"], ["task", "recover", local_id]
+        )
+        self.assertEqual(self.client.submitted, [])
+        # A different request is unaffected, and so is this one once the first is settled.
+        other, _ = self.execute(["generate", "--prompt", "dog", "--detach", "--output-dir", str(self.root)])
+        self.assertTrue(other["ok"])
+        with patch.object(tasks, "SUBMISSION_SETTLE_SECONDS", 0):
+            tasks.recover_tasks(self.client, local_id)
+        again, _ = self.execute(arguments)
+        self.assertTrue(again["ok"])
+        self.assertEqual(len(self.client.submitted), 2)
+
     def test_reused_key_with_an_unanswered_attempt_is_looked_up_before_sending(self):
         # Sending again under the same key is how one request became two tasks.
         arguments = ["generate", "--prompt", "cat", "--detach", "--output-dir", str(self.root),

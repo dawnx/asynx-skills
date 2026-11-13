@@ -4,7 +4,7 @@
 
 ## 批次
 
-`--total` 表示独立任务数，`--count` 表示每个任务的输出数量或组图上限；二者不能互换。对只支持单图的模型，明确授权生成多张独立结果后使用 `--count 1 --total N`，不可承诺跨任务内容严格一致，也不能因组图请求失败擅自增加付费提交。
+`--total` 表示独立任务数，`--count` 表示每个任务的输出数量或组图上限；二者不能互换。对只支持单图的模型，用户授权生成多张独立结果后使用 `--count 1 --total N`；各任务独立生成，内容不保证一致。
 
 ```bash
 python3 "<skill-dir>/scripts/asynx.py" batch create --prompt "<描述>" --total 12
@@ -13,7 +13,7 @@ python3 "<skill-dir>/scripts/asynx.py" batch add "<batch-id>" --total 5 --prompt
 
 创建和追加会开始提交任务。`--total` 每次可创建或追加 1–1000 项，`--count` 是每个图片任务的输出张数。`create`、`add`、`poll` 单次默认最多提交 4 项，可用 `--limit` 调整。批量编辑使用 `batch create --operation edit --image "<图片路径>"`。
 
-每项描述或参数不同时，用清单一次建好，不要逐项 `batch add`：
+每项描述或参数不同时，用清单一次建好：
 
 ```bash
 python3 "<skill-dir>/scripts/asynx.py" batch create --items-file "/absolute/path/items.jsonl" --aspect-ratio 16:9
@@ -43,9 +43,7 @@ python3 "<skill-dir>/scripts/asynx.py" batch create --items-file "/absolute/path
 
 使用当前对话确认的批次 ID。返回 `batch.files` 可直接交付，失败与下载问题见返回详情；单项失败不重做整批。进程停止后，未提交项目不会自动推进。
 
-提交受阻时批次不会无限重试：
-
-批次按服务返回的 `next_step` 处理提交错误：
+提交受阻时批次不会无限重试，按服务返回的 `next_step` 处理：
 
 - `retry_later`：账户并发已满时，剩余项目保持待提交，下一轮继续，批次不暂停；模型暂不可用或网络持续失败时逐轮延长间隔，连续 5 轮仍失败后自动暂停。
 - `fix_account`、`contact_support`：立即自动暂停批次，剩余项目不再提交。
@@ -67,9 +65,9 @@ python3 "<skill-dir>/scripts/asynx.py" batch create --items-file "/absolute/path
 
 - 查到原任务：绑定到本地记录，继续等待并下载结果。
 - 确认没有创建：记录标为失败并返回 `task_created: false`。用户仍需要结果时再重新提交。
-- `submission_pending`：原请求发出不足 3 分钟，可能仍在途中；稍后再执行一次，不要重新生成。
+- `submission_pending`：原请求发出不足 3 分钟，可能仍在途中；稍后再执行一次。
 
-带 `--idempotency-key` 重复提交、以及批次重新发送某一项之前，脚本同样会先做这一查询。
+带 `--idempotency-key` 重复提交、以及批次重新发送某一项之前，脚本同样会先做这一查询。不带请求标识再次运行相同的命令时，只要原提交尚未确认，命令就以 `unconfirmed_submission_exists` 停止并指向 `task recover`，不会发送第二次。
 
 取消请求不保证远端立即停止，已开始的任务可能继续计费。
 

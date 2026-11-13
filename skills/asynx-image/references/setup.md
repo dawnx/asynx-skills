@@ -1,6 +1,6 @@
 # 配置与维护
 
-仅在安装、配置异常或版本管理时阅读本文档。命令中的 `<skill-dir>` 为当前 Skill 的绝对路径；Windows 可使用 `py` 替代 `python3`。普通生图前不得增加配置检查或更新检查。
+仅在安装、配置异常或版本管理时阅读本文档。命令中的 `<skill-dir>` 为当前 Skill 的绝对路径；Windows 可使用 `py` 替代 `python3`。普通生图直接调用即可：缺少配置时命令会给出指引。
 
 ## 配置与诊断
 
@@ -11,8 +11,8 @@ python3 "<skill-dir>/scripts/asynx.py" doctor
 python3 "<skill-dir>/scripts/asynx.py" doctor --verify
 ```
 
-- `configure` 由用户在自己的交互式终端输入密钥，Agent 不得代填，也不得索要对话中的密钥。保存成功仅表示已写入配置，未进行联网验证。
-- `config status` 用于查看配置来源及环境变量覆盖情况；需要进一步排查副本、权限等问题时使用 `doctor`。两者默认不联网，也不得读取配置原文输出完整密钥。
+- `configure` 只接受交互式终端输入，在非终端环境中直接退出；密钥由用户自己输入。保存成功仅表示已写入配置，未进行联网验证。
+- `config status` 用于查看配置来源及环境变量覆盖情况；需要进一步排查副本、权限等问题时使用 `doctor`。两者默认不联网，输出中的密钥只显示前缀。
 - 用户要求验证连接或密钥时使用 `doctor --verify`。该命令仅读取模型目录；通过不代表已验证生图权限、余额或实际生成。网络错误不等同于密钥错误。
 - 使用公共服务时无需设置地址。仅在用户明确使用自托管部署时运行 `configure --base-url "https://asynx.example.com/api"`。
 - API Key 在 LLMAPI 控制台创建：<https://llmapi.site/api-keys>。接受任意非空且不含空白字符的 LLMAPI Key。
@@ -29,7 +29,7 @@ python3 "<skill-dir>/scripts/asynx.py" doctor --verify
 
 宿主对单条命令有时长上限时，可设置 `"max_wait_seconds": 100`（0–86400，0 表示等到任务截止）作为等待上限的默认值，环境变量 `ASYNX_MAX_WAIT_SECONDS` 优先，命令行 `--max-wait` 再优先。到时命令返回仍在运行的任务，任务不会取消。
 
-任务记录保存在本机数据库（macOS/Linux 为 `~/.local/state/asx/state.db`，Windows 为 `%LOCALAPPDATA%\Asynx\state.db`）。记录中不保存图片内容：本地参考图处理后暂存在缓存目录的 `uploads` 子目录（macOS/Linux 为 `~/.cache/asx/uploads`，Windows 为 `%LOCALAPPDATA%\Asynx\cache\uploads`），上传一次后由任务引用。未结束的任务与批次仍需要这些暂存文件，请勿手动删除。用户要求清理时：
+任务记录保存在本机数据库（macOS/Linux 为 `~/.local/state/asx/state.db`，Windows 为 `%LOCALAPPDATA%\Asynx\state.db`）。记录中不保存图片内容：本地参考图处理后暂存在缓存目录的 `uploads` 子目录（macOS/Linux 为 `~/.cache/asx/uploads`，Windows 为 `%LOCALAPPDATA%\Asynx\cache\uploads`），上传一次后由任务引用。未结束的任务与批次仍需要这些暂存文件，清理交给 `prune`。用户要求清理时：
 
 ```bash
 python3 "<skill-dir>/scripts/asynx.py" prune --dry-run
@@ -78,10 +78,10 @@ python3 "<skill-dir>/scripts/asynx.py" update apply
 python3 "<skill-dir>/scripts/asynx.py" update rollback
 ```
 
-`status` 离线查看版本与位置；`check` 使用 6 小时缓存，`--force` 立即联网。任务成功后的自动检查亦使用缓存，新版提示可能重复出现。用户要求关闭时可设置 `ASYNX_UPDATE_CHECK=off`，但不得将当前子进程的临时设置表述为已永久关闭。
+`status` 离线查看版本与位置；`check` 使用 6 小时缓存，`--force` 立即联网。任务成功后的自动检查亦使用缓存，新版提示可能重复出现。用户要求关闭时可设置 `ASYNX_UPDATE_CHECK=off`；该环境变量只对设置它的进程生效，长期关闭需由用户写入自己的环境配置。
 
-用户要求升级时直接执行 `apply`；默认更新工具识别的所有已登记副本，`--target current` 仅更新当前副本，也支持 `codex` / `claude`。更新不需要 API Key，保留配置、任务数据与图片。检测到本地修改或非本工具管理的副本时，说明原因，不得自动添加 `--force`；后者应通过原安装工具更新。
+用户要求升级时直接执行 `apply`；默认更新工具识别的所有已登记副本，`--target current` 仅更新当前副本，也支持 `codex` / `claude`。更新不需要 API Key，保留配置、任务数据与图片。检测到本地修改或非本工具管理的副本时，命令会停止并说明原因。`--force` 会覆盖本地修改，仅在用户明确要求时使用；非本工具管理的副本通过原安装工具更新。
 
 升级失败会尝试自动恢复；需要恢复上一版本或处理中断的更新时使用 `rollback`。完成后提示用户重新打开会话或刷新 Skill 列表。
 
-更新仅使用已发布的稳定 Release。仓库中尚未发布的改动，须在仓库根目录执行 `git pull` 后重新运行安装器；不得声称 `update apply` 会安装未发布的提交。
+更新仅使用已发布的稳定 Release。仓库中尚未发布的改动，须在仓库根目录执行 `git pull` 后重新运行安装器。

@@ -11,7 +11,7 @@ python3 "<skill-dir>/scripts/asynx.py" video generate --prompt "镜头缓慢环�
 python3 "<skill-dir>/scripts/asynx.py" video generate --prompt "<视频描述>" --duration 10 --resolution 1080p --aspect-ratio 9:16
 ```
 
-未指定时默认为 5 秒、720p、16:9；分辨率可选 `720p`、`1080p`、`2K`。用户指定的时长原样交由 Asynx 校验，不得自动取整、截断或改为其他时长。未指定模型时省略 `--model`，由服务选用默认视频模型；用户指定时传 `--model "<模型名>"`，可用模型见 `models --modality video`。不得自行更换用户指定的模型。
+未指定时默认为 5 秒、720p、16:9；分辨率可选 `720p`、`1080p`、`2K`。用户指定的时长原样发送，由 Asynx 校验。未指定模型时省略 `--model`，由服务选用默认视频模型；用户指定时传 `--model "<模型名>"`，可用模型见 `models --modality video`。
 
 声音沿用模型原生能力，对白、音效或配乐要求写入提示词，无独立声音开关。下载成功不代表已检查音轨或声音内容。用户要求验收时，再针对其指定的内容检查。
 
@@ -27,10 +27,10 @@ python3 "<skill-dir>/scripts/asynx.py" video generate --reference-video "https:/
 ```
 
 - `--first-frame` 与 `--last-frame` 分别指定首帧与尾帧；使用尾帧时须同时提供首帧。
-- 普通参考图使用 `--reference`，多张时重复该参数，不得将参考图默认为首帧。
+- 普通参考图使用 `--reference`，多张时重复该参数；只有 `--first-frame` 传入的图片才作为首帧。
 - 图片可使用本地路径、Data URL 或 HTTP(S) 链接。本地图交由脚本校正方向、缩放并一次性编码为 JPEG/PNG，再单独上传后由任务引用，Agent 无需预处理。
 - 视频参考仅接受 HTTP(S) 的 MP4 链接，音频参考仅接受 HTTP(S) 的 MP3/WAV 链接。当前不支持本地视频或音频路径，也不会自动上传至第三方文件服务。
-- 本地图片由脚本处理，其余素材限制由 Asynx 校验。参考素材超限时说明原因，不得反复压缩、裁切或改动用户素材。
+- 本地图片由脚本处理，其余素材限制由 Asynx 校验。素材超限时命令会说明原因，由用户决定是否更换素材。
 
 本功能为基于参考素材生成新视频，不提供 `video edit`，也不提供本地剪辑、转码或拼接命令。
 
@@ -40,7 +40,7 @@ python3 "<skill-dir>/scripts/asynx.py" video generate --reference-video "https:/
 python3 "<skill-dir>/scripts/asynx.py" video generate --from-task "<image-task-id>" --prompt "保持图片中的产品外观，生成缓慢环绕的展示视频"
 ```
 
-优先使用当前对话已确定的图片。`--from-task` 将该任务唯一一张本地图片作为首帧；存在多个结果时先选定一张，再用 `--first-frame` 传入路径，不得自行将多张结果一并提交。查找素材可使用 `recent --query "<描述或任务 ID>"`，使用前核对类型与描述，不得扫描磁盘。
+优先使用当前对话已确定的图片。`--from-task` 将该任务唯一一张本地图片作为首帧；存在多个结果时命令会停止（`ambiguous_video_source`），选定一张后用 `--first-frame` 传入路径。查找素材使用 `recent --query "<描述或任务 ID>"`，使用前核对类型与描述。
 
 ## 查询、恢复与交付
 
@@ -51,11 +51,11 @@ python3 "<skill-dir>/scripts/asynx.py" task recover "<task-id>"
 python3 "<skill-dir>/scripts/asynx.py" task cancel "<task-id>"
 ```
 
-普通生成在同一脚本进程内等待，无需另起命令重复查询。用户仅查询进度时使用 `task status --refresh`；提交中断、不确定是否已受理时使用 `task recover` 向服务确认（只查询，不重新提交）。下载失败使用 `wait` 取回原结果，不得重新生成。
+普通生成在同一脚本进程内等待，无需另起命令重复查询。用户仅查询进度时使用 `task status --refresh`；提交中断、不确定是否已受理时使用 `task recover` 向服务确认（只查询，不重新提交）。下载失败使用 `wait` 取回原结果，不产生新任务。
 
-直接交付返回的 `files`，其中 `videos` 为视频，`images` 为图片附件，`media` 标明素材类型。宿主支持本地播放视频时可用绝对路径展示，否则提供文件链接。不得将封面图作为视频交付，也不得凭猜测补充结果中未返回的时长、尺寸或音轨信息。
+直接交付返回的 `files`，其中 `videos` 为视频，`images` 为图片附件，`media` 标明素材类型。宿主支持本地播放视频时可用绝对路径展示，否则提供文件链接。`images` 中的封面图不是视频；时长、尺寸与音轨只说明结果中返回的内容。
 
-等待中断不等于取消。发出取消请求后，上游任务仍可能继续执行并计费；收到 `delayed` 也不得重新提交。部分失败与下载错误须如实说明。
+等待中断不等于取消。发出取消请求后，上游任务仍可能继续执行并计费。`delayed` 表示任务仍在进行，继续等待原任务。部分失败与下载错误须如实说明。
 
 ## 视频批次
 
