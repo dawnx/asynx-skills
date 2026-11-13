@@ -224,6 +224,7 @@ class AsynxClient:
         body: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
         retry_safe: bool = False,
+        timeout: float = REQUEST_TIMEOUT_SECONDS,
     ) -> tuple[dict[str, Any], str | None]:
         encoded = (
             json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -236,7 +237,7 @@ class AsynxClient:
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
         raw, status, response_headers = self._exchange(
-            method, path, encoded, headers, retry_safe=retry_safe
+            method, path, encoded, headers, retry_safe=retry_safe, timeout=timeout
         )
         payload = _decode_json(raw, context="Asynx API")
         request_id = payload.get("request_id") or response_headers.get("X-Request-ID")
@@ -255,6 +256,7 @@ class AsynxClient:
         extra_headers: dict[str, str],
         *,
         retry_safe: bool,
+        timeout: float = REQUEST_TIMEOUT_SECONDS,
     ) -> tuple[bytes, int, Any]:
         """Send one API request and return the raw success answer, its status and headers."""
         headers = {
@@ -271,7 +273,7 @@ class AsynxClient:
             for attempt in range(MAX_HTTP_ATTEMPTS):
                 request = Request(url, data=encoded, headers=headers, method=method)
                 try:
-                    with opener.open(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                    with opener.open(request, timeout=timeout) as response:
                         raw = _read_limited(
                             response, limit=MAX_API_RESPONSE_BYTES, context="Asynx API"
                         )
@@ -429,8 +431,17 @@ class AsynxClient:
         """Price a request with the service's own planner; creates and charges nothing."""
         return self.request_json("POST", "/v1/tasks/quote", body=body, retry_safe=True)
 
-    def task(self, task_id: str) -> tuple[dict[str, Any], str | None]:
-        return self.request_json("GET", f"/v1/tasks/{quote(task_id, safe='')}", retry_safe=True)
+    def task(self, task_id: str, *, wait: int = 0) -> tuple[dict[str, Any], str | None]:
+        """Read one task. With ``wait``, the service holds the answer for up to that
+        many seconds, answering as soon as the task ends or its status changes.
+        """
+        path = f"/v1/tasks/{quote(task_id, safe='')}"
+        if wait <= 0:
+            return self.request_json("GET", path, retry_safe=True)
+        # The answer is expected to take the whole wait: allow for it on the socket.
+        return self.request_json(
+            "GET", f"{path}?wait={wait}", retry_safe=True, timeout=wait + REQUEST_TIMEOUT_SECONDS
+        )
 
     def cancel(self, task_id: str) -> tuple[dict[str, Any], str | None]:
         return self.request_json("POST", f"/v1/tasks/{quote(task_id, safe='')}/cancel")

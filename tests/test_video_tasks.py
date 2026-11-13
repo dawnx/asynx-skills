@@ -19,7 +19,7 @@ class VideoClient(FakeClient):
     fail_second = False
     poster_only = False
 
-    def task(self, task_id):
+    def task(self, task_id, *, wait=0):
         task, request_id = super().task(task_id)
         task["task_type"] = "video.generate"
         task["result"]["assets"] = [{"index": 2}, {"index": 5}]
@@ -42,7 +42,6 @@ class VideoTaskTests(unittest.TestCase):
             "ASYNX_STATE_PATH": str(self.root / "state.db"),
             "ASYNX_CONFIG_PATH": str(self.root / "config.json"),
             "ASYNX_CACHE_PATH": str(self.root / "cache.json"),
-            "ASYNX_INITIAL_POLL_DELAY_SECONDS": "0",
             "ASYNX_UPDATE_CHECK": "off",
         })
         env.start()
@@ -92,16 +91,14 @@ class VideoTaskTests(unittest.TestCase):
         tasks.recover_tasks(self.client, submitted["local_id"])
         self.assertEqual(len(self.client.submitted), 1)
 
-    def test_video_wait_retains_type_and_uses_longer_poll_interval(self):
-        delays = []
+    def test_video_wait_retains_type(self):
         queued = {"id": "task_wait", "status": "queued", "task_type": "video.generate"}
         with patch.object(self.client, "task", side_effect=[
             ({"id": "task_wait", "status": "running"}, None),
             ({"id": "task_wait", "status": "succeeded"}, None),
-        ]), patch.object(tasks.random, "uniform", return_value=0):
-            result, _ = tasks.wait_for_terminal(self.client, queued, None, sleep=delays.append, initial_delay=20)
+        ]):
+            result, _ = tasks.wait_for_terminal(self.client, queued, None)
         self.assertEqual(result["task_type"], "video.generate")
-        self.assertEqual(delays, [20, 10])
 
 
 if __name__ == "__main__":

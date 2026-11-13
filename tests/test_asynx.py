@@ -99,7 +99,7 @@ class FakeAsynxHandler(BaseHTTPRequestHandler):
             self._json(200, {"items": [{"id": "task_test"}] if found else [], "next_cursor": None})
             return
         if self.path.startswith("/v1/tasks/") and "/assets/" not in self.path:
-            task_id = self.path.rsplit("/", 1)[-1]
+            task_id = urlsplit(self.path).path.rsplit("/", 1)[-1]
             type(self).task_reads[task_id] = type(self).task_reads.get(task_id, 0) + 1
             status = "running" if type(self).task_reads[task_id] == 1 else "succeeded"
             self._json(200, {**self.task(status, task_id), "idempotency_key": type(self).accepted_key})
@@ -453,34 +453,6 @@ class UnitTestCase(unittest.TestCase):
         self.assertNotIn("aspect_ratio", body["input"])
         self.assertNotIn("quality", body["input"])
         self.assertEqual(body["input"]["output_format"], "png")
-
-    def test_task_polling_uses_initial_delay_then_four_seconds(self) -> None:
-        class StatusClient:
-            def __init__(self) -> None:
-                self.statuses = iter(["running", "delayed", "running", "succeeded"])
-
-            def task(self, task_id: str) -> tuple[dict[str, Any], str | None]:
-                return {
-                    "id": task_id,
-                    "status": next(self.statuses),
-                    "deadline_at": "2099-01-01T00:00:00Z",
-                }, "req_poll"
-
-        delays: list[float] = []
-        with patch("asxlib.tasks.random.uniform", return_value=0.0):
-            result, _request_id = tasks.wait_for_terminal(
-                StatusClient(),
-                {
-                    "id": "task_poll",
-                    "status": "queued",
-                    "deadline_at": "2099-01-01T00:00:00Z",
-                },
-                "req_initial",
-                sleep=delays.append,
-                initial_delay=20.0,
-            )
-        self.assertEqual(result["status"], "succeeded")
-        self.assertEqual(delays, [20.0, 4.0, 4.0, 4.0])
 
     def test_batch_create_poll_and_append_are_resumable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

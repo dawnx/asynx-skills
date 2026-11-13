@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "skills/asynx-image/scripts"))
 
-from asxlib import client, errors, uploads
+from asxlib import client, constants, errors, uploads
 
 CONTRACT = json.loads(
     (Path(__file__).parent / "fixtures" / "asynx-client-contract.json").read_text(encoding="utf-8")
@@ -42,6 +42,13 @@ class ServiceContractTests(unittest.TestCase):
         self.assertEqual(files["path"], "POST /v1/files")
         self.assertEqual(f"^{client._FILE_ID.pattern}$", files["file_id_pattern"])
         self.assertEqual(uploads.MISSING_FILE_CODE, files["missing_file_code"])
+
+
+    def test_task_waits_stay_within_what_the_service_accepts(self):
+        # A longer wait is rejected outright, so every status read would fail.
+        wait = CONTRACT["task_wait"]
+        self.assertEqual(wait["parameter"], "wait")
+        self.assertTrue(0 < constants.TASK_WAIT_SECONDS <= wait["max_seconds"])
 
 
 

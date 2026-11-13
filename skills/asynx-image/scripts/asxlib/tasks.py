@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
-import random
 import re
 import secrets
 import sqlite3
@@ -15,11 +14,11 @@ from typing import Any, Protocol
 
 from . import uploads
 from .client import AsynxClient
-from .config import default_output_root, initial_poll_delay_seconds, max_wait_seconds
+from .config import default_output_root, max_wait_seconds
 from .constants import (
     DEFAULT_OUTPUT_DIR,
     KNOWN_STATUSES,
-    MAX_TASK_POLL_DELAY_SECONDS,
+    TASK_WAIT_SECONDS,
     TERMINAL_STATUSES,
     UTC,
 )
@@ -81,7 +80,7 @@ _OPERATION_LABELS = {
     "image.generate": "图片生成", "image.edit": "图片编辑", "video.generate": "视频生成",
     **{task_type: f" 3D 模型{name}" for task_type, name in MODEL_OPERATION_NAMES.items()},
 }
-# Video and 3D work takes minutes, so their tasks are polled less often.
+# Video and 3D work takes minutes, so a wait on their tasks is given longer before it gives up.
 _LONG_TASK_PREFIXES = ("video.", "model.")
 
 
@@ -96,8 +95,12 @@ def _task_folder(local_id: str, prompt: Any) -> str:
     return "-".join(part for part in (stamp, words, local_id[-6:]) if part)
 
 
+# The least time between two status requests that brought no change.
+_MIN_ROUND_SECONDS = 2.0
+
+
 class TaskStatusClient(Protocol):
-    def task(self, task_id: str) -> tuple[dict[str, Any], str | None]: ...
+    def task(self, task_id: str, *, wait: int = 0) -> tuple[dict[str, Any], str | None]: ...
 
 
 def parse_deadline(value: Any) -> datetime | None:
@@ -116,12 +119,13 @@ def wait_for_terminal(
     request_id: str | None,
     *,
     sleep: Callable[[float], None] = time.sleep,
-    initial_delay: float = MAX_TASK_POLL_DELAY_SECONDS,
-    poll_interval: float | None = None,
     max_wait: float = 0,
 ) -> tuple[dict[str, Any], str | None]:
-    """Poll until the task ends, or until ``max_wait`` seconds pass (0: no bound).
+    """Wait until the task ends, or until ``max_wait`` seconds pass (0: no bound).
 
+    Each status request asks the service to hold the answer until the task ends
+    or its status changes, so nothing is slept between requests; ``sleep`` only
+    spaces out answers that come back early and unchanged.
     A bounded wait returns the still-running task; nothing is canceled.
     """
     task_id = task.get("id")
@@ -134,8 +138,6 @@ def wait_for_terminal(
         if deadline
         else datetime.now(UTC) + timedelta(minutes=65 if str(task.get("task_type", "")).startswith(_LONG_TASK_PREFIXES) else 20)
     )
-    interval = poll_interval or (10.0 if str(task.get("task_type", "")).startswith(_LONG_TASK_PREFIXES) else MAX_TASK_POLL_DELAY_SECONDS)
-    delay = initial_delay
     last_status: str | None = None
     stop_at = time.monotonic() + max_wait if max_wait > 0 else None
     while True:
@@ -151,7 +153,9 @@ def wait_for_terminal(
             last_status = status
         if status in TERMINAL_STATUSES:
             return task, request_id
-        if datetime.now(UTC) >= client_deadline:
+        # Less than a second left of either bound is too little to ask the service to wait.
+        remaining = (client_deadline - datetime.now(UTC)).total_seconds()
+        if remaining < 1:
             raise AsxError(
                 "本次等待已超时，但任务未被取消。请稍后查询或继续等待原任务，无需重新生成。",
                 code="client_wait_timeout",
@@ -161,16 +165,22 @@ def wait_for_terminal(
                 details={"next_action_args": ["wait", task_id]},
             )
         if stop_at is not None:
-            remaining = stop_at - time.monotonic()
-            if remaining <= 0:
+            left = stop_at - time.monotonic()
+            if left < 1:
                 return task, request_id
-            delay = min(delay, remaining)
+            remaining = min(remaining, left)
         try:
-            sleep(delay)
-            delay = interval + random.uniform(0.0, interval * 0.15)
-            task, request_id = client.task(task_id)
+            asked_at = time.monotonic()
+            # Rounded down, so the service is never asked to wait past either bound.
+            task, request_id = client.task(task_id, wait=min(TASK_WAIT_SECONDS, int(remaining)))
             if original_task_type:
                 task.setdefault("task_type", original_task_type)
+            if task.get("status") == status:
+                # The service may answer early and unchanged (a restart, say):
+                # never ask again at once.
+                pause = min(_MIN_ROUND_SECONDS, remaining) - (time.monotonic() - asked_at)
+                if pause > 0:
+                    sleep(pause)
         except KeyboardInterrupt:
             # The host stopped this command, not the task: report which one to resume.
             raise AsxError(
@@ -1215,7 +1225,6 @@ def run_submission(
     client: AsynxClient, args: argparse.Namespace, task_type: str
 ) -> tuple[dict[str, Any], int]:
     started_at = time.perf_counter()
-    initial_delay = initial_poll_delay_seconds() if not args.detach else 0.0
     wait_bound = wait_limit(args)
     log(f"正在准备{_OPERATION_LABELS[task_type]}……")
     references = args.reference if task_type in {"image.generate", "video.generate"} else getattr(args, "image", None)
@@ -1357,12 +1366,7 @@ def run_submission(
         return payload, 0 if payload["ok"] else 4
     # Printed at acceptance so a host that stops this command still shows what to resume.
     log(f"任务已受理：{task.get('id')}（本地记录 {local_id}）。若本命令被中断，请用 wait {local_id} 继续，不要重新生成。")
-    task, request_id = wait_for_terminal(
-        client, task, request_id,
-        initial_delay=MAX_TASK_POLL_DELAY_SECONDS if local_row.get("remote_task_id") else initial_delay,
-        poll_interval=10.0 if task_type.startswith(_LONG_TASK_PREFIXES) else None,
-        max_wait=wait_bound,
-    )
+    task, request_id = wait_for_terminal(client, task, request_id, max_wait=wait_bound)
     _update_local_snapshot(local_id, task, request_id)
     finished_at = time.perf_counter()
     timings["wait_seconds"] = round(finished_at - accepted_at, 3)

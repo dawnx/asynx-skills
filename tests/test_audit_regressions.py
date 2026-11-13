@@ -62,7 +62,7 @@ class FakeClient:
                 return self.task(f"task_{index}")
         return None, "lookup"
 
-    def task(self, task_id):
+    def task(self, task_id, *, wait=0):
         status = self.statuses.get(task_id, "succeeded")
         return {
             "id": task_id, "status": status,

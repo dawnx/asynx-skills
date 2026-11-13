@@ -117,7 +117,7 @@ python3 "<skill-dir>/scripts/asynx.py" task cancel "<task-id>"
 python3 "<skill-dir>/scripts/asynx.py" recent --modality model
 ```
 
-以上命令适用于生成与全部后续操作。生成通常需要数分钟，服务端截止时间默认为 30 分钟；脚本约每 10 秒查询一次。普通任务在同一脚本进程内等待，无需另起命令重复查询。等待被中断后使用 `wait` 取回原任务结果，不得重新生成或重新提交：骨骼绑定、动画与格式转换重新提交会再次计费。提交中断、不确定是否已受理时使用 `task recover` 向服务确认（只查询，不重新提交）。`wait`、`task status --refresh` 与 `task poll` 对绑定检查任务返回 `rig_check`，不下载文件；该任务没有文件，不会出现在 `recent` 中，之后用 `task status "<task-id>"` 查看结论。
+以上命令适用于生成与全部后续操作。生成通常需要数分钟，服务端截止时间默认为 30 分钟；任务结束后脚本立即取回结果。普通任务在同一脚本进程内等待，无需另起命令重复查询。等待被中断后使用 `wait` 取回原任务结果，不得重新生成或重新提交：骨骼绑定、动画与格式转换重新提交会再次计费。提交中断、不确定是否已受理时使用 `task recover` 向服务确认（只查询，不重新提交）。`wait`、`task status --refresh` 与 `task poll` 对绑定检查任务返回 `rig_check`，不下载文件；该任务没有文件，不会出现在 `recent` 中，之后用 `task status "<task-id>"` 查看结论。
 
 生成时间通常超过宿主单条命令的时长上限：可加 `--max-wait <秒>`（略小于上限），到时返回 `wait_timeout: true` 与仍在运行的任务，任务不会被取消，再按返回的 `next_action_args` 执行 `wait`。用户想先了解费用时加 `--quote`，只返回服务报价，不提交、不扣费。
 

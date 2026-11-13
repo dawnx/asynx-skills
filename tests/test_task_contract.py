@@ -32,7 +32,7 @@ class ResultClient(FakeClient):
         self.asset_count = 1
         self.failing_index = None
 
-    def task(self, task_id):
+    def task(self, task_id, *, wait=0):
         self.queried.append(task_id)
         result, request_id = super().task(task_id)
         result["result"]["assets"] = [
@@ -625,11 +625,10 @@ class TaskContractTests(unittest.TestCase):
     def test_wait_limit_returns_the_running_task_without_cancelling_it(self):
         # A host that kills long commands gets a resumable answer instead of no output.
         self.client.statuses["task_1"] = "running"
-        with patch.dict(os.environ, {"ASYNX_INITIAL_POLL_DELAY_SECONDS": "0"}):
-            running, code = self.execute([
-                "generate", "--prompt", "cat", "--max-wait", "0.05", "--output-dir", str(self.root / "bounded"),
-            ])
-        self.assertEqual((code, running["ok"], running["status"]), (0, True, "running"))
+        running, code = self.execute([
+            "generate", "--prompt", "cat", "--max-wait", "0.05", "--output-dir", str(self.root / "bounded"),
+        ])
+        self.assertEqual((code, running["ok"], running["status"]), (0, True, "queued"))
         self.assertTrue(running["wait_timeout"])
         self.assertEqual(running["next_action_args"], ["wait", running["local_id"]])
         self.assertEqual(self.client.statuses["task_1"], "running")

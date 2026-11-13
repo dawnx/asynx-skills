@@ -24,6 +24,10 @@
     "idempotency_lookup": "GET /v1/tasks?idempotency_key=",
     "language_header": "Accept-Language"
   },
+  "task_wait": {
+    "parameter": "wait",
+    "max_seconds": 60
+  },
   "file_uploads": {
     "path": "POST /v1/files",
     "file_id_pattern": "^file_[0-9A-HJKMNP-TV-Z]{26}$",

@@ -55,7 +55,6 @@ class CLIE2ETestCase(unittest.TestCase):
                 "ASYNX_STATE_PATH": str(self.temp_path / "state.db"),
                 "ASYNX_CACHE_PATH": str(self.temp_path / "models.json"),
                 "ASYNX_UPDATE_CHECK": "off",
-                "ASYNX_INITIAL_POLL_DELAY_SECONDS": "0",
             }
         )
 

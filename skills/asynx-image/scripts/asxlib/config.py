@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .constants import DEFAULT_BASE_URL, DEFAULT_INITIAL_POLL_DELAY_SECONDS, VERSION
+from .constants import DEFAULT_BASE_URL, VERSION
 from .errors import AsxError
 from .output import log
 
@@ -71,26 +71,6 @@ def _read_config_file(path: Path) -> dict[str, Any]:
 def read_config() -> dict[str, Any]:
     path = config_path()
     return _read_config_file(path) if path.exists() else {}
-
-
-def initial_poll_delay_seconds() -> float:
-    raw = os.environ.get("ASYNX_INITIAL_POLL_DELAY_SECONDS")
-    value = raw if raw is not None else read_config().get(
-        "initial_poll_delay_seconds", DEFAULT_INITIAL_POLL_DELAY_SECONDS
-    )
-    try:
-        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-            raise TypeError
-        delay = float(value)
-        if not math.isfinite(delay) or not 0 <= delay <= 300:
-            raise ValueError
-    except (TypeError, ValueError) as exc:
-        raise AsxError(
-            "首次查询等待时间须为 0–300 之间的秒数，请检查 initial_poll_delay_seconds "
-            "或环境变量 ASYNX_INITIAL_POLL_DELAY_SECONDS。",
-            code="invalid_poll_delay",
-        ) from exc
-    return delay
 
 
 def max_wait_seconds() -> float:
