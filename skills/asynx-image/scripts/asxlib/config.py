@@ -4,7 +4,6 @@ import getpass
 import json
 import math
 import os
-import re
 import shlex
 import stat
 import sys
@@ -126,7 +125,7 @@ def validate_base_url(value: str) -> str:
     return candidate
 
 
-def _configure_command() -> str:
+def configure_command() -> str:
     script = Path(__file__).resolve().parents[1] / "asynx.py"
     if os.name == "nt":
         return f'py "{script}" configure'
@@ -136,7 +135,7 @@ def _configure_command() -> str:
 def validate_api_key(value: Any) -> str:
     if not isinstance(value, str) or not value.strip():
         canonical = config_path()
-        command = _configure_command()
+        command = configure_command()
         raise AsxError(
             f"尚未配置可用的 LLMAPI API Key。配置文件：{canonical}。"
             f"请在自己的终端运行以下命令输入密钥（请勿发送至对话）：{command}",
@@ -248,34 +247,6 @@ def config_status() -> dict[str, Any]:
     }
 
 
-def _installation_info() -> list[dict[str, Any]]:
-    current = Path(__file__).resolve().parents[2]
-    candidates = [
-        current,
-        Path.home() / ".agents" / "skills" / "asynx-image",
-        Path.home() / ".claude" / "skills" / "asynx-image",
-    ]
-    installations: list[dict[str, Any]] = []
-    seen: set[Path] = set()
-    pattern = re.compile(r'^VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
-    for candidate in candidates:
-        resolved = candidate.expanduser().resolve()
-        if resolved in seen or not candidate.is_dir():
-            continue
-        seen.add(resolved)
-        version_file = candidate / "scripts" / "asxlib" / "constants.py"
-        version: str | None = None
-        try:
-            match = pattern.search(version_file.read_text(encoding="utf-8"))
-            version = match.group(1) if match else None
-        except OSError:
-            pass
-        installations.append(
-            {"path": str(resolved), "version": version, "current": resolved == current.resolve()}
-        )
-    return installations
-
-
 def _permission_check(path: Path | None) -> tuple[bool, str]:
     if path is None or not path.exists():
         return True, "当前未加载配置文件。"
@@ -295,9 +266,9 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
     source_value = status["loaded_config_path"]
     source = Path(source_value) if isinstance(source_value, str) else None
     permission_ok, permission_message = _permission_check(source)
-    installations = _installation_info()
-    versions = {item["version"] for item in installations if item["version"]}
-    version_ok = len(versions) <= 1
+    from .dependencies import pillow_version
+
+    pillow = pillow_version()
     checks: list[dict[str, Any]] = [
         {
             "name": "credentials",
@@ -317,11 +288,11 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             else "服务地址格式不正确，请检查地址配置。",
         },
         {
-            "name": "skill_versions",
-            "ok": version_ok,
-            "message": "已发现的 Skill 安装版本一致。"
-            if version_ok
-            else "检测到不同版本的 Skill，请确认 Agent 实际调用的位置。",
+            "name": "pillow",
+            "ok": pillow is not None,
+            "message": "图片处理依赖 Pillow 可用。"
+            if pillow is not None
+            else "缺少图片处理依赖 Pillow，请运行 setup 命令安装。",
         },
     ]
     issues: list[dict[str, str]] = []
@@ -330,7 +301,7 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
             {
                 "level": "error",
                 "code": "missing_api_key",
-                "message": f"尚未配置 API Key，请在自己的终端运行：{_configure_command()}。请勿将密钥发送至对话。",
+                "message": f"尚未配置 API Key，请在自己的终端运行：{configure_command()}。请勿将密钥发送至对话。",
             }
         )
     elif not status["key_valid"]:
@@ -357,24 +328,25 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
                 "message": permission_message,
             }
         )
-    if not version_ok:
+    if pillow is None:
         issues.append(
             {
                 "level": "warning",
-                "code": "skill_version_mismatch",
-                "message": "不同安装位置的 Asynx Skill 版本不一致，请确认实际调用的副本，并按需更新。",
+                "code": "pillow_not_installed",
+                "message": "缺少图片处理依赖 Pillow，本地图片处理与参考图压缩不可用，请运行 setup 命令安装。",
             }
         )
 
     result: dict[str, Any] = {
         "ok": not any(issue["level"] == "error" for issue in issues),
         "skill_version": VERSION,
+        "skill_path": str(Path(__file__).resolve().parents[2]),
         "python_executable": sys.executable,
         "home": str(Path.home()),
+        "pillow": {"available": pillow is not None, "version": pillow},
         "config": status,
         "checks": checks,
         "issues": issues,
-        "installations": installations,
     }
     if verify:
         try:

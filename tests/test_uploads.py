@@ -44,7 +44,6 @@ class UploadTests(unittest.TestCase):
         environment = patch.dict(os.environ, {
             "ASYNX_STATE_PATH": str(self.root / "state.db"),
             "ASYNX_CACHE_PATH": str(self.root / "cache" / "models.json"),
-            "ASYNX_UPDATE_CHECK": "off",
         })
         environment.start()
         self.addCleanup(environment.stop)

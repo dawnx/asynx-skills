@@ -1,0 +1,11 @@
+{
+  "name": "asynx",
+  "description": "通过 Asynx 生成和编辑图片、SVG、GIF、视频与 3D 模型，支持批量任务、进度查询与中断恢复",
+  "version": "0.6.6",
+  "author": {
+    "name": "dawnx"
+  },
+  "homepage": "https://github.com/dawnx/asynx-skills",
+  "repository": "https://github.com/dawnx/asynx-skills",
+  "license": "MIT"
+}

@@ -4,7 +4,7 @@ import contextlib
 import io
 import json
 import os
-import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -22,8 +22,6 @@ sys.path.insert(0, str(SCRIPTS))
 
 from asxlib import cli, config
 from asxlib.errors import AsxError
-
-import install as installer
 
 
 class TTY:
@@ -180,37 +178,41 @@ class ConfigurationCLITestCase(unittest.TestCase):
                 self.assertEqual(output.getvalue(), "")
                 self.assertNotIn("asx-existing-private-key", errors.getvalue())
 
-    def test_installer_verification_does_not_echo_upstream_body(self) -> None:
-        from types import SimpleNamespace
+    def test_doctor_reports_a_failed_connection_check_without_the_key(self) -> None:
+        # A failed check must name the cause and the request, never the credential.
         from unittest.mock import Mock
 
-        for code, status in (("network_error", None), ("unauthorized", 401), ("forbidden", 403), ("busy", 429), ("upstream_error", 502)):
-            with self.subTest(code=code):
+        secret = "asx-private-key-123456789"
+        for code, status in (("network_error", None), ("unauthorized", 401)):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
                 api = Mock()
                 api.models.side_effect = AsxError(
-                    'upstream body containing asx-private-key', code=code, http_status=status, request_id="req-test"
+                    "连接检查未通过。", code=code, http_status=status, request_id="req-test"
                 )
-                client = SimpleNamespace(
-                    AsxError=AsxError,
-                    load_credentials=lambda: ("asx-private-key", "https://example.test"),
-                    AsynxClient=Mock(return_value=api),
+                environment = isolated_environment(
+                    Path(directory),
+                    ASYNX_API_KEY=secret,
+                    ASYNX_CONFIG_PATH=str(Path(directory) / "config.json"),
                 )
-                errors = io.StringIO()
-                with contextlib.redirect_stderr(errors):
-                    result = installer._verify(cast(Any, client))
-                self.assertEqual(result, 1)
-                self.assertNotIn("asx-private-key", errors.getvalue())
-                self.assertNotIn("upstream body", errors.getvalue())
-                self.assertIn(code, errors.getvalue())
-                self.assertIn("req-test", errors.getvalue())
+                with (
+                    patch.dict(os.environ, environment, clear=True),
+                    patch("asxlib.client.AsynxClient", return_value=api),
+                ):
+                    result = config.doctor(verify=True)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["verification"]["error"]["code"], code)
+                self.assertIn("api_verification_failed", [item["code"] for item in result["issues"]])
+                self.assertNotIn(secret, json.dumps(result))
 
-    def test_new_process_and_installed_copies_share_saved_config(self) -> None:
+    def test_new_process_and_separate_copies_share_saved_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
-            codex = installer._target_path("codex", home)
-            claude = installer._target_path("claude", home)
-            installer._install_skill(codex, install_dependencies=False)
-            installer._install_skill(claude, install_dependencies=False)
+            # Two channels can each hold a copy; both read the one user-level file.
+            copies = [home / name / "asynx-image" for name in ("first", "second")]
+            for copy in copies:
+                shutil.copytree(
+                    SCRIPTS.parent, copy, ignore=shutil.ignore_patterns("__pycache__")
+                )
             environment = isolated_environment(home)
             secret = "asx-persisted-secret-123456789"
 
@@ -235,7 +237,7 @@ class ConfigurationCLITestCase(unittest.TestCase):
             self.assertEqual(writer.returncode, 0, writer.stderr)
 
             statuses: list[dict[str, Any]] = []
-            for installed in (codex, claude):
+            for installed in copies:
                 result, payload = run_cli(
                     installed / "scripts" / "asynx.py",
                     environment,
@@ -328,45 +330,6 @@ class ConfigurationCLITestCase(unittest.TestCase):
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertEqual(payload["error"]["code"], "interactive_terminal_required")
 
-    def test_doctor_detects_installed_version_mismatch(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            codex = installer._target_path("codex", home)
-            claude = installer._target_path("claude", home)
-            installer._install_skill(codex, install_dependencies=False)
-            installer._install_skill(claude, install_dependencies=False)
-            constants = claude / "scripts" / "asxlib" / "constants.py"
-            original = constants.read_text(encoding="utf-8")
-            changed = re.sub(
-                r'^VERSION = "[^"]+"$',
-                'VERSION = "0.0.0-test"',
-                original,
-                count=1,
-                flags=re.MULTILINE,
-            )
-            self.assertNotEqual(changed, original)
-            constants.write_text(changed, encoding="utf-8")
-
-            result, payload = run_cli(
-                CLI,
-                isolated_environment(home, ASYNX_API_KEY="asx-doctor-test"),
-                "doctor",
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            installations = cast(list[dict[str, Any]], payload["installations"])
-            by_path = {item["path"]: item for item in installations}
-            self.assertEqual(by_path[str(codex.resolve())]["version"], payload["skill_version"])
-            self.assertEqual(by_path[str(claude.resolve())]["version"], "0.0.0-test")
-            issues = cast(list[dict[str, Any]], payload["issues"])
-            self.assertTrue(
-                any(
-                    "version" in str(issue.get("code", "")).casefold()
-                    or "version" in str(issue.get("message", "")).casefold()
-                    for issue in issues
-                ),
-                issues,
-            )
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from .constants import (
     MAX_SAFE_IMAGE_PIXELS,
     REFERENCE_WEBP_QUALITY,
 )
+from .dependencies import missing_pillow
 from .errors import AsxError
 
 _DATA_URL = re.compile(
@@ -52,10 +53,7 @@ def _pillow() -> tuple[Any, Any, Any]:
         image_ops: Any = importlib.import_module("PIL.ImageOps")
         unidentified = importlib.import_module("PIL").UnidentifiedImageError
     except (ImportError, AttributeError) as exc:
-        raise AsxError(
-            "缺少图片处理依赖 Pillow，请按安装说明安装依赖后重试。",
-            code="pillow_not_installed",
-        ) from exc
+        raise missing_pillow() from exc
     image_module.MAX_IMAGE_PIXELS = MAX_SAFE_IMAGE_PIXELS
     return image_module, image_ops, unidentified
 

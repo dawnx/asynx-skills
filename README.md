@@ -6,34 +6,34 @@
 
 运行环境要求 Python 3.10+。生成图片、视频或 3D 模型须配置 [LLMAPI API Key](https://llmapi.site/api-keys)；仅使用本地图片处理功能时无需配置密钥。
 
-### Codex / Claude Code
+### Claude Code
 
-可使用仓库自带的安装器：
+本仓库是一个插件市场，提供 `asynx` 插件。在 Claude Code 会话中依次输入：
 
-```bash
-git clone https://github.com/dawnx/asynx-skills.git
-cd asynx-skills
-python3 install.py
+```text
+/plugin marketplace add dawnx/asynx-skills
+/plugin install asynx@asynx-skills
 ```
 
-Windows 环境下将最后一行改为 `py install.py`。
+安装后 Skill 以 `/asynx:asynx-image` 调用。
 
-安装器会检测 Codex 与 Claude Code，并引导用户输入 API Key。密钥应在终端中输入，不得发送至对话。
+### Codex 与其他 Agent
 
-如需仅安装至指定 Agent，可使用 `python3 install.py --target codex`、`--target claude` 或 `--target both`。
+使用开源的 [`skills` 命令行工具](https://github.com/vercel-labs/skills)，需要 Node.js 22.20+：
 
-默认安装位置：
+```bash
+npx skills add dawnx/asynx-skills -g
+```
 
-| Agent | 用户主目录下的路径 |
-| --- | --- |
-| Codex | `.agents/skills/asynx-image` |
-| Claude Code | `.claude/skills/asynx-image` |
+命令会列出本机检测到的 Agent 供选择，也可用 `-a codex` 直接指定。`-g` 安装到用户目录，所有项目可用（Codex 为 `~/.agents/skills/asynx-image`）；省略 `-g` 时安装到当前项目（Codex 为项目内的 `.agents/skills/asynx-image`）。各 Agent 的目录见该工具的 [Agent 列表](https://github.com/vercel-labs/skills/blob/main/docs/agents.md)。
 
-### 其他 Agent
+### 手动安装
 
-通过该 Agent 的 Skill 导入或安装功能选择本仓库的 `skills/asynx-image` 目录，脚本与参考文档均需保留；亦可将整个目录放入该 Agent 的 Skill 目录，具体位置以其说明为准。
+不使用以上工具时，将本仓库的 `skills/asynx-image` 整个目录复制到 Agent 的 Skill 目录（例如 `~/.agents/skills/asynx-image`），具体位置以该 Agent 的说明为准。更新时用新版目录替换，卸载时移除该目录。
 
-运行时需要 Python 3.10+、Pillow，以及访问 Asynx 服务的网络权限。依赖安装与密钥配置见[其他 Agent 安装](skills/asynx-image/references/setup.md#其他-agent)。
+### 完成设置
+
+安装后回到 Agent 对话，要求“设置 Asynx”。Agent 会检查并安装图片处理依赖 Pillow（装在用户目录中，不随 Skill 更新丢失），然后给出一条配置密钥的命令。在自己的终端运行该命令并输入 API Key，密钥不经过对话。详见[配置与维护](skills/asynx-image/references/setup.md)。
 
 ## 开始使用
 
@@ -51,7 +51,7 @@ Windows 环境下将最后一行改为 `py install.py`。
 - “继续上次的任务，完成后把结果给我。”
 - “把这张图片裁成正方形，再转成 WebP。”
 
-也可直接要求 Agent“使用 Asynx 生成图片”。快捷调用方式因 Agent 而异，例如 Codex 输入 `$asynx-image`，Claude Code 输入 `/asynx-image`。安装后若未出现，请重新打开会话或刷新 Skill 列表。
+也可直接要求 Agent“使用 Asynx 生成图片”。快捷调用方式因 Agent 与安装方式而异：Codex 输入 `$asynx-image`；Claude Code 通过插件安装时输入 `/asynx:asynx-image`，通过 `skills` 工具或手动安装时输入 `/asynx-image`。安装后若未出现，请重新打开会话或刷新 Skill 列表。
 
 单个任务默认等待完成后交付文件；需要稍后查看时，可要求“先提交”。批量任务支持查询进度、暂停与继续；离开对话后，已提交的任务继续生成，剩余项目可在返回后由 Agent 继续提交。
 
@@ -80,25 +80,25 @@ Windows 环境下将最后一行改为 `py install.py`。
 | macOS / Linux | `~/.config/asynx/config.json` |
 | Windows | `%APPDATA%\Asynx\config.json` |
 
-更换密钥时，可先由 Agent 提供配置指引，再到用户自己的终端输入。以下为 macOS / Linux 上 Codex 的示例：
+配置或更换密钥时，要求 Agent“设置 Asynx”，它会给出适用于本机安装位置的配置命令，形如：
 
 ```bash
 python3 ~/.agents/skills/asynx-image/scripts/asynx.py configure
 ```
 
-其他安装方式请将路径替换为实际安装目录中的 `scripts/asynx.py`。Windows 命令、环境变量与连接排查见[配置与维护](skills/asynx-image/references/setup.md)。如遇问题，也可直接要求“检查 Asynx 配置”，无需将密钥发送给 Agent。
+在自己的终端运行并输入密钥。Windows 命令、环境变量与连接排查见[配置与维护](skills/asynx-image/references/setup.md)。如遇问题，也可直接要求“检查 Asynx 配置”，无需将密钥发送给 Agent。
 
 ## 更新与卸载
 
-可直接要求 Agent“检查 Asynx Skill 更新”或“升级 Asynx Skill”。有新版本时会给出提示，仅在用户要求升级时才会安装。升级保留密钥、任务记录与已生成文件；通过其他工具安装的副本应使用原工具更新。手动更新与回滚见[更新说明](skills/asynx-image/references/setup.md#更新与回滚)。
+更新与卸载通过安装时使用的渠道完成，两者都保留密钥、任务记录、图片处理依赖与已生成文件。
 
-使用本仓库安装器安装的副本，卸载时在克隆的仓库根目录运行：
+| 安装方式 | 更新 | 卸载 |
+| --- | --- | --- |
+| Claude Code 插件 | 会话中输入 `/plugin marketplace update asynx-skills` | 终端运行 `claude plugin uninstall asynx@asynx-skills` |
+| `skills` 工具 | `npx skills update asynx-image -g` | `npx skills remove asynx-image -g` |
+| 手动安装 | 用新版 `skills/asynx-image` 替换原目录 | 移除该目录 |
 
-```bash
-python3 install.py --uninstall
-```
-
-Windows 使用 `py install.py --uninstall`。其他方式安装的副本，请通过对应 Agent 的 Skill 管理功能卸载，或移除其安装目录。卸载保留密钥、任务记录与已生成文件。
+安装到项目内的副本，去掉 `skills` 命令中的 `-g`。Claude Code 中可在 `/plugin` 的 Marketplaces 页为 `asynx-skills` 开启自动更新；更新后重新打开会话生效。
 
 ## 更多用法
 
@@ -106,6 +106,6 @@ Windows 使用 `py install.py --uninstall`。其他方式安装的副本，请�
 - [视频操作](skills/asynx-image/references/video.md)：视频参数、参考素材与视频批次。
 - [3D 模型操作](skills/asynx-image/references/model3d.md)：文字或图片生成 GLB 模型，绑定检查、骨骼绑定、动画与格式转换，参数、交付与恢复。
 - [模型与提示词](skills/asynx-image/references/model-prompting.md)：复杂编辑、多参考图及图文排版的提示词建议。
-- [配置与维护](skills/asynx-image/references/setup.md)：自托管地址、诊断与更新。
+- [配置与维护](skills/asynx-image/references/setup.md)：依赖与密钥设置、自托管地址、诊断与更新。
 
 需要接入自有工作流或工作台时，可调用公开 API 或封装脚本命令。任务应通过公开接口管理，请勿直接操作 Skill 的数据库；密钥交由可信后端或本地程序保管。

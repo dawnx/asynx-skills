@@ -20,8 +20,7 @@ class VideoBatchTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         env = patch.dict(os.environ, {"ASYNX_STATE_PATH": str(self.root / "state.db"),
-                                     "ASYNX_CACHE_PATH": str(self.root / "cache.json"),
-                                     "ASYNX_UPDATE_CHECK": "off"})
+                                     "ASYNX_CACHE_PATH": str(self.root / "cache.json")})
         env.start()
         self.addCleanup(env.stop)
         self.client = FakeClient()

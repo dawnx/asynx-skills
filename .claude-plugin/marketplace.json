@@ -1,0 +1,14 @@
+{
+  "name": "asynx-skills",
+  "description": "Asynx 图片、视频与 3D 模型创作 Skill",
+  "owner": {
+    "name": "dawnx"
+  },
+  "plugins": [
+    {
+      "name": "asynx",
+      "source": "./",
+      "description": "通过 Asynx 生成和编辑图片、SVG、GIF、视频与 3D 模型，支持批量任务、进度查询与中断恢复"
+    }
+  ]
+}

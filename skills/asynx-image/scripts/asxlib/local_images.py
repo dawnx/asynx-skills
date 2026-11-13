@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .constants import MAX_REFERENCE_SOURCE_BYTES, MAX_SAFE_IMAGE_PIXELS
+from .dependencies import missing_pillow
 from .errors import AsxError
 
 _FORMATS = {
@@ -26,10 +27,7 @@ def _pillow() -> tuple[Any, Any, Any, Any, Any]:
         image_ops: Any = importlib.import_module("PIL.ImageOps")
         unidentified = importlib.import_module("PIL").UnidentifiedImageError
     except (ImportError, AttributeError) as exc:
-        raise AsxError(
-            "缺少图片处理依赖 Pillow，请按安装说明安装依赖后重试。",
-            code="pillow_not_installed",
-        ) from exc
+        raise missing_pillow() from exc
     image.MAX_IMAGE_PIXELS = MAX_SAFE_IMAGE_PIXELS
     return image, image_chops, image_color, image_ops, unidentified
 

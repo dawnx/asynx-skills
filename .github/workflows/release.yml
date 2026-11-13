@@ -1,4 +1,4 @@
-name: Release skill
+name: Release
 
 on:
   push:
@@ -15,21 +15,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Check version
+      - name: Check that the tag, the Skill and the plugin manifest name one version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          python -c 'import os, subprocess; v = subprocess.check_output(["python", "skills/asynx-image/scripts/asynx.py", "--version"], text=True).strip(); assert os.environ["RELEASE_TAG"] == "v" + v'
+          skill="$(python skills/asynx-image/scripts/asynx.py --version)"
+          plugin="$(python -c 'import json; print(json.load(open(".claude-plugin/plugin.json", encoding="utf-8"))["version"])')"
+          echo "tag=$RELEASE_TAG skill=$skill plugin=$plugin"
+          test "$RELEASE_TAG" = "v$skill"
+          test "$skill" = "$plugin"
       - name: Test
-        env:
-          ASYNX_UPDATE_CHECK: 'off'
         run: |
-          python -m pip install 'Pillow>=10.2,<13'
+          python -m pip install "Pillow>=10.2,<13"
           python -m unittest discover -s tests -q
-      - name: Build
-        run: python scripts/build_release.py --output-dir dist
-      - name: Publish stable release
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" dist/asynx-image-*.zip dist/asynx-image-*.json --verify-tag --generate-notes
+        run: gh release create "$RELEASE_TAG" --verify-tag --generate-notes

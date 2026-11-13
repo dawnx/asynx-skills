@@ -8,7 +8,6 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,9 +16,7 @@ sys.path.insert(0, str(ROOT / "skills/asynx-image/scripts"))
 
 from asxlib import cli, config, tasks
 from asxlib.client import _api_error
-from asxlib.errors import AsxError, task_error
-
-import install as installer
+from asxlib.errors import task_error
 
 
 def answer(status, code, **data):
@@ -144,13 +141,9 @@ class UserMessageTests(unittest.TestCase):
         self.assertNotIn("private-exception-body", output.getvalue())
         self.assertEqual(json.loads(output.getvalue())["error"]["code"], "unexpected_error")
 
-    def test_video_only_catalog_passes_installer_and_doctor_verification(self):
+    def test_video_only_catalog_passes_doctor_verification(self):
         api = Mock()
         api.models.return_value = ([{"name": "video-model", "task_types": ["video.generate"]}], "req_test")
-        client = SimpleNamespace(AsxError=AsxError, load_credentials=lambda: ("test-key", "https://example.test"),
-                                 AsynxClient=Mock(return_value=api))
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(installer._verify(client), 0)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             environment = {key: value for key, value in os.environ.items() if not key.startswith("ASYNX_")}

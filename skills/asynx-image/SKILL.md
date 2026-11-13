@@ -72,7 +72,7 @@ python3 "<skill-dir>/scripts/asynx.py" wait "<task-id>"
 | 缩放、裁剪、切图、格式转换 | [本地图片工具](references/operations.md#本地图片工具) |
 | 参考图限制、蒙版 | [输入图片](references/operations.md#输入图片) |
 | SVG、GIF、透明背景、标注或高级参数 | [高级图片参数](references/operations.md#高级图片参数与结果格式) |
-| 安装、配置、默认保存目录、清理任务记录、升级或排障 | [配置与维护](references/setup.md) |
+| 首次设置、配置、默认保存目录、清理任务记录、安装与更新渠道或排障 | [配置与维护](references/setup.md) |
 | 模型探索、推荐、提示词优化或复杂构图 | [模型与提示词](references/model-prompting.md) |
 | 视频 | [视频操作](references/video.md) |
 | 3D 模型（文字或图片生成 GLB，绑定检查、骨骼绑定、动画、格式转换） | [3D 模型操作](references/model3d.md) |
@@ -82,7 +82,7 @@ python3 "<skill-dir>/scripts/asynx.py" wait "<task-id>"
 - 成功后直接交付 `files`，用绝对路径预览或提供链接；尺寸、格式等使用返回元数据。普通交付不额外查费用或评审画面，用户要求检查或排障时再展开。
 - 用自然语言说明已知错误、部分失败、下载失败和降级标记；没有原因不推断画质下降。用户明确要求接口结果时可提供脱敏 JSON。
 - 中断等待不等于取消，任务仍在服务端继续。用户明确要新结果时才提交新任务。
-- 结果附带警告或更新提示时一并说明，升级由用户提出。缺密钥时请用户在自己的终端运行 `configure`，该命令只接受终端输入。
+- 结果附带警告时一并说明。命令报告缺少依赖（`pillow_not_installed`）或密钥（`missing_api_key`）时运行 `setup`：它会装好依赖，并返回 `configure_command`，由用户在自己的终端运行以输入密钥。
 
 以下两点命令无法替你把关：
 

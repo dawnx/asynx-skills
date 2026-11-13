@@ -42,7 +42,6 @@ class VideoTaskTests(unittest.TestCase):
             "ASYNX_STATE_PATH": str(self.root / "state.db"),
             "ASYNX_CONFIG_PATH": str(self.root / "config.json"),
             "ASYNX_CACHE_PATH": str(self.root / "cache.json"),
-            "ASYNX_UPDATE_CHECK": "off",
         })
         env.start()
         self.addCleanup(env.stop)

@@ -11,7 +11,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import patch
 from urllib.request import Request, urlopen
 
 from PIL import Image  # type: ignore[import-not-found]
@@ -20,8 +19,6 @@ ROOT = Path(__file__).parents[1]
 CLI = ROOT / "skills" / "asynx-image" / "scripts" / "asynx.py"
 SERVER = ROOT / "tests" / "mock_asynx_server.py"
 sys.path.insert(0, str(ROOT))
-
-import install as installer
 
 VALID_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
@@ -54,7 +51,6 @@ class CLIE2ETestCase(unittest.TestCase):
                 "ASYNX_CONFIG_PATH": str(self.temp_path / "config.json"),
                 "ASYNX_STATE_PATH": str(self.temp_path / "state.db"),
                 "ASYNX_CACHE_PATH": str(self.temp_path / "models.json"),
-                "ASYNX_UPDATE_CHECK": "off",
             }
         )
 
@@ -144,24 +140,6 @@ class CLIE2ETestCase(unittest.TestCase):
         with urlopen(f"{self.base_url}/__mock__/stats", timeout=5) as response:
             stats = json.load(response)["data"]
         self.assertEqual((stats["tasks"], stats["uploads"]), (2, 2))
-
-    def test_installed_generation_with_read_only_runtime_lock(self) -> None:
-        installed = self.temp_path / ".agents" / "skills" / "asynx-image"
-        installer._install_skill(installed, install_dependencies=False)
-        lock = installed.parent / ".asx-runtime.lock"
-        original_mode = lock.stat().st_mode
-        lock.chmod(0o444)
-        try:
-            with patch(f"{__name__}.CLI", installed / "scripts" / "asynx.py"):
-                generated = self.run_cli(
-                    "generate", "--prompt", "生成一个卡通猫",
-                    "--output-dir", str(self.temp_path / "outputs"),
-                )
-            self.assertEqual(generated["status"], "succeeded")
-            self.assertEqual(len(generated["files"]), 1)
-            self.assertTrue(Path(generated["files"][0]).is_file())
-        finally:
-            lock.chmod(original_mode)
 
     def test_doctor_verify_uses_configured_mock_api(self) -> None:
         result = self.run_cli("doctor", "--verify")

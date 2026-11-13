@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import threading
@@ -29,9 +28,7 @@ from asxlib import (
     state,
     tasks,
 )
-from asxlib.constants import DEFAULT_BASE_URL, VERSION
-
-import install as installer
+from asxlib.constants import DEFAULT_BASE_URL
 
 VALID_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
@@ -299,66 +296,6 @@ class UnitTestCase(unittest.TestCase):
         self.assertEqual(saved["api_key"], "asx-test-key")
         self.assertEqual(saved["base_url"], DEFAULT_BASE_URL)
         self.assertTrue(result["configured"])
-
-    def test_installer_detects_and_copies_to_codex(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            (home / ".codex").mkdir()
-            self.assertEqual(installer._resolve_targets("auto", home), ["codex"])
-            destination = installer._target_path("codex", home)
-            installer._install_skill(destination, install_dependencies=False)
-            self.assertTrue((destination / "SKILL.md").is_file())
-            self.assertTrue((destination / "scripts" / "asynx.py").is_file())
-            installed = subprocess.run(
-                [sys.executable, str(destination / "scripts" / "asynx.py"), "--version"],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(installed.returncode, 0, installed.stderr)
-            self.assertEqual(installed.stdout.strip(), VERSION)
-
-    def test_installer_can_install_both_agents_noninteractively(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            environment = {
-                name: value
-                for name, value in os.environ.items()
-                if not name.startswith("ASYNX_") and name != "XDG_CONFIG_HOME"
-            }
-            environment["HOME"] = str(home)
-            with patch.dict(os.environ, environment, clear=True):
-                result = installer.run(
-                    ["--target", "both", "--skip-config", "--no-verify"],
-                    home=home,
-                    install_dependencies=False,
-                )
-            self.assertEqual(result, 0)
-            self.assertTrue((home / ".agents" / "skills" / "asynx-image" / "SKILL.md").is_file())
-            self.assertTrue((home / ".claude" / "skills" / "asynx-image" / "SKILL.md").is_file())
-
-    def test_installer_uninstall_only_removes_installed_skill(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            destination = installer._target_path("codex", home)
-            installer._install_skill(destination, install_dependencies=False)
-            self.assertTrue(installer._uninstall_skill(destination))
-            self.assertFalse(destination.exists())
-            self.assertFalse(installer._uninstall_skill(destination))
-
-    def test_installer_places_pillow_in_private_vendor_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            destination = Path(directory) / ".agents" / "skills" / "asynx-image"
-            with patch("install.subprocess.run") as pip:
-                pip.return_value.returncode = 0
-                installer._install_skill(destination)
-
-        command = pip.call_args.args[0]
-        target_index = command.index("--target") + 1
-        self.assertEqual(command[:3], [sys.executable, "-m", "pip"])
-        self.assertEqual(command[target_index], str(destination / "scripts" / "vendor"))
-        self.assertEqual(command[-1], installer.PILLOW_REQUIREMENT)
-        self.assertFalse(pip.call_args.kwargs["check"])
 
     def test_api_key_accepts_llmapi_keys(self) -> None:
         self.assertEqual(config.validate_api_key("sk-provider-key"), "sk-provider-key")

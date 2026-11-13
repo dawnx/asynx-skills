@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
-from pathlib import Path
 from typing import Any, NoReturn
 
 from .artifacts import recent_payload
@@ -257,26 +256,19 @@ def parser() -> argparse.ArgumentParser:
         "--base-url",
         help="自托管 Asynx 服务地址；使用公共服务时无需设置",
     )
-    update = commands.add_parser("update", help="检查、安装或回滚 Skill 更新")
-    update_commands = update.add_subparsers(dest="update_command", required=True)
-    update_commands.add_parser("status", help="离线查看版本、安装位置和上次检查结果")
-    check = update_commands.add_parser("check", help="检查是否有新版本")
-    check.add_argument("--force", action="store_true", help="立即联网检查，忽略缓存")
-    apply = update_commands.add_parser("apply", help="升级已安装的副本，并保留旧版本备份")
-    apply.add_argument("--target", choices=("all", "current", "codex", "claude"), default="all", help="更新范围，默认更新所有由本工具管理的已安装副本")
-    apply.add_argument("--force", action="store_true", help="备份后覆盖安装目录中的本地改动")
-    update_commands.add_parser("rollback", help="恢复到上一次更新前的版本，或恢复中断的更新")
+    commands.add_parser(
+        "setup", help="安装图片处理依赖 Pillow，并给出配置 API Key 的命令；无需密钥"
+    )
     config = commands.add_parser("config", help="查看本机 Asynx 配置")
     config_commands = config.add_subparsers(dest="config_command", required=True)
     config_commands.add_parser("status", help="查看配置状态，不会显示完整 API Key")
 
-    doctor_command = commands.add_parser("doctor", help="检查配置和 Skill 安装状态")
+    doctor_command = commands.add_parser("doctor", help="检查配置、依赖和 Skill 位置")
     doctor_command.add_argument(
         "--verify",
         action="store_true",
         help="验证密钥并读取模型列表，不提交生成任务",
     )
-    doctor_command.add_argument("--updates", action="store_true", help="同时检查 Skill 更新")
     models = commands.add_parser("models", help="列出可用模型，默认仅列出图片模型")
     models.add_argument("--operation", choices=("all", "generate", "edit"), default="all", help="按用途筛选")
     models.add_argument("--modality", choices=("image", "video", "model", "all"), default="image", help="图片模型、视频模型、3D 模型（model）或全部")
@@ -438,18 +430,11 @@ def _client() -> AsynxClient:
     return AsynxClient(base_url, api_key)
 
 
-def execute(args: argparse.Namespace, *, locked_root: Path | None = None) -> tuple[dict[str, Any], int]:
-    if args.command == "update":
-        from .updates import update_apply, update_check, update_rollback, update_status
+def execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    if args.command == "setup":
+        from .dependencies import setup
 
-        if args.update_command == "status":
-            return update_status(), 0
-        if args.update_command == "check":
-            checked = update_check(force=args.force)
-            return checked, 0 if checked["ok"] else 2
-        if args.update_command == "apply":
-            return update_apply(target=args.target, force=args.force, already_locked=locked_root), 0
-        return update_rollback(already_locked=locked_root), 0
+        return setup(), 0
     if args.command == "image":
         return execute_local_image(args)
     if args.command == "configure":
@@ -458,10 +443,6 @@ def execute(args: argparse.Namespace, *, locked_root: Path | None = None) -> tup
         return config_status(), 0
     if args.command == "doctor":
         payload = doctor(verify=args.verify)
-        if args.updates:
-            from .updates import update_check
-
-            payload["updates"] = update_check()
         return payload, 0 if payload["ok"] else 2
     if args.command == "recent":
         return recent_payload(args.query, args.limit, latest=args.latest, modality=args.modality), 0
@@ -522,20 +503,11 @@ def execute(args: argparse.Namespace, *, locked_root: Path | None = None) -> tup
     raise AssertionError("unreachable")
 
 
-def main(*, locked_root: Path | None = None) -> NoReturn:
+def main() -> NoReturn:
     args: argparse.Namespace | None = None
     try:
         args = parser().parse_args()
-        payload, exit_code = execute(args, locked_root=locked_root)
-        if exit_code == 0 and payload.get("ok") and (
-            (args.command in {"generate", "edit", "video", "model", "wait"} and payload.get("status") == "succeeded")
-            or (args.command == "batch" and payload.get("batch", {}).get("status") == "completed")
-        ):
-            from .updates import automatic_update_notice
-
-            notice = automatic_update_notice()
-            if notice:
-                payload["update_notice"] = notice
+        payload, exit_code = execute(args)
     except AsxError as exc:
         payload, exit_code = exc.payload(), exc.exit_code
     except KeyboardInterrupt:
