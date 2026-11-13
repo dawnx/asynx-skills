@@ -15,7 +15,8 @@ from collections.abc import Mapping
 from datetime import datetime
 from functools import cache
 from pathlib import Path
-from typing import Any
+from types import TracebackType
+from typing import Any, Literal
 
 from .config import state_path
 from .constants import UTC
@@ -202,6 +203,26 @@ def _path_for_database(path: Path | str | None) -> Path | None:
     return Path(path).expanduser()
 
 
+class _LedgerConnection(sqlite3.Connection):
+    """A connection whose ``with`` block also closes it.
+
+    sqlite3 only commits or rolls back there. An open handle keeps the database
+    file locked on Windows, where it then cannot be moved or deleted.
+    """
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        try:
+            super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+        return False
+
+
 def connect_db(path: Path | str | None = None) -> sqlite3.Connection:
     """Open the v1 ledger and apply connection-level safety settings.
 
@@ -211,10 +232,24 @@ def connect_db(path: Path | str | None = None) -> sqlite3.Connection:
 
     database_path = _path_for_database(path)
     if database_path is None:
-        connection = sqlite3.connect(":memory:", timeout=DB_TIMEOUT_SECONDS)
+        connection = sqlite3.connect(
+            ":memory:", timeout=DB_TIMEOUT_SECONDS, factory=_LedgerConnection
+        )
     else:
         database_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        connection = sqlite3.connect(str(database_path), timeout=DB_TIMEOUT_SECONDS)
+        connection = sqlite3.connect(
+            str(database_path), timeout=DB_TIMEOUT_SECONDS, factory=_LedgerConnection
+        )
+    try:
+        _prepare_connection(connection, database_path)
+    except BaseException:
+        # A refused ledger must not stay open: the caller never receives the handle.
+        connection.close()
+        raise
+    return connection
+
+
+def _prepare_connection(connection: sqlite3.Connection, database_path: Path | None) -> None:
     connection.row_factory = sqlite3.Row
     connection.execute(f"PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MILLISECONDS}")
     connection.execute("PRAGMA foreign_keys = ON")
@@ -229,7 +264,6 @@ def connect_db(path: Path | str | None = None) -> sqlite3.Connection:
     if database_path is not None:
         database_path.parent.chmod(stat.S_IRWXU)
         database_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    return connection
 
 
 def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import getpass
+import importlib
 import json
 import math
 import os
@@ -395,8 +396,33 @@ def doctor(*, verify: bool = False) -> dict[str, Any]:
     return result
 
 
+def _interactive_terminal() -> bool:
+    """Whether a person can type the key into this process's standard input."""
+    try:
+        if not sys.stdin.isatty():
+            return False
+    except (AttributeError, ValueError):
+        return False
+    if os.name != "nt":
+        return True
+    # On Windows the null device is a character device too, so isatty() is true
+    # for it and the key prompt would wait forever. Only a console has a mode.
+    try:
+        descriptor = sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError):
+        return True
+    try:
+        ctypes: Any = importlib.import_module("ctypes")
+        msvcrt: Any = importlib.import_module("msvcrt")
+        mode = ctypes.c_ulong()
+        handle = ctypes.c_void_p(msvcrt.get_osfhandle(descriptor))
+        return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+    except (AttributeError, ImportError, OSError, ValueError):
+        return False
+
+
 def configure(base_url_override: str | None = None) -> dict[str, Any]:
-    if not sys.stdin.isatty():
+    if not _interactive_terminal():
         raise AsxError(
             "请在自己的终端运行配置命令并输入 API Key，请勿发送至对话。",
             code="interactive_terminal_required",

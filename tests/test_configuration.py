@@ -36,6 +36,13 @@ def isolated_environment(home: Path, **values: str) -> dict[str, str]:
         if name.startswith("ASYNX_") or name in {"HOME", "XDG_CONFIG_HOME"}:
             environment.pop(name, None)
     environment["HOME"] = str(home)
+    if os.name == "nt":
+        # Windows reads these instead of HOME; without them the real profile is used.
+        environment.update(
+            USERPROFILE=str(home),
+            APPDATA=str(home / "AppData" / "Roaming"),
+            LOCALAPPDATA=str(home / "AppData" / "Local"),
+        )
     environment.update(values)
     return environment
 
@@ -50,7 +57,7 @@ def run_cli(
         cwd=environment["HOME"],
         env=environment,
         stdin=subprocess.DEVNULL,
-        text=True,
+        text=True, encoding="utf-8",
         capture_output=True,
         timeout=20,
         check=False,
@@ -229,7 +236,7 @@ class ConfigurationCLITestCase(unittest.TestCase):
                 ],
                 cwd=home,
                 env=environment,
-                text=True,
+                text=True, encoding="utf-8",
                 capture_output=True,
                 timeout=20,
                 check=False,
@@ -247,7 +254,11 @@ class ConfigurationCLITestCase(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 statuses.append(payload)
 
-            canonical = (home / ".config" / "asynx" / "config.json").resolve()
+            canonical = (
+                home / "AppData" / "Roaming" / "Asynx" / "config.json"
+                if os.name == "nt"
+                else home / ".config" / "asynx" / "config.json"
+            ).resolve()
             self.assertEqual(
                 {Path(cast(str, item["config_path"])).resolve() for item in statuses},
                 {canonical},
@@ -315,7 +326,11 @@ class ConfigurationCLITestCase(unittest.TestCase):
             self.assertEqual(result.returncode, 2, result.stderr)
             error = cast(dict[str, Any], payload["error"])
             details = cast(dict[str, Any], error["details"])
-            canonical = (home / ".config" / "asynx" / "config.json").resolve()
+            canonical = (
+                home / "AppData" / "Roaming" / "Asynx" / "config.json"
+                if os.name == "nt"
+                else home / ".config" / "asynx" / "config.json"
+            ).resolve()
             self.assertEqual(error["code"], "missing_api_key")
             self.assertEqual(details["credential_source"], "none")
             self.assertEqual(Path(details["config_path"]).resolve(), canonical)

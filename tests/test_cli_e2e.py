@@ -36,7 +36,7 @@ class CLIE2ETestCase(unittest.TestCase):
             cwd=self.temp_path,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            text=True, encoding="utf-8",
         )
         assert self.server.stdout is not None
         self.base_url = self.server.stdout.readline().strip()
@@ -78,7 +78,7 @@ class CLIE2ETestCase(unittest.TestCase):
             [sys.executable, str(CLI), *arguments],
             cwd=self.temp_path,
             env=environment,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             timeout=20,
             check=False,

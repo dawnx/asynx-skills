@@ -107,7 +107,7 @@ class LocalImagesTestCase(unittest.TestCase):
             [sys.executable, str(CLI), "image", "info", str(self.source)],
             cwd=self.root,
             env=environment,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             check=False,
         )

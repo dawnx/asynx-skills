@@ -137,7 +137,7 @@ class SetupTests(unittest.TestCase):
             cwd=self.root,
             env={**os.environ, "ASYNX_VENDOR_PATH": str(package.parent)},
             stdin=subprocess.DEVNULL,
-            text=True,
+            text=True, encoding="utf-8",
             capture_output=True,
             timeout=20,
             check=False,

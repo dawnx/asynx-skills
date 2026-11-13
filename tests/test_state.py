@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import stat
 import sys
@@ -64,8 +65,9 @@ class StateTestCase(unittest.TestCase):
             self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
         finally:
             connection.close()
-        self.assertEqual(stat.S_IMODE(database.parent.stat().st_mode), 0o700)
-        self.assertEqual(stat.S_IMODE(database.stat().st_mode), 0o600)
+        if os.name != "nt":  # Windows has no owner-only permission bits to check
+            self.assertEqual(stat.S_IMODE(database.parent.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(database.stat().st_mode), 0o600)
 
     def test_ledger_this_version_cannot_read_is_refused_with_its_path(self) -> None:
         # Without this the first write fails deep inside a command with an opaque

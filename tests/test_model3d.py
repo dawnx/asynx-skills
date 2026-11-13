@@ -184,7 +184,7 @@ class ModelCLITests(unittest.TestCase):
         process = subprocess.Popen(
             [sys.executable, str(image_e2e.CLI), "model", "generate", "--prompt", "一只陶瓷茶壶",
              "--output-dir", str(output_dir)],
-            cwd=image_e2e.ROOT, env=self.environment, text=True,
+            cwd=image_e2e.ROOT, env=self.environment, text=True, encoding="utf-8",
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         watchdog = threading.Timer(30, process.kill)
