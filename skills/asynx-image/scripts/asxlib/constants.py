@@ -5,9 +5,9 @@ from datetime import timezone
 VERSION = "0.6.6"
 UTC = timezone.utc
 DEFAULT_BASE_URL = "https://asynx.llmapi.site/api"
-DEFAULT_MODEL = "gpt-image-2.5-sunburst"
-DEFAULT_EXTENDED_IMAGE_MODEL = "gpt-image-2.6-sunburst"
-DEFAULT_SVG_AUTHOR_MODEL = "gpt-6.1-sol"
+# How a request that names no model is recorded locally until the service
+# reports which model it used. Which model that is, is the service's decision.
+SERVICE_DEFAULT_MODEL = "default"
 DEFAULT_OUTPUT_DIR = "generated-images"
 DEFAULT_BATCH_SUBMISSIONS_PER_POLL = 4
 MODEL_CACHE_TTL_SECONDS = 300

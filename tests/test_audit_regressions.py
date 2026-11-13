@@ -14,8 +14,9 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).parents[1] / "skills/asynx-image/scripts"))
 
 from asxlib import batches, images, local_images, state, tasks
-from asxlib.constants import DEFAULT_MODEL
 from asxlib.errors import AsxError
+
+SAMPLE_MODEL = "gpt-image-2.5-sunburst"  # any catalog name; the Skill has no default of its own
 
 
 class FakeClient:
@@ -199,7 +200,7 @@ class AuditRegressionTests(unittest.TestCase):
 
     def test_catalog_order_does_not_change_defaults(self):
         cold = self.build()
-        images.cache_models(self.client.base_url, [catalog_model(DEFAULT_MODEL)], scope=self.client.cache_scope)
+        images.cache_models(self.client.base_url, [catalog_model(SAMPLE_MODEL)], scope=self.client.cache_scope)
         warm = self.build()
         self.assertEqual(cold["input"], warm["input"])
         self.assertNotIn("image_size", warm["input"])
@@ -213,7 +214,7 @@ class AuditRegressionTests(unittest.TestCase):
         self.assertEqual(result["input"]["output_format"], "png")
 
     def test_stale_catalog_does_not_override_default_or_explicit_size(self):
-        model = catalog_model(DEFAULT_MODEL)
+        model = catalog_model(SAMPLE_MODEL)
         model["capabilities"]["image_sizes"] = ["4K"]
         images.cache_models(self.client.base_url, [model], scope=self.client.cache_scope)
         self.assertNotIn("image_size", self.build()["input"])

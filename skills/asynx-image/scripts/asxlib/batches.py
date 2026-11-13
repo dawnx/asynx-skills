@@ -16,11 +16,11 @@ from .client import AsynxClient
 from .config import default_output_root
 from .constants import (
     DEFAULT_BATCH_SUBMISSIONS_PER_POLL,
-    DEFAULT_MODEL,
     DEFAULT_OUTPUT_DIR,
     KNOWN_STATUSES,
     LOCAL_ITEM_STATUSES,
     MAX_BATCH_ITEMS,
+    SERVICE_DEFAULT_MODEL,
     UTC,
 )
 from .errors import PAUSING_STEPS, AsxError, task_error
@@ -109,6 +109,12 @@ def _set_blocked(connection: sqlite3.Connection, batch_id: str, value: dict[str,
         "UPDATE batches SET blocked_json = ? WHERE id = ?",
         (_json(value) if value is not None else None, batch_id),
     )
+
+
+def _named_model(batch: sqlite3.Row) -> str | None:
+    """The model a batch was created with, or None when it left the choice to the service."""
+    model = str(batch["model"])
+    return None if model == SERVICE_DEFAULT_MODEL else model
 
 
 def _block_submissions(
@@ -604,7 +610,8 @@ def add_to_batch(
             value = body["input"]
             existing = value.get("inputs", [])
             body, _model, _rid = build_video_task(
-                client, prompt=prompt if prompt is not None else value["prompt"], model_selector=batch["model"],
+                client, prompt=prompt if prompt is not None else value["prompt"],
+                model_selector=_named_model(batch),
                 duration=duration if duration is not None else value["duration"],
                 resolution=resolution if resolution is not None else value["resolution"],
                 aspect_ratio=aspect_ratio if aspect_ratio is not None else value["aspect_ratio"],
@@ -646,12 +653,14 @@ def add_to_batch(
             previous_format = str(input_value.get("output_format", "png")).strip().lower()
             requested_format = output_format.strip().lower() if output_format is not None else previous_format
             if (
-                requested_format in {"svg", "gif"}
-                and requested_format != previous_format
-                and str(batch["model"]).casefold() == DEFAULT_MODEL.casefold()
+                requested_format != previous_format
+                and {requested_format, previous_format} & {"svg", "gif"}
+                and str(batch["model"]) == SERVICE_DEFAULT_MODEL
             ):
+                # The service picks the default model per output format, so one
+                # batch would silently mix two models.
                 raise AsxError(
-                    "此批次沿用原来的图片模型。生成 SVG 或 GIF 请新建批次，默认会选择适用模型；原批次保持不变。",
+                    "此批次使用服务的默认模型，而默认模型随输出格式不同。更换为该输出格式请新建批次；原批次保持不变。",
                     code="batch_model_format_conflict",
                 )
             if requested_format != previous_format:
@@ -692,7 +701,7 @@ def add_to_batch(
             body, _selected_model, _request_id = build_task(
                 client,
                 task_type=f"image.{batch['operation']}",
-                model_selector=batch["model"],
+                model_selector=_named_model(batch),
                 prompt=prompt if prompt is not None else str(input_value.get("prompt", "")),
                 image_size=inherited_size,
                 aspect_ratio=inherited_ratio,

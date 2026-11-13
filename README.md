@@ -61,7 +61,7 @@ Windows 环境下将最后一行改为 `py install.py`。
 
 可直接描述用途、画幅或像素尺寸；未指定画幅时由 Agent 按用途选择（用途不明确时为 3:2），分辨率档位使用服务默认设置。指定尺寸不被支持时会给出提示，不会擅自修改后重新生成；实际尺寸以结果文件为准。
 
-也可生成 SVG 矢量图和 GIF 动画，交付原始文件。普通图片默认使用 `gpt-image-2.5-sunburst`，SVG/GIF 默认使用 `gpt-image-2.6-sunburst`，SVG 编写模型默认为 `gpt-6.1-sol`；明确指定模型时保留用户选择。更多用法见[高级图片参数](skills/asynx-image/references/operations.md#高级图片参数与结果格式)。
+也可生成 SVG 矢量图和 GIF 动画，交付原始文件。未指定模型时由服务选用默认模型（普通图片、SVG/GIF 和视频各有默认值，可在管理后台调整）；明确指定模型时保留用户选择。更多用法见[高级图片参数](skills/asynx-image/references/operations.md#高级图片参数与结果格式)。
 
 视频支持指定时长、画幅与分辨率，对白、音效或配乐要求可直接写入描述。支持图片与首尾帧输入；视频、音频参考须提供 URL。参数详情见[视频操作](skills/asynx-image/references/video.md)。
 

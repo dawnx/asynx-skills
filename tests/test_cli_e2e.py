@@ -363,10 +363,14 @@ class CLIE2ETestCase(unittest.TestCase):
         self.assertEqual(edited["status"], "succeeded")
         self.assertEqual(len(edited["files"]), 1)
         history = self.run_cli("history", "--limit", "2")
-        # Both tasks use the default GPT Image 2.5 model, which gets quality=high.
+        # Neither request named a model or a quality: the service chose the model,
+        # and the Skill sent no quality of its own.
         self.assertEqual(
-            {task["task_type"]: task["input"].get("quality") for task in history["tasks"]},
-            {"image.generate": "high", "image.edit": "high"},
+            {task["task_type"]: (task["model"], task["input"].get("quality")) for task in history["tasks"]},
+            {
+                "image.generate": ("gpt-image-2.5-sunburst", None),
+                "image.edit": ("gpt-image-2.5-sunburst", None),
+            },
         )
 
     def test_recent_query_does_not_match_base64_of_reference_images(self) -> None:
@@ -490,10 +494,9 @@ class CLIE2ETestCase(unittest.TestCase):
         self.assertEqual(len(batches["batches"]), 3)
         history = self.run_cli("history", "--limit", "20")
         self.assertEqual(len(history["tasks"]), 9)
-        # Only the default GPT Image 2.5 tasks get quality=high; gpt-image-2 gets none.
+        # No request named a quality, so none carries one, whichever model ran.
         for task in history["tasks"]:
-            expected = "high" if task["model"] == "gpt-image-2.5-sunburst" else None
-            self.assertEqual(task["input"].get("quality"), expected, task["model"])
+            self.assertIsNone(task["input"].get("quality"), task["model"])
         self.assertEqual(
             {task["model"] for task in history["tasks"]},
             {"gpt-image-2.5-sunburst", "gpt-image-2"},

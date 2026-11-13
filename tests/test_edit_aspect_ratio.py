@@ -13,9 +13,10 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).parents[1] / "skills/asynx-image/scripts"))
 
 from asxlib import images, reference_media
-from asxlib.constants import DEFAULT_MODEL
 from asxlib.errors import AsxError
 from test_audit_regressions import FakeClient, catalog_model
+
+SAMPLE_MODEL = "gpt-image-2.5-sunburst"  # any catalog name; the Skill has no default of its own
 
 
 class EditAspectRatioTests(unittest.TestCase):
@@ -105,7 +106,7 @@ class EditAspectRatioTests(unittest.TestCase):
         self.assertEqual(self.build(sources, aspect_ratio="2:3")["input"]["aspect_ratio"], "2:3")
 
     def test_catalog_does_not_replace_inherited_ratio(self):
-        images.cache_models(self.client.base_url, [catalog_model(DEFAULT_MODEL)], scope=self.client.cache_scope)
+        images.cache_models(self.client.base_url, [catalog_model(SAMPLE_MODEL)], scope=self.client.cache_scope)
         source = self.image("portrait.png", (120, 180))
         self.assertEqual(self.build([source])["input"]["aspect_ratio"], "2:3")
         self.assertEqual(self.build([source], aspect_ratio="1:1")["input"]["aspect_ratio"], "1:1")

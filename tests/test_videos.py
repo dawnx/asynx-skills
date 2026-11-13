@@ -38,7 +38,8 @@ class VideoBuilderTests(unittest.TestCase):
     def test_default_public_contract_preserves_sound_prompt_without_switch(self):
         body = self.build()
         self.assertEqual(body["task_type"], "video.generate")
-        self.assertEqual(body["model"], "MiniMax-H3")
+        # Which video model runs is the service's configured default.
+        self.assertNotIn("model", body)
         self.assertEqual(body["asset_delivery"], "asynx")
         self.assertEqual(body["input"]["duration"], 5)
         self.assertEqual(body["input"]["resolution"], "720p")
@@ -55,10 +56,11 @@ class VideoBuilderTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(AsxError):
                 self.build(duration=value)
 
-    def test_rejects_other_models_and_768p_before_network(self):
-        for options in ({"model_selector": "seedance-2-0"}, {"resolution": "768p"}):
-            with self.subTest(options=options), self.assertRaises(AsxError):
-                self.build(**options)
+    def test_named_video_model_is_sent_as_given_and_768p_is_rejected_before_network(self):
+        # The Skill used to refuse every video model but one hard-coded name.
+        self.assertEqual(self.build(model_selector="seedance-2-0")["model"], "seedance-2-0")
+        with self.assertRaises(AsxError):
+            self.build(resolution="768p")
         self.client.assert_not_called()
 
     def test_image_inputs_are_oriented_scaled_jpeg_or_png_not_webp(self):
@@ -106,7 +108,7 @@ class VideoBuilderTests(unittest.TestCase):
         body, model, request_id = videos.body_from_video_args(self.client, argparse.Namespace(
             prompt="test", duration=6.5, resolution="1080p", aspect_ratio="9:16", reference=[],
         ))
-        self.assertEqual(model, "MiniMax-H3")
+        self.assertEqual(model, "default")
         self.assertIsNone(request_id)
         self.assertEqual(body["input"]["duration"], 6.5)
         self.assertEqual(body["input"]["aspect_ratio"], "9:16")

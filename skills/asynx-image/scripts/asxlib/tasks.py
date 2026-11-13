@@ -654,11 +654,14 @@ def _bind_submission(
             status=status,
             last_polled=utc_now(),
         )
-        update_task(
-            connection,
-            local_id,
-            billing=task.get("billing") if task.get("billing") is not None else None,
-        )
+        changes: dict[str, Any] = {
+            "billing": task.get("billing") if task.get("billing") is not None else None,
+        }
+        if isinstance(task.get("model"), str) and task["model"]:
+            # The service chose the model when the request named none: record it,
+            # so history and search show what actually ran.
+            changes["model"] = task["model"]
+        row = update_task(connection, local_id, **changes)
         append_event(
             connection,
             local_id,
@@ -1400,8 +1403,6 @@ def models_payload(client: AsynxClient, operation: str, *, modality: str = "imag
     for model in models:
         if modality != "all" and model.get("modality", "image") != modality:
             continue
-        if model.get("modality") == "video" and model.get("name") != "MiniMax-H3":
-            continue
         if modality == "all" and operation != "all" and not any(
             str(value).endswith(f".{operation}") for value in model.get("task_types", [])
         ):
@@ -1420,6 +1421,8 @@ def models_payload(client: AsynxClient, operation: str, *, modality: str = "imag
                     "official_discount_percent",
                     "image_parameters",
                     "price_source",
+                    # The requests that use this model when --model is omitted.
+                    "default_for",
                 )
                 if model.get(key) is not None
             }

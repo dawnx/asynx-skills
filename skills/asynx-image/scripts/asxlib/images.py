@@ -11,12 +11,10 @@ from typing import Any, Protocol, cast
 
 from .config import cache_path
 from .constants import (
-    DEFAULT_EXTENDED_IMAGE_MODEL,
-    DEFAULT_MODEL,
-    DEFAULT_SVG_AUTHOR_MODEL,
     MAX_REFERENCE_TOTAL_BYTES,
     MODEL_CACHE_TTL_SECONDS,
     REFERENCE_NETWORK_WARNING_BYTES,
+    SERVICE_DEFAULT_MODEL,
 )
 from .errors import AsxError
 from .image_options import resolved_image_options
@@ -36,13 +34,14 @@ def normalize_model_name(value: str) -> str:
 
 
 def resolve_model(
-    models: list[dict[str, Any]], selector: str | None, task_type: str
+    models: list[dict[str, Any]], selector: str, task_type: str
 ) -> dict[str, Any]:
+    """Find the catalog entry a user named, perhaps loosely. Never picks a default."""
     eligible = [model for model in models if task_type in model.get("task_types", [])]
     available = [str(model.get("name")) for model in eligible if isinstance(model.get("name"), str)]
     if not eligible:
         raise AsxError("当前没有可用于该操作的图片模型，请查看可用模型或稍后重试。", code="no_compatible_model")
-    requested = selector or DEFAULT_MODEL
+    requested = selector
     exact = [
         model
         for model in eligible
@@ -64,10 +63,10 @@ def resolve_model(
             code="ambiguous_model",
             details={"matches": [str(model["name"]) for model in matches]},
         )
-    message = f"模型 {requested!r} 当前不可用于该操作，请选择其他可用模型。"
-    if selector is None:
-        message = f"默认模型 {DEFAULT_MODEL!r} 当前不可用，请指定其他可用模型。"
-    raise AsxError(message, code="model_unavailable", details={"available": available})
+    raise AsxError(
+        f"模型 {requested!r} 当前不可用于该操作，请选择其他可用模型。",
+        code="model_unavailable", details={"available": available},
+    )
 
 
 def _cached_models(base_url: str, *, scope: str | None = None) -> list[dict[str, Any]] | None:
@@ -228,37 +227,30 @@ def build_task(
         raise AsxError("编辑图片至少需要一张原图，请提供要修改的图片。", code="missing_edit_image")
 
     canonical_format = output_format.strip().lower() if output_format else "png"
-    default_model = DEFAULT_EXTENDED_IMAGE_MODEL if canonical_format in {"svg", "gif"} else DEFAULT_MODEL
-    requested_model = (model_selector if model_selector is not None else default_model).strip()
-    if not 1 <= len(requested_model) <= 160:
+    # No model named: the request omits it and the service applies its configured
+    # default for this task type and output format.
+    requested_model = model_selector.strip() if model_selector is not None else None
+    if requested_model is not None and not 1 <= len(requested_model) <= 160:
         raise AsxError("模型名称须为 1–160 个字符，请检查名称是否正确。", code="invalid_model")
     request_id: str | None = None
-    models = _cached_models(client.base_url, scope=getattr(client, "cache_scope", None))
     model: dict[str, Any] | None = None
-    if models is not None:
-        exact = [
-            item
-            for item in models
-            if task_type in item.get("task_types", [])
-            and str(item.get("name", "")).casefold() == requested_model.casefold()
-        ]
-        if len(exact) == 1:
-            model = exact[0]
-    if model is None and model_selector is not None and not _looks_canonical(model_selector):
-        if models is None:
-            models, request_id = client.models()
-            cache_models(client.base_url, models, scope=getattr(client, "cache_scope", None))
-        model = resolve_model(models, model_selector, task_type)
-
+    if requested_model is not None:
+        models = _cached_models(client.base_url, scope=getattr(client, "cache_scope", None))
+        if models is not None:
+            exact = [
+                item
+                for item in models
+                if task_type in item.get("task_types", [])
+                and str(item.get("name", "")).casefold() == requested_model.casefold()
+            ]
+            if len(exact) == 1:
+                model = exact[0]
+        if model is None and not _looks_canonical(requested_model):
+            if models is None:
+                models, request_id = client.models()
+                cache_models(client.base_url, models, scope=getattr(client, "cache_scope", None))
+            model = resolve_model(models, requested_model, task_type)
     selected_model = str(model["name"]) if model is not None else requested_model
-    # Keyed on the model name only: the family aliases the service recognizes
-    # (gpt-image-2.5, gpt-image-2.6, gpt-image-2-6), their Sunburst/Flare variants
-    # and dated snapshots. A custom public name gets no default from the client.
-    if quality_value is None and re.fullmatch(
-        r"gpt-image-(?:2\.[56]|2-6)(?:-(?:sunburst|flare))?(?:-\d{4}-\d{2}-\d{2})?",
-        selected_model.casefold(),
-    ):
-        quality_value = "high"
 
     canonical_size = image_size.strip() if image_size is not None else None
     canonical_ratio = aspect_ratio.strip() if aspect_ratio is not None else None
@@ -278,7 +270,10 @@ def build_task(
         svg = options.get("svg", {})
         if not isinstance(svg, dict):
             raise AsxError("SVG 参数须为 JSON 对象。", code="invalid_image_options")
-        options["svg"] = {"model": DEFAULT_SVG_AUTHOR_MODEL, **svg}
+        # The service supplies the SVG author when none is named.
+        options["svg"] = dict(svg)
+        if not options["svg"]:
+            del options["svg"]
     if options.get("markup") and (mask or task_type != "image.edit"):
         raise AsxError("Markup 仅用于编辑，且不能与 Mask 同时使用。", code="conflicting_image_options")
     source_sizes: list[tuple[int, int] | None] = []
@@ -333,11 +328,8 @@ def build_task(
     else:
         task_input["images"] = prepared
         task_input["mask"] = prepared_mask
-    body = {
-        "task_type": task_type,
-        "model": model["name"] if model is not None else requested_model,
-        "input": task_input,
-        "asset_delivery": "asynx",
-    }
+    body: dict[str, Any] = {"task_type": task_type, "input": task_input, "asset_delivery": "asynx"}
+    if selected_model is not None:
+        body["model"] = selected_model
     validate_request_body(body)
-    return body, str(body["model"]), request_id
+    return body, selected_model or SERVICE_DEFAULT_MODEL, request_id

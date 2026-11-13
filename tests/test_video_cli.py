@@ -106,7 +106,7 @@ class VideoCLITests(unittest.TestCase):
 
     def test_invalid_video_requests_are_rejected_before_submission(self):
         for flags in (
-            ["--model", "seedance-2-0"], ["--resolution", "768p"],
+            ["--resolution", "768p"],
             ["--last-frame", "https://example.test/end.png"],
             ["--reference-video", "/tmp/private.mp4"],
         ):

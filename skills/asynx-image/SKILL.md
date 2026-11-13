@@ -18,7 +18,7 @@ python3 "<skill-dir>/scripts/asynx.py" edit --prompt "<修改要求>" --image "/
 命令与模型：
 
 - 新图用 `generate`，修改原图用 `edit`。图片通过参数传入，多张时重复参数，路径不写入提示词；用户的提示词与明确参数原样保留。
-- 未指定模型时省略 `--model`：普通图片默认 `gpt-image-2.5-sunburst`，SVG/GIF 默认 `gpt-image-2.6-sunburst`。用户指定的模型原样使用。
+- 未指定模型时省略 `--model`，由服务按任务类型和输出格式选用默认模型，返回结果中的 `model` 是实际使用的模型。不要替用户填写模型名；用户指定的模型原样使用。需要知道当前默认模型时查询 `models`，其中 `default_for` 标明各默认模型对应的请求。
 - 默认模型的普通静态单图直接提交，不预查目录或说明。仅在以下情况读取模型说明：用户指定了当前对话尚未确认过的模型（`models describe --model "<模型名>"`）；需要透明背景、组图、Mask/Markup、SVG/GIF 或新的高级参数，而当前对话没有对应能力信息；收到能力拒绝之后。名称有歧义或需要探索、推荐时才查询 `models`。说明的内容、复用范围与 `unconfirmed` 的含义见[读取模型说明](references/model-prompting.md#读取当前模型说明)。
 
 尺寸与画幅：
@@ -30,7 +30,7 @@ python3 "<skill-dir>/scripts/asynx.py" edit --prompt "<修改要求>" --image "/
 格式、质量与数量：
 
 - SVG/GIF 使用 `--output-format svg` 或 `--output-format gif`，参数与限制见[高级图片参数](references/operations.md#高级图片参数与结果格式)。
-- 未指定时省略 `--quality` 与 `--complexity`；脚本只为 GPT Image 2.5/2.6 补 `quality=high`，其他模型由服务采用默认值。
+- 未指定时省略 `--quality` 与 `--complexity`，由服务按所用模型采用默认值；脚本不补任何值。
 - `--count` 是一个任务的输出张数，`batch --total` 是独立任务数。单图模型需要多张时，在用户已授权的数量与费用范围内改用批次；不承诺跨任务的角色、构图或连接点严格一致。
 
 费用与授权：

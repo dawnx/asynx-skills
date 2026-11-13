@@ -39,7 +39,7 @@ python3 "<skill-dir>/scripts/asynx.py" batch create --items-file "/absolute/path
 | `batch resume <id>` | 解除暂停，再用 `batch wait` 继续 |
 | `batch cancel <id>` | 停止未提交项目并请求取消已提交任务 |
 
-批次固定模型与操作类型，只能向进行中或暂停的批次追加。省略参数沿用原模板，显式参数仅影响新增项目；换模型需新建批次。`gpt-image-2.5-sunburst` 批次不能原地切换为 SVG/GIF，须新建批次。允许的格式切换会清理继承的格式专属参数；更换编辑原图须重新提供对应的 `--markup` 或 `--mask`，不再需要图层时新建批次。
+批次固定模型与操作类型，只能向进行中或暂停的批次追加。省略参数沿用原模板，显式参数仅影响新增项目；换模型需新建批次。未指定模型的批次使用服务的默认模型，而默认模型随输出格式不同，因此不能在普通图片与 SVG/GIF 之间原地切换，须新建批次。允许的格式切换会清理继承的格式专属参数；更换编辑原图须重新提供对应的 `--markup` 或 `--mask`，不再需要图层时新建批次。
 
 使用当前对话确认的批次 ID。返回 `batch.files` 可直接交付，失败与下载问题见返回详情；单项失败不重做整批。进程停止后，未提交项目不会自动推进。
 
@@ -123,11 +123,11 @@ python3 "<skill-dir>/scripts/asynx.py" generate --prompt "小猫挥手，无缝�
 | 参数 | 用途 |
 | --- | --- |
 | `--background transparent` | 请求透明背景，位图使用 PNG/WebP；SVG 也可透明，JPEG 不支持 |
-| `--quality` | 显式值优先。省略时脚本仅为按模型名识别出的 GPT Image 2.5/2.6（含 Sunburst/Flare 与带日期版本）补 `high`；其他模型和自定义模型名不补值，需要时显式指定 |
+| `--quality` | 显式值原样发送。省略时脚本不补值，由服务按所用模型采用默认值 |
 | `--complexity`、`--moderation`、`--safety-identifier` | 按需传入所选服务支持的值 |
 | `--output-compression` | 压缩参数 0–100，适用于 JPEG/WebP |
 | `--frame-count`、`--frame-duration-ms` | 仅用于 GIF。客户端只校验通用边界（2–64 帧、20–2000 ms），模型实际范围见 [GIF 动画](#gif-动画) |
-| `--svg-model`、`--svg-reasoning-effort` | 仅在用户要求时覆盖 SVG 编写模型或推理强度 |
+| `--svg-model`、`--svg-reasoning-effort` | 仅在用户要求时指定 SVG 编写模型或推理强度；省略编写模型时由服务选用默认值 |
 | `--markup "<标注.png>"` | 仅用于编辑；原图与标注支持本地文件或 Data URL，不支持 HTTP(S) URL。标注须为等大透明通道 PNG，与原图同步缩放，不能同时使用 `--mask` |
 | `--params-file "<参数.json>"` | 提供嵌套高级参数；命令参数覆盖同名字段，`size` 与档位/比例的互斥规则仍适用 |
 

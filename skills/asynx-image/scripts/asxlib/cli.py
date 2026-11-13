@@ -69,7 +69,7 @@ _QUOTE_HELP = "只向服务查询本次请求的价格，不提交任务、不�
 def _add_extended_image_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--optimize-prompt-mode", choices=("standard", "fast"), help="提示词优化模式，仅在所选模型说明支持时使用")
     parser.add_argument("--params-file", help="图片高级参数 JSON 文件，显式命令参数优先")
-    parser.add_argument("--svg-model", help="SVG 编写模型，默认 gpt-6.1-sol；仅需更换时指定")
+    parser.add_argument("--svg-model", help="SVG 编写模型；省略时由服务选用默认值")
     parser.add_argument("--svg-reasoning-effort", help="SVG 编写模型的推理强度；省略时不指定")
     parser.add_argument("--size", help="明确的像素宽x高，例如 2000x1000；1K/2K/4K 请用 --image-size，不自行换算")
     for name in ("complexity", "background", "moderation", "safety-identifier", "markup"):
@@ -81,10 +81,10 @@ def _add_extended_image_options(parser: argparse.ArgumentParser) -> None:
 def _add_image_options(parser: argparse.ArgumentParser) -> None:
     _add_extended_image_options(parser)
     parser.add_argument("--prompt", required=True, help="生成或修改的内容描述")
-    parser.add_argument("--model", help="模型名称或名称中唯一的片段，省略时使用默认模型")
+    parser.add_argument("--model", help="模型名称或名称中唯一的片段；省略时由服务选用默认模型")
     parser.add_argument("--image-size", help="尺寸档位，例如 1K、2K、4K；未指定时省略，由服务端采用默认设置")
     parser.add_argument("--aspect-ratio", help="画幅比例，例如 1:1、16:9")
-    parser.add_argument("--quality", help="生成质量；GPT Image 2.5/2.6（按模型名识别）省略时为 high，其他模型及自定义模型名不补值；显式值优先")
+    parser.add_argument("--quality", help="生成质量；省略时由服务按所用模型采用默认值")
     parser.add_argument("--count", type=int, default=1, help="本次生成数量，1–10 张")
     parser.add_argument("--output-format", choices=("png", "jpeg", "webp", "svg", "gif"), help="输出文件格式")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help=_OUTPUT_DIR_HELP)
@@ -114,7 +114,7 @@ def _add_batch_creation_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", help="模型名称或唯一片段")
     parser.add_argument("--image-size", help="尺寸档位，例如 1K、2K、4K；未指定时省略，由服务端采用默认设置")
     parser.add_argument("--aspect-ratio", help="画幅比例，例如 1:1、16:9")
-    parser.add_argument("--quality", help="生成质量；GPT Image 2.5/2.6（按模型名识别）省略时为 high，其他模型及自定义模型名不补值；显式值优先")
+    parser.add_argument("--quality", help="生成质量；省略时由服务按所用模型采用默认值")
     parser.add_argument("--count", type=int, default=1, help="每个图片任务的输出数量")
     parser.add_argument(
         "--output-format",
@@ -300,7 +300,7 @@ def parser() -> argparse.ArgumentParser:
     video_generate = video_commands.add_parser("generate", help="生成并下载视频")
     _add_video_input_options(video_generate)
     video_generate.add_argument("--prompt", required=True)
-    video_generate.add_argument("--model", help="视频模型名称，省略时使用默认模型")
+    video_generate.add_argument("--model", help="视频模型名称；省略时由服务选用默认模型")
     video_generate.add_argument("--aspect-ratio", help="画幅比例，默认 16:9")
     video_generate.add_argument("--reference", action="append", default=[], help="参考图路径或 URL，可重复传入")
     video_generate.add_argument("--from-task", help="将该任务唯一一张本地图片用作首帧")

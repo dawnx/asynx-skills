@@ -11,9 +11,10 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parents[1] / "skills/asynx-image/scripts"))
 
 from asxlib import batches, cli, state, tasks
-from asxlib.constants import DEFAULT_MODEL
 from asxlib.errors import AsxError
 from test_audit_regressions import FakeClient
+
+SAMPLE_MODEL = "gpt-image-2.5-sunburst"  # any catalog name; the Skill has no default of its own
 
 
 def rejection(code, status, next_step, *, task_created=False):
@@ -66,7 +67,7 @@ class TaskContractTests(unittest.TestCase):
         self.addCleanup(env.stop)
         self.client = ResultClient()
 
-    def test_advanced_options_and_default_quality_survive_batch_append(self):
+    def test_advanced_options_survive_batch_append_without_client_defaults(self):
         created = batches.create_batch(
             self.client, operation="generate", prompt="first", model_selector=None,
             image_size=None, aspect_ratio=None, quality=None, count=1, output_format="svg",
@@ -81,7 +82,8 @@ class TaskContractTests(unittest.TestCase):
         with state.connect_db() as connection:
             first = json.loads(connection.execute("SELECT template_json FROM batches WHERE id = ?", (created["id"],)).fetchone()[0])["input"]
             second = json.loads(connection.execute("SELECT body_json FROM batch_items WHERE batch_id = ? AND sequence = 2", (created["id"],)).fetchone()[0])["input"]
-        self.assertEqual(second["quality"], "high")
+        # Quality was never named: the service decides it, the Skill adds nothing.
+        self.assertNotIn("quality", second)
         self.assertEqual(second["size"], first["size"])
         self.assertEqual(second["svg"], first["svg"])
         self.assertEqual(second["background"], "transparent")
@@ -103,13 +105,12 @@ class TaskContractTests(unittest.TestCase):
         self.assertEqual(third["aspect_ratio"], "16:9")
         self.assertEqual(third["svg"], {"model": "test-svg", "reasoning": {"effort": "high"}})
         self.assertEqual(first["svg"], {"model": "test-svg", "reasoning": {"effort": "medium"}})
-        # Persisted batch settings do not adopt a new default on continuation.
-        with patch("asxlib.images.DEFAULT_SVG_AUTHOR_MODEL", "later-default"):
-            batches.add_to_batch(
-                self.client, created["id"], total=1, prompt="continued", references=None,
-                mask=None, count=None, image_size=None, aspect_ratio=None, quality=None,
-                output_format=None,
-            )
+        # A plain continuation keeps the author the batch was created with.
+        batches.add_to_batch(
+            self.client, created["id"], total=1, prompt="continued", references=None,
+            mask=None, count=None, image_size=None, aspect_ratio=None, quality=None,
+            output_format=None,
+        )
         with state.connect_db() as connection:
             fourth = json.loads(connection.execute(
                 "SELECT body_json FROM batch_items WHERE batch_id = ? AND sequence = 4",
@@ -140,16 +141,14 @@ class TaskContractTests(unittest.TestCase):
             "generate", "--prompt", "cat", "--params-file", str(path), "--svg-reasoning-effort", "high",
         ])
         self.assertEqual(options_from_args(args)["svg"], {"model": "json-model", "reasoning": {"effort": "high"}})
-        # An effort-only SVG command uses the built-in author without asking the caller.
+        # An effort-only SVG command names no author: the service supplies its default.
         result, code = self.execute([
             "generate", "--prompt", "icon", "--output-format", "svg",
             "--svg-reasoning-effort", "high", "--detach", "--output-dir", str(self.root),
         ])
         self.assertEqual(code, 0)
         self.assertTrue(result["ok"])
-        self.assertEqual(self.client.submitted[-1][0]["input"]["svg"], {
-            "model": "gpt-6.1-sol", "reasoning": {"effort": "high"},
-        })
+        self.assertEqual(self.client.submitted[-1][0]["input"]["svg"], {"reasoning": {"effort": "high"}})
         for invalid in (
             {"model": ""},
             {"model": None},
@@ -219,8 +218,7 @@ class TaskContractTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             request = self.client.submitted[-1][0]["input"]
             self.assertEqual(request["size"], "auto")
-            self.assertEqual(request["quality"], "high")
-            for key in ("image_size", "aspect_ratio", "complexity"):
+            for key in ("image_size", "aspect_ratio", "complexity", "quality"):
                 self.assertNotIn(key, request)
         for arguments, expected in (
             (["--size", "512x512"], {"size": "512x512"}),
@@ -343,7 +341,8 @@ class TaskContractTests(unittest.TestCase):
                 self.assertEqual(batches.batch_status(created["id"])["batch"]["total"], 3)
         self.assertEqual(self.client.submitted, [])
 
-    def test_batch_format_change_does_not_silently_switch_default_model(self):
+    def test_batch_on_the_service_default_cannot_switch_to_a_format_with_another_default(self):
+        # The service's default model differs by output format; one batch must not mix two models.
         created = batches.create_batch(
             self.client, operation="generate", prompt="first", model_selector=None,
             image_size=None, aspect_ratio=None, quality=None, count=1, output_format="png",
@@ -358,7 +357,7 @@ class TaskContractTests(unittest.TestCase):
                 )
             self.assertEqual(raised.exception.code, "batch_model_format_conflict")
         snapshot = batches.batch_status(created["id"])["batch"]
-        self.assertEqual(snapshot["model"], DEFAULT_MODEL)
+        self.assertEqual(snapshot["model"], "default")
         self.assertEqual(snapshot["total"], 1)
         self.assertEqual(self.client.submitted, [])
         # Prompt-only append keeps omitted dimensions; explicit size removes inherited fields.
@@ -384,10 +383,10 @@ class TaskContractTests(unittest.TestCase):
             row = state.create_task_intent(
                 connection,
                 operation="generate",
-                model=DEFAULT_MODEL,
+                model=SAMPLE_MODEL,
                 idempotency_key=f"asx-contract-{name}",
                 request={
-                    "task_type": "image.generate", "model": DEFAULT_MODEL,
+                    "task_type": "image.generate", "model": SAMPLE_MODEL,
                     "input": {"prompt": name, "aspect_ratio": "1:1"},
                 },
                 output_dir=str(self.root / name),
@@ -607,7 +606,9 @@ class TaskContractTests(unittest.TestCase):
         def quote(body):
             quoted.append(body["input"])
             price = "0.13" if body["input"].get("image_size") == "2K" else "0.10"
-            return {"model": body["model"], "currency": "USD", "charge_amount": price}, "quote"
+            # The request names no model; the quote reports the one the service would use.
+            self.assertNotIn("model", body)
+            return {"model": "service-default", "currency": "USD", "charge_amount": price}, "quote"
 
         self.client.quote = quote
         single, code = self.execute(["generate", "--prompt", "cat", "--quote"])

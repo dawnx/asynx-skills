@@ -1,4 +1,4 @@
-"""MiniMax-H3 requests use the public video contract, never provider fields."""
+"""Video requests use the public video contract, never provider fields."""
 from __future__ import annotations
 
 import argparse
@@ -6,7 +6,7 @@ import io
 import math
 from typing import Any
 
-from .constants import MAX_REFERENCE_SOURCE_BYTES
+from .constants import MAX_REFERENCE_SOURCE_BYTES, SERVICE_DEFAULT_MODEL
 from .errors import AsxError
 from .reference_media import (
     _data_url,
@@ -16,8 +16,6 @@ from .reference_media import (
     _validated_remote_url,
     validate_request_body,
 )
-
-VIDEO_MODEL = "MiniMax-H3"
 
 
 def prepare_video_image(value: str) -> str:
@@ -54,8 +52,10 @@ def build_video_task(
     last_frame: str | None = None, reference_videos: list[str] | None = None,
     reference_audios: list[str] | None = None,
 ) -> tuple[dict[str, Any], str, None]:
-    if model_selector is not None and model_selector.strip().casefold() != VIDEO_MODEL.casefold():
-        raise AsxError("暂不支持所选视频模型，请省略 --model 使用默认模型。", code="unsupported_video_model")
+    # No model named: the service applies its configured default video model.
+    selected = model_selector.strip() if model_selector is not None else None
+    if selected is not None and not 1 <= len(selected) <= 160:
+        raise AsxError("模型名称须为 1–160 个字符，请检查名称是否正确。", code="invalid_model")
     if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 5000:
         raise AsxError("视频描述须为 1–5000 个字符。", code="invalid_prompt")
     if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration):
@@ -72,11 +72,15 @@ def build_video_task(
         inputs.extend({"type": "image", "role": role, "url": prepare_video_image(value)} for value in values)
     for kind, values in (("video", reference_videos or []), ("audio", reference_audios or [])):
         inputs.extend({"type": kind, "role": "reference", "url": _media_url(value)} for value in values)
-    body = {"task_type": "video.generate", "model": VIDEO_MODEL, "asset_delivery": "asynx",
-            "input": {"prompt": prompt, "duration": duration, "resolution": canonical_resolution,
-                      "aspect_ratio": aspect_ratio, "inputs": inputs, "extra": {}}}
+    body: dict[str, Any] = {
+        "task_type": "video.generate", "asset_delivery": "asynx",
+        "input": {"prompt": prompt, "duration": duration, "resolution": canonical_resolution,
+                  "aspect_ratio": aspect_ratio, "inputs": inputs, "extra": {}},
+    }
+    if selected is not None:
+        body["model"] = selected
     validate_request_body(body)
-    return body, VIDEO_MODEL, None
+    return body, selected or SERVICE_DEFAULT_MODEL, None
 
 
 def body_from_video_args(client: Any, args: argparse.Namespace) -> tuple[dict[str, Any], str, None]:

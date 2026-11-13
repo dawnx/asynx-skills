@@ -320,9 +320,10 @@ def create_task_intent(
     ).fetchone()
     if existing is not None:
         if (
+            # The request body carries the model the caller named. The stored
+            # column may instead hold the one the service chose, so it is not compared.
             _comparable_request(existing["request_json"]) != _comparable_request(serialized_request)
             or existing["operation"] != operation
-            or existing["model"] != model
         ):
             raise AsxError(
                 "该请求标识已用于其他任务，请使用原任务记录继续操作。",

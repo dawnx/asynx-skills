@@ -76,6 +76,17 @@ def _model_file(task: dict[str, Any]) -> tuple[bytes, str]:
     return MODEL_ZIP, "application/zip"
 
 
+def _default_model(body: dict[str, Any]) -> str:
+    """The service's configured default for a request that names no model."""
+    task_type = str(body.get("task_type") or "")
+    task_input = body.get("input") if isinstance(body.get("input"), dict) else {}
+    if task_type.startswith("video."):
+        return "MiniMax-H3"
+    if task_type.startswith("image.") and task_input.get("output_format") in {"svg", "gif"}:
+        return "gpt-image-2.6-sunburst"
+    return "gpt-image-2.5-sunburst"
+
+
 def _model(name: str, *, mask: bool) -> dict[str, Any]:
     return {
         "name": name,
@@ -124,7 +135,7 @@ class MockState:
             task = {
                 "id": task_id,
                 "task_type": body.get("task_type"),
-                "model": body.get("model"),
+                "model": body.get("model") or _default_model(body),
                 "input": body.get("input"),
                 "metadata": body.get("metadata", {}),
                 "markers": markers,
