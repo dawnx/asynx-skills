@@ -29,7 +29,7 @@ python3 "<skill-dir>/scripts/asynx.py" doctor --verify
 
 宿主对单条命令有时长上限时，可设置 `"max_wait_seconds": 100`（0–86400，0 表示等到任务截止）作为等待上限的默认值，环境变量 `ASYNX_MAX_WAIT_SECONDS` 优先，命令行 `--max-wait` 再优先。到时命令返回仍在运行的任务，任务不会取消。
 
-任务记录保存在本机数据库（macOS/Linux 为 `~/.local/state/asx/state.db`，Windows 为 `%LOCALAPPDATA%\Asynx\state.db`）。任务结束后，记录中内嵌的参考图数据会自动替换为摘要；未确认的提交保留完整请求，以便恢复。用户要求清理时：
+任务记录保存在本机数据库（macOS/Linux 为 `~/.local/state/asx/state.db`，Windows 为 `%LOCALAPPDATA%\Asynx\state.db`）。记录中不保存图片内容：本地参考图处理后暂存在缓存目录的 `uploads` 子目录（macOS/Linux 为 `~/.cache/asx/uploads`，Windows 为 `%LOCALAPPDATA%\Asynx\cache\uploads`），上传一次后由任务引用。未结束的任务与批次仍需要这些暂存文件，请勿手动删除。用户要求清理时：
 
 ```bash
 python3 "<skill-dir>/scripts/asynx.py" prune --dry-run
@@ -37,7 +37,7 @@ python3 "<skill-dir>/scripts/asynx.py" prune
 python3 "<skill-dir>/scripts/asynx.py" prune --older-than-days 90
 ```
 
-`prune` 精简历史记录并压缩数据库；加 `--older-than-days` 时还会删除更早的已结束任务与已结束批次的记录。两者都不删除任何结果文件，也不触碰未结束的任务或批次；被删除记录对应的文件仍在原处，但不再出现在 `recent` 与 `task list` 中。先用 `--dry-run` 向用户说明将处理的数量，再执行。
+`prune` 删除不再被任何未结束任务或批次引用的参考图暂存文件、清除已过期的上传记录并压缩数据库，结果中的 `uploads` 给出删除的文件数与释放的字节数；加 `--older-than-days` 时还会删除更早的已结束任务与已结束批次的记录。两者都不删除任何结果文件，也不触碰未结束的任务或批次；被删除记录对应的文件仍在原处，但不再出现在 `recent` 与 `task list` 中。先用 `--dry-run` 向用户说明将处理的数量，再执行。
 
 ## 安装与卸载
 

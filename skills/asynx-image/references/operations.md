@@ -27,7 +27,7 @@ python3 "<skill-dir>/scripts/asynx.py" batch create --items-file "/absolute/path
 {"prompt": "同款键盘，方形主图", "size": "1024x1024"}
 ```
 
-`batch create ... --quote` 只返回整批的服务报价（按计价参数分组列出），不创建批次、不提交、不扣费。批次结果中的 `billing` 汇总已完成任务的实际扣费。
+`batch create ... --quote` 只返回整批的服务报价（按计价参数分组列出），不创建批次、不提交、不扣费。带本地参考图报价时，图片会先上传，上传不产生费用。批次结果中的 `billing` 汇总已完成任务的实际扣费。
 
 | 命令 | 作用 |
 | --- | --- |
@@ -92,7 +92,7 @@ python3 "<skill-dir>/scripts/asynx.py" batch create --items-file "/absolute/path
 
 ## 输入图片
 
-本地文件与 Data URL 输入限静态 PNG、JPEG、WebP，脚本会校正方向、缩放并压缩；HTTP(S) URL 由服务端校验，透传不代表格式受支持。`--keep-reference-original` 跳过压缩，但须满足下表的处理后参考图限制。
+本地文件与 Data URL 输入限静态 PNG、JPEG、WebP，脚本会校正方向、缩放并压缩，处理后的图片先单独上传到服务，任务请求只引用上传后的文件；HTTP(S) URL 由服务端校验，透传不代表格式受支持。`--keep-reference-original` 跳过压缩，但须满足下表的处理后参考图限制。
 
 | 项目 | 客户端上限 |
 | --- | --- |
@@ -101,9 +101,10 @@ python3 "<skill-dir>/scripts/asynx.py" batch create --items-file "/absolute/path
 | 参考图数量 | 每任务 16 张 |
 | 处理后的本地参考图与蒙版或标注合计 | 20 MiB；蒙版与标注互斥 |
 | 标注 PNG | 原始及处理后均不超过 10 MiB |
-| 整个请求 | 32 MiB |
 
 服务端可能设置更低上限。URL 编辑或多张图片比例不一致时，须明确输出比例或像素尺寸。
+
+同一张图片对同一账户只上传一次：批次中共用参考图的各项、同一图片的再次使用都复用已上传的文件，文件临近过期或服务端已不存在时脚本会自动重新上传，无需用户处理。处理后的图片在提交前暂存于本机缓存目录（见[本机数据与保存目录](setup.md#本机数据与保存目录)）。提示 `reference_image_cache_missing` 表示暂存副本已被删除，须用原图片文件重新创建任务或批次。
 
 编辑蒙版用 `--mask`：本地文件与 Data URL 须为 PNG、含全透明与全不透明区域、最多 10 MiB，并满足同样边长和像素限制。原图尺寸可读取时，蒙版不得大于处理后的原图且比例须一致；脚本不自动缩放蒙版，URL 蒙版由服务端校验。
 

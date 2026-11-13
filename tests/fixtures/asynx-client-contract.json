@@ -23,5 +23,10 @@
     "task_created_on": "POST /v1/tasks",
     "idempotency_lookup": "GET /v1/tasks?idempotency_key=",
     "language_header": "Accept-Language"
+  },
+  "file_uploads": {
+    "path": "POST /v1/files",
+    "file_id_pattern": "^file_[0-9A-HJKMNP-TV-Z]{26}$",
+    "missing_file_code": "file_not_found"
   }
 }

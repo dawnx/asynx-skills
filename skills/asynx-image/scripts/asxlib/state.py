@@ -44,7 +44,6 @@ _TASK_FIELDS = frozenset(
     }
 )
 _JSON_FIELDS = {"request_json", "remote_json", "error_json", "billing"}
-_FINISHED_STATUSES = frozenset({"succeeded", "failed", "timeout", "canceled", "orphaned"})
 _JSON_ALIASES = {
     "request_json": "request",
     "remote_json": "remote",
@@ -99,6 +98,16 @@ CREATE TABLE IF NOT EXISTS task_events (
 );
 CREATE INDEX IF NOT EXISTS ix_task_events_task_created
     ON task_events(local_task_id, created_at, id);
+CREATE TABLE IF NOT EXISTS uploads (
+    sha256 TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    file_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    bytes INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (sha256, base_url, scope)
+);
 PRAGMA user_version = 1;
 """
 _BATCH_TABLES = """
@@ -164,13 +173,6 @@ def _decode(value: str | None) -> Any:
         # This should only be reachable with a database edited outside this
         # module.  Preserve the value so diagnostics do not lose information.
         return value
-
-
-def _comparable_request(serialized: str) -> str:
-    """Requests are equal when their content is: finished records keep image digests only."""
-    from .maintenance import slim_json
-
-    return slim_json(serialized) or serialized
 
 
 def _timestamp(value: str | None) -> str:
@@ -322,7 +324,7 @@ def create_task_intent(
         if (
             # The request body carries the model the caller named. The stored
             # column may instead hold the one the service chose, so it is not compared.
-            _comparable_request(existing["request_json"]) != _comparable_request(serialized_request)
+            existing["request_json"] != serialized_request
             or existing["operation"] != operation
         ):
             raise AsxError(
@@ -357,9 +359,7 @@ def create_task_intent(
         raced = connection.execute(
             "SELECT * FROM tasks WHERE idempotency_key = ?", (idempotency_key,)
         ).fetchone()
-        if raced is not None and _comparable_request(raced["request_json"]) == _comparable_request(
-            serialized_request
-        ):
+        if raced is not None and raced["request_json"] == serialized_request:
             return _row_dict(raced)
         raise AsxError("本地任务记录存在冲突，保存失败；请先通过 task list 查看已有任务。", code="task_state_conflict") from exc
     row = connection.execute("SELECT * FROM tasks WHERE local_id = ?", (candidate_id,)).fetchone()
@@ -498,19 +498,6 @@ def update_task(
     row = connection.execute("SELECT * FROM tasks WHERE local_id = ?", (local_task_id,)).fetchone()
     if row is None:
         raise AsxError(f"本机未找到任务 {local_task_id}，请检查任务 ID。", code="task_not_found")
-    if row["status"] in _FINISHED_STATUSES and ";base64," in row["request_json"]:
-        # Only an unfinished submission is replayed from its body. Once a task has
-        # ended, keep each inline image's digest and size instead of its bytes.
-        from .maintenance import slim_json
-
-        slimmed = slim_json(row["request_json"])
-        if slimmed is not None:
-            connection.execute(
-                "UPDATE tasks SET request_json = ? WHERE local_id = ?", (slimmed, local_task_id)
-            )
-            row = connection.execute(
-                "SELECT * FROM tasks WHERE local_id = ?", (local_task_id,)
-            ).fetchone()
     return _row_dict(row)
 
 

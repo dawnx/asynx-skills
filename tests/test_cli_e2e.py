@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from PIL import Image  # type: ignore[import-not-found]
 
@@ -124,9 +124,27 @@ class CLIE2ETestCase(unittest.TestCase):
         task = history["tasks"][0]
 
         self.assertEqual(task["id"], submitted["task_id"])
+        # The service received a file ID, and the file holds the original bytes.
         reference = task["input"]["reference_images"][0]
-        self.assertTrue(reference.startswith("data:image/png;base64,"))
-        self.assertEqual(base64.b64decode(reference.split(",", 1)[1]), VALID_PNG)
+        with urlopen(f"{self.base_url}/__mock__/files/{reference}", timeout=5) as response:
+            self.assertEqual(response.read(), VALID_PNG)
+
+    def test_file_the_service_no_longer_has_is_uploaded_again_without_a_second_task(self) -> None:
+        # A recorded upload can vanish before its stated expiry; the paid request
+        # must then go through once, not fail and not run twice.
+        source = self.temp_path / "source.png"
+        source.write_bytes(VALID_PNG)
+        arguments = ("generate", "--prompt", "参考图已过期", "--reference", str(source), "--detach")
+        first = self.run_cli(*arguments)
+        with urlopen(Request(f"{self.base_url}/__mock__/expire-files", method="POST"), timeout=5):
+            pass
+
+        second = self.run_cli(*arguments)
+
+        self.assertNotEqual(second["task_id"], first["task_id"])
+        with urlopen(f"{self.base_url}/__mock__/stats", timeout=5) as response:
+            stats = json.load(response)["data"]
+        self.assertEqual((stats["tasks"], stats["uploads"]), (2, 2))
 
     def test_installed_generation_with_read_only_runtime_lock(self) -> None:
         installed = self.temp_path / ".agents" / "skills" / "asynx-image"
@@ -319,24 +337,6 @@ class CLIE2ETestCase(unittest.TestCase):
         history = self.run_cli("history", "--limit", "10")
         self.assertEqual(len(history["tasks"]), 2)
 
-    def test_large_reference_warning_reaches_cli_output(self) -> None:
-        source = self.temp_path / "noisy.png"
-        Image.effect_noise((1600, 1600), 100).convert("RGB").save(source, format="PNG")
-
-        submitted = self.run_cli(
-            "generate",
-            "--prompt",
-            "高纹理参考图",
-            "--reference",
-            str(source),
-            "--detach",
-        )
-
-        warning = submitted["warnings"][0]
-        self.assertEqual(warning["code"], "large_reference_payload")
-        self.assertGreaterEqual(warning["request_body_bytes"], 1024 * 1024)
-        self.assertEqual(warning["local_image_count"], 1)
-
     def test_local_artifact_index_supports_recent_query_and_edit_from_task(self) -> None:
         generated = self.run_cli("generate", "--prompt", "可编辑的机械键盘")
         task_id = generated["task_id"]
@@ -373,19 +373,19 @@ class CLIE2ETestCase(unittest.TestCase):
             },
         )
 
-    def test_recent_query_does_not_match_base64_of_reference_images(self) -> None:
-        # Stored requests embed reference images as Data URLs, so searching the
-        # whole request turned arbitrary base64 into hits for ordinary words.
+    def test_recent_query_matches_the_prompt_not_the_reference_images(self) -> None:
+        # Stored requests also name their reference images, so searching the
+        # whole request turned those characters into hits for ordinary words.
         generated = self.run_cli("generate", "--prompt", "黄铜台灯")
-        encoded = base64.b64encode(VALID_PNG).decode()
+        encoded = "https://images.example/brass-lamp-reference.png"
         with contextlib.closing(sqlite3.connect(self.temp_path / "state.db")) as ledger:
             request = json.loads(ledger.execute("SELECT request_json FROM tasks").fetchone()[0])
-            request["input"]["reference_images"] = [f"data:image/png;base64,{encoded}"]
+            request["input"]["reference_images"] = [encoded]
             ledger.execute("UPDATE tasks SET request_json = ?", (json.dumps(request),))
             ledger.commit()
 
         by_prompt = self.run_cli("recent", "--query", "台灯", with_credentials=False)
-        by_base64 = self.run_cli("recent", "--query", encoded[8:32], with_credentials=False)
+        by_reference = self.run_cli("recent", "--query", "brass-lamp", with_credentials=False)
         # A word in a parent directory ("Application Support") used to match every result.
         by_parent_directory = self.run_cli(
             "recent", "--query", self.temp_path.name, with_credentials=False
@@ -394,7 +394,7 @@ class CLIE2ETestCase(unittest.TestCase):
         self.assertEqual(
             [item["task_id"] for item in by_prompt["artifacts"]], [generated["task_id"]]
         )
-        self.assertEqual(by_base64["artifacts"], [])
+        self.assertEqual(by_reference["artifacts"], [])
         self.assertIn(self.temp_path.name, generated["files"][0])
         self.assertEqual(by_parent_directory["artifacts"], [])
 
@@ -508,9 +508,7 @@ class CLIE2ETestCase(unittest.TestCase):
         )
         self.assertEqual(recovered["input"]["prompt"], "参考该图片的风格生成新图")
         self.assertEqual(len(recovered["input"]["reference_images"]), 1)
-        self.assertTrue(
-            recovered["input"]["reference_images"][0].startswith("data:image/webp;base64,")
-        )
+        self.assertTrue(recovered["input"]["reference_images"][0].startswith("file_"))
 
         with urlopen(f"{self.base_url}/__mock__/stats", timeout=5) as response:
             stats = json.load(response)["data"]

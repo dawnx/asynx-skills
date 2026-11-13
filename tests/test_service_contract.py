@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "skills/asynx-image/scripts"))
 
-from asxlib import errors
+from asxlib import client, errors, uploads
 
 CONTRACT = json.loads(
     (Path(__file__).parent / "fixtures" / "asynx-client-contract.json").read_text(encoding="utf-8")
@@ -34,6 +34,15 @@ class ServiceContractTests(unittest.TestCase):
         self.assertEqual(guide["fields"], ["content", "model", "revision", "status"])
         self.assertEqual(guide["statuses"], ["documented", "unconfirmed"])
         self.assertEqual(guide["path"], "/v1/tasks/models/{model}/guide")
+
+    def test_uploaded_files_are_recognised_and_recovered_as_the_service_defines_them(self):
+        # A different ID format rejects every upload; a different code for a lost
+        # file means it is never uploaded again.
+        files = CONTRACT["file_uploads"]
+        self.assertEqual(files["path"], "POST /v1/files")
+        self.assertEqual(f"^{client._FILE_ID.pattern}$", files["file_id_pattern"])
+        self.assertEqual(uploads.MISSING_FILE_CODE, files["missing_file_code"])
+
 
 
 if __name__ == "__main__":

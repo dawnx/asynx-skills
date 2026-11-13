@@ -7,8 +7,8 @@ from typing import Any
 
 from .media_results import MODEL_FILE_EXTENSIONS
 
-# The prompt is matched on its own: request_json also embeds reference images as
-# base64 Data URLs, and matching the whole document turns random base64 into hits.
+# The prompt is matched on its own: request_json also names reference images and
+# URLs, and matching the whole document turns their characters into hits.
 _PROMPT_SQL = "json_extract(t.request_json, '$.input.prompt')"
 _PROMPT_FALLBACK_SQL = "asx_request_prompt(t.request_json)"
 

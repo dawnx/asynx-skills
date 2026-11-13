@@ -22,8 +22,7 @@ class ImageResultsTests(unittest.TestCase):
 
     def test_svg_and_animation_keep_original_bytes_and_metadata(self):
         from asxlib.errors import AsxError
-        from asxlib.images import image_mime
-        from asxlib.media_results import media_file_info
+        from asxlib.media_results import image_mime, media_file_info
         svg = b'<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><path d="M0 0"/></svg>'
         vector = self.root / "result.svg"
         vector.write_bytes(svg)

@@ -28,7 +28,7 @@ python3 "<skill-dir>/scripts/asynx.py" video generate --reference-video "https:/
 
 - `--first-frame` 与 `--last-frame` 分别指定首帧与尾帧；使用尾帧时须同时提供首帧。
 - 普通参考图使用 `--reference`，多张时重复该参数，不得将参考图默认为首帧。
-- 图片可使用本地路径、Data URL 或 HTTP(S) 链接。本地图交由脚本校正方向、缩放并一次性编码为 JPEG/PNG，Agent 无需预处理。
+- 图片可使用本地路径、Data URL 或 HTTP(S) 链接。本地图交由脚本校正方向、缩放并一次性编码为 JPEG/PNG，再单独上传后由任务引用，Agent 无需预处理。
 - 视频参考仅接受 HTTP(S) 的 MP4 链接，音频参考仅接受 HTTP(S) 的 MP3/WAV 链接。当前不支持本地视频或音频路径，也不会自动上传至第三方文件服务。
 - 本地图片由脚本处理，其余素材限制由 Asynx 校验。参考素材超限时说明原因，不得反复压缩、裁切或改动用户素材。
 

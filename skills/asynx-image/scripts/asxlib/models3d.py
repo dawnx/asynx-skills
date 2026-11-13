@@ -7,7 +7,7 @@ from typing import Any
 
 from .errors import AsxError
 from .images import _cached_models, _looks_canonical, cache_models, resolve_model
-from .reference_media import prepare_inputs, validate_request_body
+from .reference_media import prepare_inputs
 
 MODEL_TASK_TYPE = "model.generate"
 RIG_CHECK_TASK_TYPE = "model.rig_check"
@@ -168,7 +168,6 @@ def build_model_task(
     task_input["output"] = {"formats": ["glb"]}
     model, request_id = resolve_model3d(client, model_selector)
     body = {"task_type": MODEL_TASK_TYPE, "model": model, "asset_delivery": "asynx", "input": task_input}
-    validate_request_body(body)
     return body, model, request_id
 
 

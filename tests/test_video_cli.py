@@ -74,7 +74,7 @@ class VideoCLITests(unittest.TestCase):
         )
         remote = self.run_cli("history", "--limit", "1")["tasks"][0]
         self.assertEqual(remote["input"]["inputs"][0]["role"], "first_frame")
-        self.assertTrue(remote["input"]["inputs"][0]["url"].startswith(("data:image/jpeg;base64,", "data:image/png;base64,")))
+        self.assertTrue(remote["input"]["inputs"][0]["url"].startswith("file_"))
         self.complete(video["task_id"])
         failed = self.run_cli(
             "video", "generate", "--from-task", video["task_id"], "--prompt", "wrong source",

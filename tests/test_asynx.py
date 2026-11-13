@@ -26,7 +26,6 @@ from asxlib import (
     config,
     configure,
     images,
-    reference_media,
     state,
     tasks,
 )
@@ -280,13 +279,6 @@ class UnitTestCase(unittest.TestCase):
         self.assertEqual(body["input"]["aspect_ratio"], "7:5")
         self.assertEqual(body["input"]["count"], 6)
         self.assertNotIn("quality", body["input"])
-
-    def test_local_image_becomes_data_url(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "source.png"
-            path.write_bytes(VALID_PNG)
-            source = reference_media.prepare_image(str(path)).source
-        self.assertTrue(source.startswith("data:image/webp;base64,"))
 
     def test_configure_only_prompts_for_api_key(self) -> None:
         class TTY:

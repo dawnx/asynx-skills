@@ -4,7 +4,6 @@ import base64
 import binascii
 import importlib
 import io
-import json
 import math
 import re
 import warnings
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from . import uploads
 from .constants import (
     MAX_MASK_BYTES,
     MAX_REFERENCE_BYTES,
@@ -21,7 +21,6 @@ from .constants import (
     MAX_REFERENCE_PIXELS,
     MAX_REFERENCE_SOURCE_BYTES,
     MAX_REFERENCE_TOTAL_BYTES,
-    MAX_REQUEST_BODY_BYTES,
     MAX_SAFE_IMAGE_PIXELS,
     REFERENCE_WEBP_QUALITY,
 )
@@ -37,6 +36,7 @@ _MAX_BASE64_SOURCE_CHARACTERS = ((MAX_REFERENCE_SOURCE_BYTES + 2) // 3) * 4
 
 @dataclass(frozen=True, slots=True)
 class PreparedImage:
+    # A remote URL, or the upload token of a prepared local image.
     source: str
     content_type: str | None
     size_bytes: int | None
@@ -80,6 +80,9 @@ def _validated_remote_url(value: str) -> str:
 
 
 def _read_source(value: str, *, max_bytes: int) -> tuple[bytes, str | None]:
+    if uploads.is_token(value):
+        # An image prepared earlier, read back from a stored request.
+        return uploads.read(value), None
     match = _DATA_URL.fullmatch(value)
     if match is not None:
         encoded = match.group("data")
@@ -144,10 +147,6 @@ def _decoded_image(data: bytes) -> tuple[Any, str, int]:
     return image, content_type, frame_count
 
 
-def _data_url(content_type: str, data: bytes) -> str:
-    return f"data:{content_type};base64,{base64.b64encode(data).decode('ascii')}"
-
-
 def _webp(image: Any) -> tuple[bytes, int, int]:
     image_module, _image_ops, _unidentified = _pillow()
     width, height = image.size
@@ -193,11 +192,11 @@ def prepare_image(value: str, *, keep_original: bool = False) -> PreparedImage:
                 "原图大小或分辨率超出上传限制；请允许脚本自动处理（移除 --keep-reference-original），或使用较小的图片。",
                 code="reference_image_requires_normalization",
             )
-        return PreparedImage(_data_url(content_type, data), content_type, len(data), width, height, False)
+        return PreparedImage(uploads.stage(data), content_type, len(data), width, height, False)
     original_size = (width, height)
     normalized, width, height = _webp(image)
     return PreparedImage(
-        _data_url("image/webp", normalized),
+        uploads.stage(normalized),
         "image/webp",
         len(normalized),
         width,
@@ -236,7 +235,7 @@ def prepare_mask(value: str, *, source: PreparedImage | None) -> PreparedImage:
         aspect_delta = abs(width * source.height - height * source.width)
         if aspect_delta > max(source.width, source.height):
             raise AsxError("编辑蒙版（Mask）的画幅比例须与原图一致，请调整后重试。", code="invalid_image_mask")
-    return PreparedImage(_data_url("image/png", data), "image/png", len(data), width, height, False)
+    return PreparedImage(uploads.stage(data), "image/png", len(data), width, height, False)
 
 
 def prepare_inputs(
@@ -245,7 +244,9 @@ def prepare_inputs(
     mask: str | None,
     keep_original: bool,
     source_sizes: list[tuple[int, int] | None] | None = None,
+    prepared_bytes: list[int] | None = None,
 ) -> tuple[list[str], str | None]:
+    """Prepare references and mask; ``prepared_bytes`` receives the size of each local one."""
     if len(references) > MAX_REFERENCE_IMAGES:
         raise AsxError(
             f"最多可传入 {MAX_REFERENCE_IMAGES} 张图片，请减少输入图片。",
@@ -258,9 +259,10 @@ def prepare_inputs(
             for item in prepared
         )
     prepared_mask = prepare_mask(mask, source=prepared[0] if prepared else None) if mask else None
-    total_bytes = sum(item.size_bytes or 0 for item in prepared)
-    if prepared_mask:
-        total_bytes += prepared_mask.size_bytes or 0
+    sizes = [item.size_bytes or 0 for item in (*prepared, *([prepared_mask] if prepared_mask else []))]
+    if prepared_bytes is not None:
+        prepared_bytes.extend(sizes)
+    total_bytes = sum(sizes)
     if total_bytes > MAX_REFERENCE_TOTAL_BYTES:
         raise AsxError(
             "本地图片与蒙版处理后的总大小超过 20 MiB，请减少图片数量或缩小图片。",
@@ -269,17 +271,7 @@ def prepare_inputs(
     return [item.source for item in prepared], prepared_mask.source if prepared_mask else None
 
 
-def request_body_size(body: dict[str, Any]) -> int:
-    return len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-
-
-def validate_request_body(body: dict[str, Any]) -> None:
-    size = request_body_size(body)
-    if size > MAX_REQUEST_BODY_BYTES:
-        raise AsxError("本次上传数据超过 32 MiB，请减少参考素材或缩小图片后重试。", code="request_body_too_large")
-
-
-def prepare_markup(value: str, original: str, *, keep_original: bool) -> str:
+def prepare_markup(value: str, original: str, *, keep_original: bool) -> PreparedImage:
     """Resize the transparent annotation with the same geometry as its source."""
     if value.casefold().startswith(("http://", "https://")) or original.casefold().startswith(("http://", "https://")):
         raise AsxError("Markup 需要本地原图和透明 PNG 标注，以核对尺寸并同步缩放。", code="invalid_image_markup")
@@ -298,4 +290,5 @@ def prepare_markup(value: str, original: str, *, keep_original: bool) -> str:
     layer.save(output, format="PNG")
     if output.tell() > MAX_MASK_BYTES:
         raise AsxError("Markup 文件超过上传限制。", code="invalid_image_markup")
-    return _data_url("image/png", output.getvalue())
+    data = output.getvalue()
+    return PreparedImage(uploads.stage(data), "image/png", len(data), layer.width, layer.height, False)

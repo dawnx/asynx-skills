@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import io
+import os
 import sys
 import tempfile
 import unittest
@@ -12,7 +13,7 @@ from unittest.mock import Mock, patch
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "skills/asynx-image/scripts"))
-from asxlib import videos
+from asxlib import uploads, videos
 from asxlib.errors import AsxError
 
 
@@ -21,6 +22,9 @@ class VideoBuilderTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
+        environment = patch.dict(os.environ, {"ASYNX_CACHE_PATH": str(self.root / "cache" / "models.json")})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.client = Mock()
 
     def source(self, name="input.png", size=(40, 30), alpha=False, orientation=None):
@@ -68,17 +72,17 @@ class VideoBuilderTests(unittest.TestCase):
         body = self.build(first_frame=source)
         item = body["input"]["inputs"][0]
         self.assertEqual(item["role"], "first_frame")
-        header, encoded = item["url"].split(",", 1)
-        self.assertEqual(header, "data:image/jpeg;base64")
-        with Image.open(io.BytesIO(base64.b64decode(encoded))) as image:
-            self.assertEqual(image.size, (800, 1600))
+        with Image.open(io.BytesIO(uploads.read(item["url"]))) as image:
+            self.assertEqual((image.format, image.size), ("JPEG", (800, 1600)))
         alpha = self.source(name="alpha.png", alpha=True)
-        self.assertTrue(self.build(references=[alpha])["input"]["inputs"][0]["url"].startswith("data:image/png;base64,"))
+        with Image.open(io.BytesIO(uploads.read(self.build(references=[alpha])["input"]["inputs"][0]["url"]))) as image:
+            self.assertEqual(image.format, "PNG")
 
     def test_data_url_is_normalized_and_single_pass_output_limit_is_enforced(self):
         source = self.source()
         data_url = "data:image/png;base64," + base64.b64encode(Path(source).read_bytes()).decode()
-        self.assertTrue(self.build(references=[data_url])["input"]["inputs"][0]["url"].startswith("data:image/jpeg;base64,"))
+        with Image.open(io.BytesIO(uploads.read(self.build(references=[data_url])["input"]["inputs"][0]["url"]))) as image:
+            self.assertEqual(image.format, "JPEG")
         with patch.object(videos, "_decoded_image", return_value=(Image.new("RGB", (2, 2)), "image/png", 1)), patch.object(videos.io, "BytesIO") as buffer, patch.object(Image.Image, "save"):
             buffer.return_value.getvalue.return_value = b"x" * (3 * 1024 * 1024 + 1)
             with self.assertRaises(AsxError) as caught:

@@ -4,6 +4,8 @@ import hashlib
 import ipaddress
 import json
 import random
+import re
+import secrets
 import time
 from http.client import IncompleteRead
 from pathlib import Path
@@ -76,6 +78,8 @@ def _read_limited(response: Any, *, limit: int, context: str) -> bytes:
             )
     raise AssertionError("unreachable")
 
+
+_FILE_ID = re.compile(r"file_[0-9A-HJKMNP-TV-Z]{26}")
 
 # Sent with every request: the service explains errors in the caller's language.
 _CLIENT_HEADERS = {"User-Agent": f"asx-skill/{VERSION}", "Accept-Language": "zh-CN"}
@@ -226,16 +230,39 @@ class AsynxClient:
             if body is not None
             else None
         )
-        headers = {
-            **_CLIENT_HEADERS,
-            "Accept": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-        }
+        headers: dict[str, str] = {}
         if encoded is not None:
             headers["Content-Type"] = "application/json"
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
+        raw, status, response_headers = self._exchange(
+            method, path, encoded, headers, retry_safe=retry_safe
+        )
+        payload = _decode_json(raw, context="Asynx API")
+        request_id = payload.get("request_id") or response_headers.get("X-Request-ID")
+        if payload.get("code") != "ok":
+            raise _api_error(status, raw, response_headers)
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise AsxError("服务返回的内容不完整，请稍后查询原任务；若持续出现，请联系服务支持。", code="invalid_api_response")
+        return data, request_id if isinstance(request_id, str) else None
 
+    def _exchange(
+        self,
+        method: str,
+        path: str,
+        encoded: bytes | None,
+        extra_headers: dict[str, str],
+        *,
+        retry_safe: bool,
+    ) -> tuple[bytes, int, Any]:
+        """Send one API request and return the raw success answer, its status and headers."""
+        headers = {
+            **_CLIENT_HEADERS,
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+            **extra_headers,
+        }
         url = self._url(path)
         opener = build_opener(_NoRedirect())
         unanswered = False
@@ -285,14 +312,7 @@ class AsynxClient:
                         exit_code=3,
                     ) from exc
 
-                payload = _decode_json(raw, context="Asynx API")
-                request_id = payload.get("request_id") or response_headers.get("X-Request-ID")
-                if payload.get("code") != "ok":
-                    raise _api_error(status, raw, response_headers)
-                data = payload.get("data")
-                if not isinstance(data, dict):
-                    raise AsxError("服务返回的内容不完整，请稍后查询原任务；若持续出现，请联系服务支持。", code="invalid_api_response")
-                return data, request_id if isinstance(request_id, str) else None
+                return raw, status, response_headers
             if redirected:
                 continue
             raise AssertionError("unreachable")
@@ -320,6 +340,54 @@ class AsynxClient:
         ):
             raise AsxError("模型说明格式不完整，请稍后重试或联系服务支持。", code="invalid_model_guide")
         return {field: data[field] for field in fields}, request_id
+
+    def upload_file(
+        self, data: bytes, content_type: str, filename: str
+    ) -> tuple[dict[str, Any], str | None]:
+        """Upload one still image and return the file the service created for it.
+
+        Repeating an upload only leaves a spare file behind, so it is retried freely.
+        """
+        boundary = f"asx-{secrets.token_hex(16)}"
+        safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", filename) or "image"
+        encoded = b"".join((
+            f"--{boundary}\r\n".encode("ascii"),
+            b'Content-Disposition: form-data; name="purpose"\r\n\r\nvision\r\n',
+            f"--{boundary}\r\n".encode("ascii"),
+            f'Content-Disposition: form-data; name="file"; filename="{safe_name}"\r\n'.encode("ascii"),
+            f"Content-Type: {content_type}\r\n\r\n".encode("ascii"),
+            data,
+            f"\r\n--{boundary}--\r\n".encode("ascii"),
+        ))
+        try:
+            raw, _status, response_headers = self._exchange(
+                "POST",
+                "/v1/files",
+                encoded,
+                {"Content-Type": f"multipart/form-data; boundary={boundary}"},
+                retry_safe=True,
+            )
+        except AsxError as exc:
+            if exc.code != "network_error":
+                raise
+            raise AsxError(
+                "暂时无法连接 Asynx，参考图未能上传，任务尚未提交。请检查网络和服务地址后重试。",
+                code="network_error",
+                exit_code=3,
+            ) from exc
+        payload = _decode_json(raw, context="Asynx API")
+        file_id = payload.get("id")
+        expires_at = payload.get("expires_at")
+        if (
+            not isinstance(file_id, str) or _FILE_ID.fullmatch(file_id) is None
+            or type(expires_at) is not int
+        ):
+            raise AsxError(
+                "图片上传后服务返回的内容不完整，请稍后重试；若持续出现，请联系服务支持。",
+                code="invalid_upload_response",
+            )
+        request_id = response_headers.get("X-Request-ID")
+        return payload, request_id if isinstance(request_id, str) else None
 
     def submit(
         self, body: dict[str, Any], idempotency_key: str

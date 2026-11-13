@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
-import json
+import os
 import sys
 import tempfile
 import unittest
@@ -15,7 +15,7 @@ ROOT = Path(__file__).parents[1]
 SCRIPTS = ROOT / "skills" / "asynx-image" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from asxlib import images, reference_media
+from asxlib import reference_media, uploads
 from asxlib.constants import (
     MAX_MASK_BYTES,
     MAX_REFERENCE_BYTES,
@@ -24,19 +24,22 @@ from asxlib.constants import (
     MAX_REFERENCE_PIXELS,
     MAX_REFERENCE_SOURCE_BYTES,
     MAX_REFERENCE_TOTAL_BYTES,
-    MAX_REQUEST_BODY_BYTES,
 )
 from asxlib.errors import AsxError
+from asxlib.media_results import image_mime
 from asxlib.reference_media import PreparedImage
 
 
 class ReferenceMediaTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
-
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
+        environment = patch.dict(
+            os.environ, {"ASYNX_CACHE_PATH": str(self.directory / "cache" / "models.json")}
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def _image_bytes(
         self,
@@ -75,9 +78,10 @@ class ReferenceMediaTestCase(unittest.TestCase):
         return f"data:{content_type};base64,{encoded}"
 
     @staticmethod
-    def _decode_data_url(value: str) -> tuple[str, bytes]:
-        header, encoded = value.split(",", 1)
-        return header.removeprefix("data:").removesuffix(";base64"), base64.b64decode(encoded)
+    def _staged(token: str) -> tuple[str, bytes]:
+        """The type and bytes of the prepared image a request refers to."""
+        data = uploads.read(token)
+        return image_mime(data), data
 
     def _assert_error(self, code: str, function: object, *args: object, **kwargs: object) -> AsxError:
         with self.assertRaises(AsxError) as caught:
@@ -92,7 +96,7 @@ class ReferenceMediaTestCase(unittest.TestCase):
             Image.new("RGB", (2000, 1000), "white").save(original)
             Image.new("RGBA", (2000, 1000), (0, 0, 0, 0)).save(markup)
             result = reference_media.prepare_markup(str(markup), str(original), keep_original=False)
-            data = base64.b64decode(result.partition(",")[2])
+            data = uploads.read(result.source)
             with Image.open(io.BytesIO(data)) as layer:
                 self.assertEqual(layer.size, (1600, 800))
             Image.new("RGBA", (1000, 1000)).save(markup)
@@ -107,7 +111,6 @@ class ReferenceMediaTestCase(unittest.TestCase):
         self.assertEqual(MAX_REFERENCE_DIMENSION, 1600)
         self.assertEqual(MAX_REFERENCE_PIXELS, 2_560_000)
         self.assertEqual(MAX_MASK_BYTES, 10 * 1024 * 1024)
-        self.assertEqual(MAX_REQUEST_BODY_BYTES, 32 * 1024 * 1024)
 
     def test_local_and_data_url_images_are_normalized_to_webp(self) -> None:
         path, png = self._write_image("reference.png")
@@ -116,7 +119,7 @@ class ReferenceMediaTestCase(unittest.TestCase):
         for source in sources:
             with self.subTest(source="local" if source == str(path) else "data_url"):
                 prepared = reference_media.prepare_image(source)
-                content_type, data = self._decode_data_url(prepared.source)
+                content_type, data = self._staged(prepared.source)
                 self.assertEqual(content_type, "image/webp")
                 self.assertEqual(prepared.content_type, "image/webp")
                 self.assertEqual(prepared.size_bytes, len(data))
@@ -170,7 +173,7 @@ class ReferenceMediaTestCase(unittest.TestCase):
 
         prepared = reference_media.prepare_image(str(path), keep_original=True)
 
-        content_type, data = self._decode_data_url(prepared.source)
+        content_type, data = self._staged(prepared.source)
         self.assertEqual(content_type, "image/jpeg")
         self.assertEqual(data, jpeg)
         self.assertEqual(prepared.content_type, "image/jpeg")
@@ -230,10 +233,10 @@ class ReferenceMediaTestCase(unittest.TestCase):
     def test_combined_local_input_limit_counts_references_and_mask(self) -> None:
         references = ["first.png", "second.png"]
         prepared = [
-            PreparedImage("data:image/webp;base64,AA==", "image/webp", 9, 1, 1, True),
-            PreparedImage("data:image/webp;base64,AA==", "image/webp", 9, 1, 1, True),
+            PreparedImage("first", "image/webp", 9, 1, 1, True),
+            PreparedImage("second", "image/webp", 9, 1, 1, True),
         ]
-        mask = PreparedImage("data:image/png;base64,AA==", "image/png", 3, 1, 1, False)
+        mask = PreparedImage("mask", "image/png", 3, 1, 1, False)
         with (
             patch.object(reference_media, "MAX_REFERENCE_TOTAL_BYTES", 20),
             patch.object(reference_media, "prepare_image", side_effect=prepared),
@@ -247,45 +250,6 @@ class ReferenceMediaTestCase(unittest.TestCase):
                 keep_original=False,
             )
 
-    def test_request_body_larger_than_32_mb_is_rejected(self) -> None:
-        body = {"input": {"prompt": "x" * 128}}
-        compact_size = len(
-            json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        )
-        with patch.object(reference_media, "MAX_REQUEST_BODY_BYTES", compact_size - 1):
-            self._assert_error("request_body_too_large", reference_media.validate_request_body, body)
-
-        with patch.object(reference_media, "MAX_REQUEST_BODY_BYTES", compact_size):
-            reference_media.validate_request_body(body)
-
-    def test_large_reference_request_warning_starts_at_one_mib(self) -> None:
-        warning_threshold = 1024 * 1024
-
-        def body_with_size(size: int) -> dict[str, object]:
-            prefix = "data:image/webp;base64,"
-            empty: dict[str, object] = {"input": {"reference_images": [prefix]}}
-            overhead = len(
-                json.dumps(empty, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            )
-            body: dict[str, object] = {
-                "input": {"reference_images": [prefix + "x" * (size - overhead)]}
-            }
-            encoded_size = len(
-                json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            )
-            self.assertEqual(encoded_size, size)
-            return body
-
-        self.assertEqual(images.task_input_warnings(body_with_size(warning_threshold - 1)), [])
-
-        request_body_bytes = warning_threshold
-        warnings = images.task_input_warnings(body_with_size(request_body_bytes))
-        self.assertEqual(len(warnings), 1)
-        self.assertEqual(warnings[0]["code"], "large_reference_payload")
-        self.assertIsInstance(warnings[0]["message"], str)
-        self.assertTrue(warnings[0]["message"])
-        self.assertEqual(warnings[0]["request_body_bytes"], request_body_bytes)
-
     def test_valid_mask_is_preserved_as_png(self) -> None:
         mask_image = Image.new("RGBA", (2, 1), (0, 0, 0, 0))
         mask_image.putpixel((1, 0), (0, 0, 0, 255))
@@ -296,7 +260,7 @@ class ReferenceMediaTestCase(unittest.TestCase):
 
         prepared = reference_media.prepare_mask(str(mask), source=source)
 
-        content_type, data = self._decode_data_url(prepared.source)
+        content_type, data = self._staged(prepared.source)
         self.assertEqual(content_type, "image/png")
         self.assertEqual(data, original)
         self.assertEqual((prepared.width, prepared.height), (2, 1))

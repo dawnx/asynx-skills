@@ -6,8 +6,10 @@ import argparse
 import base64
 import io
 import json
+import secrets
 import socket
 import threading
+import time
 import zipfile
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -76,6 +78,31 @@ def _model_file(task: dict[str, Any]) -> tuple[bytes, str]:
     return MODEL_ZIP, "application/zip"
 
 
+_FILE_ID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+_IMAGE_SIGNATURES = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"RIFF")
+
+
+def _file_ids(body: dict[str, Any]) -> list[str]:
+    """File IDs a submission names in its image source fields."""
+    task_input: dict[str, Any] = body["input"] if isinstance(body.get("input"), dict) else {}
+    sources: list[Any] = [
+        *(task_input.get("reference_images") or []), *(task_input.get("images") or []),
+        task_input.get("mask"), task_input.get("markup"), task_input.get("image"),
+        *(item.get("url") for item in task_input.get("inputs") or [] if item.get("type") == "image"),
+    ]
+    return [source for source in sources if isinstance(source, str) and source.startswith("file_")]
+
+
+def _uploaded_part(raw: bytes, content_type: str) -> bytes | None:
+    """The content of the multipart part named ``file``."""
+    boundary = content_type.partition("boundary=")[2].strip('"').encode("ascii")
+    for part in raw.split(b"--" + boundary):
+        headers, separator, content = part.partition(b"\r\n\r\n")
+        if separator and b'name="file"' in headers:
+            return content.removesuffix(b"\r\n")
+    return None
+
+
 def _default_model(body: dict[str, Any]) -> str:
     """The service's configured default for a request that names no model."""
     task_type = str(body.get("task_type") or "")
@@ -102,6 +129,8 @@ class MockState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.tasks: dict[str, dict[str, Any]] = {}
+        self.files: dict[str, bytes] = {}
+        self.uploads = 0
         self.idempotency: dict[str, str] = {}
         self.dropped: set[str] = set()
         self.submissions = 0
@@ -330,7 +359,9 @@ class MockHandler(BaseHTTPRequestHandler):
             headers=headers,
         )
 
-    def _error(self, status: int, code: str, message: str) -> None:
+    def _error(
+        self, status: int, code: str, message: str, *, details: dict[str, Any] | None = None
+    ) -> None:
         submitting = self.command == "POST" and urlsplit(self.path).path == "/v1/tasks"
         self._send(
             status,
@@ -339,7 +370,7 @@ class MockHandler(BaseHTTPRequestHandler):
                 "message": f"developer text for {code}",
                 "data": {
                     "task_id": None,
-                    "details": None,
+                    "details": details,
                     # Every refusal this mock issues happens before a task exists.
                     "task_created": False if submitting else None,
                     "next_step": "fix_account" if status in {401, 402, 403}
@@ -377,8 +408,18 @@ class MockHandler(BaseHTTPRequestHandler):
                         "submissions": state.submissions,
                         "idempotent_replays": state.replays,
                         "model_requests": state.model_requests,
+                        "uploads": state.uploads,
                     }
                 )
+            return
+        if path.startswith("/__mock__/files/"):
+            # Lets a test read back exactly what was uploaded.
+            with self.server.state.lock:
+                content = self.server.state.files[path.rsplit("/", 1)[1]]
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
             return
         if not self._authorized():
             return
@@ -443,9 +484,39 @@ class MockHandler(BaseHTTPRequestHandler):
             return
         self._error(404, "not_found", "Mock 路由不存在")
 
+    def _upload(self) -> None:
+        raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        content = _uploaded_part(raw, self.headers.get("Content-Type", ""))
+        if content is None or not content.startswith(_IMAGE_SIGNATURES):
+            # File routes answer without the envelope, errors nested under "error".
+            self._send(422, {"error": {
+                "code": "unsupported_asset_type", "message": "developer text for unsupported_asset_type",
+                "request_id": "req_mock", "details": None, "next_step": "change_request",
+                "user_message": "Mock 仅接受 PNG、JPEG 或 WebP 图片",
+            }})
+            return
+        file_id = "file_" + "".join(secrets.choice(_FILE_ID_ALPHABET) for _ in range(26))
+        now = int(time.time())
+        with self.server.state.lock:
+            self.server.state.files[file_id] = content
+            self.server.state.uploads += 1
+        self._send(200, {
+            "id": file_id, "object": "file", "bytes": len(content), "created_at": now,
+            "filename": "reference", "purpose": "vision", "expires_at": now + 24 * 60 * 60,
+        })
+
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
+        if path == "/__mock__/expire-files":
+            # Every uploaded file reaches the end of its retention at once.
+            with self.server.state.lock:
+                self.server.state.files.clear()
+            self._ok({})
+            return
         if not self._authorized():
+            return
+        if path == "/v1/files":
+            self._upload()
             return
         if path == "/v1/tasks":
             body = self._json_body()
@@ -454,6 +525,14 @@ class MockHandler(BaseHTTPRequestHandler):
             key = self.headers.get("Idempotency-Key")
             if not key:
                 self._error(400, "invalid_idempotency_key", "缺少 Idempotency-Key")
+                return
+            with self.server.state.lock:
+                missing = [
+                    file_id for file_id in _file_ids(body)
+                    if file_id not in self.server.state.files and key not in self.server.state.idempotency
+                ]
+            if missing:
+                self._error(404, "file_not_found", "Mock 文件不存在或已过期", details={"file_id": missing[0]})
                 return
             markers = self.server.state.markers(body)
             if markers is None:

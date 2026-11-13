@@ -385,12 +385,12 @@ def parser() -> argparse.ArgumentParser:
     task_cancel = task_commands.add_parser("cancel", help="请求取消服务端的任务")
     task_cancel.add_argument("task_id")
 
-    prune = commands.add_parser("prune", help="精简本机任务记录，不删除任何结果文件")
+    prune = commands.add_parser("prune", help="清理本机暂存的参考图与任务记录，不删除任何结果文件")
     prune.add_argument(
         "--older-than-days", type=int,
-        help="同时删除这些天之前已结束的任务与批次记录；省略时只移除已结束任务中内嵌的参考图数据",
+        help="同时删除这些天之前已结束的任务与批次记录；省略时只清理不再需要的参考图暂存文件与过期的上传记录",
     )
-    prune.add_argument("--dry-run", action="store_true", help="只统计将精简的内容，不做任何修改")
+    prune.add_argument("--dry-run", action="store_true", help="只统计将清理的内容，不做任何修改")
 
     asset = commands.add_parser("asset", help="查看本机结果文件")
     asset_commands = asset.add_subparsers(dest="asset_command", required=True)

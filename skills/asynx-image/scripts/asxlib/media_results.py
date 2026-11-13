@@ -9,7 +9,7 @@ from typing import Any
 
 from .errors import AsxError
 from .image_results import attach_image_details
-from .svg_results import is_svg
+from .svg_results import is_svg, svg_details
 
 # 3D result types the service delivers and the extension each is saved under.
 # An archive is kept as delivered and never unpacked.
@@ -25,6 +25,21 @@ MODEL_FILE_EXTENSIONS = {
 }
 # A ZIP end record is 22 bytes plus a comment of at most 65535.
 _ZIP_TAIL_BYTES = 65_535 + 22
+
+
+def image_mime(data: bytes) -> str:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if is_svg(data):
+        svg_details(data)
+        return "image/svg+xml"
+    raise AsxError("结果需为 PNG、JPEG、WebP、GIF 或 SVG。", code="unsupported_image_format")
 
 
 def model_content_type(value: Any) -> str | None:
@@ -64,7 +79,6 @@ def media_file_info(path: Path, *, model_content_type_hint: str | None = None) -
     elif header.startswith((b"GIF87a", b"GIF89a")):
         kind, content_type, extension = "image", "image/gif", "gif"
     elif is_svg(header):
-        from .svg_results import svg_details
         svg_details(path.read_bytes())
         kind, content_type, extension = "image", "image/svg+xml", "svg"
     elif _is_mp4(header, size):

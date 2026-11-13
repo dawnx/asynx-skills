@@ -13,13 +13,11 @@ from .config import cache_path
 from .constants import (
     MAX_REFERENCE_TOTAL_BYTES,
     MODEL_CACHE_TTL_SECONDS,
-    REFERENCE_NETWORK_WARNING_BYTES,
     SERVICE_DEFAULT_MODEL,
 )
 from .errors import AsxError
 from .image_options import resolved_image_options
-from .reference_media import prepare_inputs, request_body_size, validate_request_body
-from .svg_results import is_svg
+from .reference_media import prepare_inputs
 
 _CANONICAL_MODEL = re.compile(r"^(?=.*\d)[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)+$")
 
@@ -131,22 +129,6 @@ def _looks_canonical(selector: str) -> bool:
     return bool(_CANONICAL_MODEL.fullmatch(selector.strip()))
 
 
-def image_mime(data: bytes) -> str:
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    if data.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
-    if is_svg(data):
-        from .svg_results import svg_details
-        svg_details(data)
-        return "image/svg+xml"
-    raise AsxError("结果需为 PNG、JPEG、WebP、GIF 或 SVG。", code="unsupported_image_format")
-
-
 def validate_idempotency_key(value: str) -> str:
     try:
         raw = value.encode("ascii")
@@ -158,46 +140,6 @@ def validate_idempotency_key(value: str) -> str:
             code="invalid_idempotency_key",
         )
     return value
-
-
-def _data_url_size(value: str) -> int:
-    encoded = value.rsplit(",", 1)[1]
-    padding = len(encoded) - len(encoded.rstrip("="))
-    return len(encoded) * 3 // 4 - padding
-
-
-def task_input_warnings(body: dict[str, Any]) -> list[dict[str, Any]]:
-    task_input = body.get("input")
-    if not isinstance(task_input, dict):
-        return []
-    sources = task_input.get("reference_images", task_input.get("images", []))
-    local_sources = (
-        [source for source in sources if isinstance(source, str) and source.startswith("data:image/")]
-        if isinstance(sources, list)
-        else []
-    )
-    mask = task_input.get("mask")
-    if isinstance(mask, str) and mask.startswith("data:image/"):
-        local_sources.append(mask)
-    if not local_sources:
-        return []
-    body_bytes = request_body_size(body)
-    if body_bytes < REFERENCE_NETWORK_WARNING_BYTES:
-        return []
-    image_bytes = sum(_data_url_size(source) for source in local_sources)
-    return [
-        {
-            "code": "large_reference_payload",
-            "message": (
-                f"处理后的 {len(local_sources)} 张本地图片共 "
-                f"{image_bytes / 1024 / 1024:.2f} MiB，实际上传数据约 "
-                f"{body_bytes / 1024 / 1024:.2f} MiB，网络较慢时上传耗时可能增加。"
-            ),
-            "image_bytes": image_bytes,
-            "request_body_bytes": body_bytes,
-            "local_image_count": len(local_sources),
-        }
-    ]
 
 
 def build_task(
@@ -277,11 +219,13 @@ def build_task(
     if options.get("markup") and (mask or task_type != "image.edit"):
         raise AsxError("Markup 仅用于编辑，且不能与 Mask 同时使用。", code="conflicting_image_options")
     source_sizes: list[tuple[int, int] | None] = []
+    prepared_bytes: list[int] = []
     prepared, prepared_mask = prepare_inputs(
         references,
         mask=mask,
         keep_original=keep_reference_original,
         source_sizes=source_sizes,
+        prepared_bytes=prepared_bytes,
     )
     if task_type == "image.edit" and not aspect_ratio and not options.get("size"):
         if any(size is None for size in source_sizes):
@@ -315,9 +259,9 @@ def build_task(
         task_input["quality"] = quality_value
     if options.get("markup"):
         from .reference_media import prepare_markup
-        options["markup"] = prepare_markup(options["markup"], references[0], keep_original=keep_reference_original)
-        total_bytes = sum(_data_url_size(source) for source in prepared if source.startswith("data:image/")) + _data_url_size(options["markup"])
-        if total_bytes > MAX_REFERENCE_TOTAL_BYTES:
+        markup = prepare_markup(options["markup"], references[0], keep_original=keep_reference_original)
+        options["markup"] = markup.source
+        if sum(prepared_bytes) + (markup.size_bytes or 0) > MAX_REFERENCE_TOTAL_BYTES:
             raise AsxError("本地图片与标注处理后的总大小超过 20 MiB，请减少图片数量或缩小图片。", code="reference_images_total_too_large")
     task_input.update(options)
     if options.get("size"):
@@ -331,5 +275,4 @@ def build_task(
     body: dict[str, Any] = {"task_type": task_type, "input": task_input, "asset_delivery": "asynx"}
     if selected_model is not None:
         body["model"] = selected_model
-    validate_request_body(body)
     return body, selected_model or SERVICE_DEFAULT_MODEL, request_id

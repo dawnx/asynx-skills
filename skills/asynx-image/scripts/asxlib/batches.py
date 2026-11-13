@@ -12,6 +12,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, cast
 
+from . import uploads
 from .client import AsynxClient
 from .config import default_output_root
 from .constants import (
@@ -26,10 +27,9 @@ from .constants import (
 from .errors import PAUSING_STEPS, AsxError, task_error
 from .image_options import IMAGE_OPTIONS, options_from_args, resolved_image_options
 from .image_results import requested_aspect_ratio
-from .images import build_task, task_input_warnings
+from .images import build_task
 from .media_results import attach_media_details
 from .output import log
-from .reference_media import validate_request_body
 from .state import (
     append_event,
     bind_remote_task,
@@ -544,9 +544,6 @@ def create_batch(
         connection.close()
     if catalog_request_id:
         summary["catalog_request_id"] = catalog_request_id
-    input_warnings = task_input_warnings(body)
-    if input_warnings:
-        summary["warnings"] = input_warnings
     return summary
 
 
@@ -631,7 +628,6 @@ def add_to_batch(
             if any(item["role"] == "last_frame" for item in inputs) and not any(item["role"] == "first_frame" for item in inputs):
                 raise AsxError("使用尾帧时必须同时提供首帧。", code="missing_first_frame")
             body["input"]["inputs"] = inputs
-            validate_request_body(body)
         elif has_overrides:
             if any(value is not None for value in (duration, resolution, first_frame, last_frame, reference_videos, reference_audios)):
                 raise AsxError("图片批次不支持视频参数。", code="conflicting_batch_options")
@@ -759,11 +755,7 @@ def add_to_batch(
             "UPDATE batches SET updated_at = ? WHERE id = ?", (now, batch["id"])
         )
         connection.commit()
-        summary = batch_summary(connection, get_batch(connection, batch["id"]))
-        input_warnings = task_input_warnings(body)
-        if input_warnings:
-            summary["warnings"] = input_warnings
-        return summary
+        return batch_summary(connection, get_batch(connection, batch["id"]))
     except sqlite3.Error as exc:
         connection.rollback()
         raise AsxError(
@@ -1076,7 +1068,10 @@ def poll_batch(
                     task, request_id = client.find_submission(str(item["idempotency_key"]))
                     in_flight = task is None and still_settling(earlier)
                 if task is None:
-                    task, request_id = client.submit(body, item["idempotency_key"])
+                    # Stored rows keep upload tokens; file IDs exist only in what is sent.
+                    task, request_id = uploads.submit(
+                        client, body, item["idempotency_key"], settled=not in_flight
+                    )
                 if not intent.get("remote_task_id"):
                     bind_remote_task(
                         connection,
@@ -1552,12 +1547,8 @@ def execute_batch(
         )
         if getattr(args, "quote", False):
             return created, 0
-        for warning in created.get("warnings", []):
-            log(f"提示：{warning['message']}")
         progressed = poll_batch(client, created["id"], submissions_limit=args.limit)
         progressed["created"] = True
-        if created.get("warnings"):
-            progressed["warnings"] = created["warnings"]
         return progressed, 0 if progressed["ok"] else 4
     if action == "add":
         references = args.reference if args.reference else args.image if args.image else None
@@ -1580,11 +1571,7 @@ def execute_batch(
             reference_videos=getattr(args, "reference_video", None),
             reference_audios=getattr(args, "reference_audio", None),
         )
-        for warning in result.get("warnings", []):
-            log(f"提示：{warning['message']}")
         progressed = poll_batch(client, result["id"], submissions_limit=args.limit)
         progressed["added"] = args.total
-        if result.get("warnings"):
-            progressed["warnings"] = result["warnings"]
         return progressed, 0 if progressed["ok"] else 4
     raise AssertionError("unreachable")

@@ -6,15 +6,14 @@ import io
 import math
 from typing import Any
 
+from . import uploads
 from .constants import MAX_REFERENCE_SOURCE_BYTES, SERVICE_DEFAULT_MODEL
 from .errors import AsxError
 from .reference_media import (
-    _data_url,
     _decoded_image,
     _pillow,
     _read_source,
     _validated_remote_url,
-    validate_request_body,
 )
 
 
@@ -36,7 +35,7 @@ def prepare_video_image(value: str) -> str:
     prepared = output.getvalue()
     if len(prepared) > 3 * 1024 * 1024:
         raise AsxError("参考图压缩后仍超过 3 MiB，请降低原图分辨率或使用较小的图片。", code="video_reference_too_large")
-    return _data_url("image/png" if alpha else "image/jpeg", prepared)
+    return uploads.stage(prepared)
 
 
 def _media_url(value: str) -> str:
@@ -79,7 +78,6 @@ def build_video_task(
     }
     if selected is not None:
         body["model"] = selected
-    validate_request_body(body)
     return body, selected or SERVICE_DEFAULT_MODEL, None
 
 

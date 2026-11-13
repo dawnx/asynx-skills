@@ -5,6 +5,7 @@ import io
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -25,6 +26,7 @@ class FakeClient:
 
     def __init__(self):
         self.submitted = []
+        self.uploaded = []
         self.lookups = []
         self.downloaded = []
         self.statuses = {}
@@ -37,6 +39,14 @@ class FakeClient:
 
     def models(self):
         return self.catalog, "catalog"
+
+    def upload_file(self, data, content_type, filename):
+        self.uploaded.append(data)
+        return {
+            "id": f"file_{len(self.uploaded):026d}", "object": "file", "bytes": len(data),
+            "created_at": int(time.time()), "filename": filename, "purpose": "vision",
+            "expires_at": int(time.time()) + 24 * 60 * 60,
+        }, "upload"
 
     def submit(self, body, key):
         if self.reject_submit:

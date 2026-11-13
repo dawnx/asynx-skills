@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
+from . import uploads
 from .client import AsynxClient
 from .config import default_output_root, initial_poll_delay_seconds, max_wait_seconds
 from .constants import (
@@ -28,12 +29,11 @@ from .image_results import requested_aspect_ratio
 from .images import (
     build_task,
     cache_models,
-    image_mime,
-    task_input_warnings,
     validate_idempotency_key,
 )
 from .media_results import (
     attach_media_details,
+    image_mime,
     incomplete_model_file,
     media_file_info,
     model_content_type,
@@ -1166,7 +1166,8 @@ def quote_payload(client: AsynxClient, body: dict[str, Any], *, tasks: int = 1) 
     """Ask the service what a prepared request would cost; nothing is submitted or saved."""
     from decimal import Decimal, InvalidOperation
 
-    data, request_id = client.quote(body)
+    # The service prices the request it would receive, so local images are uploaded first.
+    data, request_id = client.quote(uploads.materialize(client, body))
     try:
         amount = Decimal(str(data["charge_amount"]))
     except (KeyError, InvalidOperation, ValueError) as exc:
@@ -1289,14 +1290,8 @@ def run_submission(
             options=options_from_args(args),
         )
     prepared_at = time.perf_counter()
-    input_warnings = task_input_warnings(body)
-    for warning in input_warnings:
-        log(f"提示：{warning['message']}")
     if getattr(args, "quote", False):
-        quoted = quote_payload(client, body)
-        if input_warnings:
-            quoted["warnings"] = input_warnings
-        return quoted, 0
+        return quote_payload(client, body), 0
     idempotency_key = validate_idempotency_key(
         args.idempotency_key or f"asx-{secrets.token_hex(16)}"
     )
@@ -1322,7 +1317,8 @@ def run_submission(
             found, request_id = client.find_submission(idempotency_key)
             in_flight = found is None and still_settling(earlier)
         if found is None:
-            found, request_id = client.submit(body, idempotency_key)
+            # The ledger keeps the body as built; local images are uploaded on the way out.
+            found, request_id = uploads.submit(client, body, idempotency_key, settled=not in_flight)
         task = found
         task.setdefault("task_type", task_type)
         if not local_row.get("remote_task_id"):
@@ -1348,8 +1344,6 @@ def run_submission(
             exc.details.setdefault("idempotency_key", idempotency_key)
             if catalog_request_id:
                 exc.details.setdefault("catalog_request_id", catalog_request_id)
-            if input_warnings:
-                exc.details.setdefault("warnings", input_warnings)
         raise
     accepted_at = time.perf_counter()
     timings: dict[str, Any] = {
@@ -1360,8 +1354,6 @@ def run_submission(
         payload = task_payload(task, request_id, local_id=local_id)
         payload["idempotency_key"] = idempotency_key
         payload["timings"] = timings
-        if input_warnings:
-            payload["warnings"] = input_warnings
         return payload, 0 if payload["ok"] else 4
     # Printed at acceptance so a host that stops this command still shows what to resume.
     log(f"任务已受理：{task.get('id')}（本地记录 {local_id}）。若本命令被中断，请用 wait {local_id} 继续，不要重新生成。")
@@ -1377,8 +1369,6 @@ def run_submission(
     if task.get("status") != "succeeded":
         payload = task_payload(task, request_id, local_id=local_id)
         payload["timings"] = timings
-        if input_warnings:
-            payload["warnings"] = input_warnings
         if task.get("status") not in TERMINAL_STATUSES:
             return _still_running(payload), 0
         return payload, 4
@@ -1390,8 +1380,6 @@ def run_submission(
     timings["download_seconds"] = round(time.perf_counter() - finished_at, 3)
     timings["asset_downloads"] = asset_metrics
     payload["timings"] = timings
-    if input_warnings:
-        payload.setdefault("warnings", []).extend(input_warnings)
     return payload, code
 
 
