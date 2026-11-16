@@ -169,6 +169,25 @@ class ModelFollowUpBodyTests(unittest.TestCase):
             {"task_id": "task_elsewhere"},
         )
 
+    def test_a_local_model_the_service_cannot_take_is_refused_before_any_upload_or_charge(self):
+        # Each of these would otherwise upload up to 150 MB and then fail, or (an
+        # animation) reach a paid path that needs the service's own rig.
+        glb, gltf, huge = self.root / "robot.glb", self.root / "robot.gltf", self.root / "huge.stl"
+        glb.write_bytes(GLB)
+        gltf.write_text('{"asset":{"version":"2.0"}}')
+        with huge.open("wb") as handle:
+            handle.truncate(models3d.MAX_MODEL_SOURCE_BYTES + 1)
+        for flags, code in (
+            (["animate", "--file", str(glb), "--animation", "preset:walk"], "model_file_needs_rig"),
+            (["rig", "--file", str(gltf)], "unsupported_model_file"),
+            (["convert", "--file", str(huge), "--format", "obj"], "model_file_too_large"),
+        ):
+            with self.subTest(code=code), self.assertRaises(AsxError) as caught:
+                self.sent(*flags)
+            self.assertEqual(caught.exception.code, code)
+        self.assertEqual(caught.exception.details["max_bytes"], 150_000_000)
+        self.assertEqual((self.client.uploaded, self.client.submitted), ([], []))
+
 
 class ModelCLITests(unittest.TestCase):
     setUp = image_e2e.CLIE2ETestCase.setUp
@@ -246,6 +265,31 @@ class ModelCLITests(unittest.TestCase):
         self.run_cli("task", "status", submitted["local_id"], "--refresh")
         self.run_cli("task", "status", submitted["local_id"], "--refresh")
         return submitted["local_id"]
+
+    def test_a_local_model_is_uploaded_once_as_a_model_and_its_rig_can_be_animated(self):
+        # A local file must reach the service as a model upload named by file_id in one
+        # paid task, and the documented way to animate it is through that rig task.
+        source = self.temp_path / "robot.glb"
+        source.write_bytes(GLB)
+        rigged = self.run_cli(
+            "model", "rig", "--file", str(source), "--detach", "--output-dir", str(self.temp_path / "rig"),
+        )
+        sent = self.run_cli("history", "--limit", "1")["tasks"][0]
+        self.assertEqual(sent["id"], rigged["task_id"])
+        self.assertEqual(set(sent["input"]["source"]), {"file_id"})
+        with urlopen(f"{self.base_url}/__mock__/files/{sent['input']['source']['file_id']}", timeout=5) as response:
+            self.assertEqual(response.read(), GLB)
+        self.run_cli("task", "status", rigged["local_id"], "--refresh")
+        self.assertTrue(self.run_cli("task", "status", rigged["local_id"], "--refresh")["task"]["ok"])
+
+        animated = self.run_cli(
+            "model", "animate", "--from-task", rigged["local_id"], "--animation", "preset:walk", "--detach",
+        )
+        sent = self.run_cli("history", "--limit", "1")["tasks"][0]
+        self.assertEqual((sent["id"], sent["input"]["source"]), (animated["task_id"], {"task_id": rigged["task_id"]}))
+        with urlopen(self.base_url + "/__mock__/stats", timeout=5) as response:
+            stats = json.load(response)["data"]
+        self.assertEqual((stats["uploads"], stats["submissions"]), (1, 2))
 
     def test_unriggable_answer_is_a_successful_result_without_files(self):
         # "Not riggable" is the answer that was asked for; reporting it as a failed or

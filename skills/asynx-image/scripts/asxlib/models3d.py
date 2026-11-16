@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import argparse
 import re
+from pathlib import Path
 from typing import Any
 
+from . import uploads
+from .constants import MAX_MODEL_SOURCE_BYTES
 from .errors import AsxError
 from .images import _cached_models, _looks_canonical, cache_models, resolve_model
 from .reference_media import prepare_inputs
@@ -17,7 +20,8 @@ MODEL_COMMAND_TASK_TYPES = {
     "animate": "model.retarget", "convert": "model.convert",
 }
 # Which earlier task each follow-up accepts as its source: generate -> rig -> retarget,
-# any of them can be converted, and a conversion ends the chain.
+# any of them can be converted, and a conversion ends the chain. A local model file
+# can stand in for the generated model; retarget needs the service's own rig.
 MODEL_SOURCE_TASK_TYPES = {
     RIG_CHECK_TASK_TYPE: ("model.generate",),
     "model.rig": ("model.generate",),
@@ -32,6 +36,8 @@ RIG_TYPES = ("biped", "quadruped", "hexapod", "octopod", "avian", "serpentine", 
 SKELETON_PROFILES = ("tripo", "mixamo", "actorcore", "unity", "unreal", "vrm")
 RIGGED_FORMATS = ("glb", "fbx")
 CONVERT_FORMATS = ("gltf", "fbx", "usdz", "obj", "stl", "3mf")
+# Local model files the service accepts as a source, by extension.
+MODEL_SOURCE_FORMATS = tuple(uploads.MODEL_UPLOAD_TYPES)
 MAX_MODEL_PROMPT_CHARACTERS = 1024
 MAX_MODEL_NEGATIVE_PROMPT_CHARACTERS = 255
 MAX_MODEL_FACES = 2_000_000
@@ -181,17 +187,65 @@ def body_from_model_args(client: Any, args: argparse.Namespace) -> tuple[dict[st
     )
 
 
+def model_file_source(path_text: str, task_type: str) -> dict[str, str]:
+    """The source for a local model file: checked by name and size, kept for upload.
+
+    The content is not read for its shape; the service passes it on and the
+    provider judges it. The request holds an upload token until it is sent.
+    """
+    if task_type == "model.retarget":
+        raise AsxError(
+            "本地模型文件不能直接套用动画：动画只能套用在 Asynx 骨骼绑定任务的结果上。"
+            f"请先运行 model rig --file {path_text} 绑定骨骼，完成后再用该任务 ID 运行 "
+            "model animate --from-task <任务 ID> --animation <动画标识>。",
+            code="model_file_needs_rig",
+            details={"next_action_args": ["model", "rig", "--file", path_text]},
+        )
+    path = Path(path_text).expanduser()
+    extension = path.suffix.lower().removeprefix(".")
+    if extension not in MODEL_SOURCE_FORMATS:
+        raise AsxError(
+            "本地 3D 模型文件须为 GLB、FBX、OBJ 或 STL 格式，按文件扩展名判断；"
+            "GLTF 等其他格式请先导出为其中一种。",
+            code="unsupported_model_file",
+            details={"accepted_formats": list(MODEL_SOURCE_FORMATS)},
+        )
+    if not path.is_file():
+        raise AsxError(f"3D 模型文件不存在，请检查路径：{path}", code="model_file_not_found")
+    try:
+        # The size is checked before reading, so an oversized file is never loaded.
+        _check_model_file_size(path, path.stat().st_size)
+        data = path.read_bytes()
+    except OSError as exc:
+        raise AsxError(f"3D 模型文件读取失败，请检查文件是否可访问：{path}", code="model_file_read_failed") from exc
+    _check_model_file_size(path, len(data))
+    return {"file_id": uploads.stage(data, extension)}
+
+
+def _check_model_file_size(path: Path, size: int) -> None:
+    if size > MAX_MODEL_SOURCE_BYTES:
+        raise AsxError(
+            f"3D 模型文件超过 {MAX_MODEL_SOURCE_BYTES // 1_000_000} MB（{MAX_MODEL_SOURCE_BYTES:,} 字节）上限，"
+            "请先减面或压缩后再使用。",
+            code="model_file_too_large", details={"max_bytes": MAX_MODEL_SOURCE_BYTES},
+        )
+    if size <= 0:
+        raise AsxError(f"3D 模型文件为空，请检查文件：{path}", code="empty_model_file")
+
+
 def build_model_followup_task(
-    client: Any, task_type: str, *, source_task_id: str, model_selector: str | None = None,
+    client: Any, task_type: str, *, source: dict[str, str], model_selector: str | None = None,
     rig_type: str | None = None, skeleton: str | None = None, animation: str | None = None,
     output_format: str | None = None,
 ) -> tuple[dict[str, Any], str, str | None]:
-    """Rig check, rig, retarget or convert the model an earlier task delivered.
+    """Rig check, rig, retarget or convert an earlier task's model or a local model file.
 
-    The source is named by its server task ID only; the service checks access,
-    status and type, and decides how the upstream receives the model.
+    ``source`` is ``{"task_id": ...}`` naming the server task, or ``{"file_id": ...}``
+    holding the upload token of a local file (see ``model_file_source``); the
+    service checks access, status and type, and decides how the upstream receives
+    the model.
     """
-    task_input: dict[str, Any] = {"source": {"task_id": source_task_id}}
+    task_input: dict[str, Any] = {"source": dict(source)}
     if task_type == "model.rig":
         if skeleton is not None and rig_type not in (None, "biped"):
             raise AsxError(
@@ -218,10 +272,10 @@ def build_model_followup_task(
 
 
 def body_from_model_followup_args(
-    client: Any, args: argparse.Namespace, task_type: str, source_task_id: str
+    client: Any, args: argparse.Namespace, task_type: str, source: dict[str, str]
 ) -> tuple[dict[str, Any], str, str | None]:
     return build_model_followup_task(
-        client, task_type, source_task_id=source_task_id, model_selector=getattr(args, "model", None),
+        client, task_type, source=source, model_selector=getattr(args, "model", None),
         rig_type=getattr(args, "rig_type", None), skeleton=getattr(args, "skeleton", None),
         animation=getattr(args, "animation", None), output_format=getattr(args, "format", None),
     )

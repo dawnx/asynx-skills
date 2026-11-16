@@ -43,6 +43,7 @@ from .models3d import (
     RIG_CHECK_TASK_TYPE,
     body_from_model_args,
     body_from_model_followup_args,
+    model_file_source,
     rig_check_answer,
 )
 from .output import log
@@ -293,6 +294,25 @@ def _model_source_task_id(identifier: str, task_type: str) -> str:
             },
         )
     return remote_id
+
+
+def _model_source(from_task: str | None, source_file: str | None, task_type: str) -> dict[str, str]:
+    """A 3D follow-up's source: an earlier task (``--from-task``) or a local model file (``--file``)."""
+    if source_file is not None:
+        # An animation never takes a file: say how to rig it first, whatever else was given.
+        if from_task is not None and task_type != "model.retarget":
+            raise AsxError(
+                "--from-task 与 --file 不能同时使用：请指定来源任务，或指定一个本地 3D 模型文件。",
+                code="conflicting_model_inputs",
+            )
+        return model_file_source(source_file, task_type)
+    if from_task is None:
+        raise AsxError(
+            "请通过 --from-task 指定骨骼绑定任务。" if task_type == "model.retarget"
+            else "请通过 --from-task 指定来源任务，或通过 --file 指定本地 3D 模型文件，二者选其一。",
+            code="missing_model_input",
+        )
+    return {"task_id": _model_source_task_id(from_task, task_type)}
 
 
 def _download_previews(
@@ -1267,7 +1287,7 @@ def run_submission(
             connection.close()
     if task_type in MODEL_SOURCE_TASK_TYPES:
         body, model, catalog_request_id = body_from_model_followup_args(
-            client, args, task_type, _model_source_task_id(str(from_task), task_type)
+            client, args, task_type, _model_source(from_task, getattr(args, "file", None), task_type)
         )
     elif task_type == "model.generate":
         if from_task:

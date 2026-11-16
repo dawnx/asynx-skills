@@ -317,25 +317,37 @@ def parser() -> argparse.ArgumentParser:
     _add_model_task_options(model_generate, operation="生成")
 
     source_help = "来源任务的本地或服务端任务 ID，须为已成功完成的{}任务"
+    file_help = (
+        "本地 3D 模型文件路径（GLB、FBX、OBJ 或 STL，按扩展名判断，最大 150 MB），"
+        "会先上传再提交；与 --from-task 二选一"
+    )
     rig_check = model_commands_3d.add_parser("rig-check", help="检查 3D 模型能否绑定骨骼，只返回结论，不交付文件")
-    rig_check.add_argument("--from-task", required=True, help=source_help.format(" 3D 模型生成"))
+    rig_check.add_argument("--from-task", help=source_help.format(" 3D 模型生成") + "；与 --file 二选一")
+    rig_check.add_argument("--file", help=file_help)
     _add_model_task_options(rig_check, operation="绑定检查")
 
     rig = model_commands_3d.add_parser("rig", help="为 3D 模型绑定骨骼并下载结果")
-    rig.add_argument("--from-task", required=True, help=source_help.format(" 3D 模型生成"))
+    rig.add_argument("--from-task", help=source_help.format(" 3D 模型生成") + "；与 --file 二选一")
+    rig.add_argument("--file", help=file_help)
     rig.add_argument("--rig-type", choices=RIG_TYPES, help="骨骼类型；省略时由服务决定")
     rig.add_argument("--skeleton", choices=SKELETON_PROFILES, help="骨骼命名规范，仅用于双足（biped）骨骼；省略时由服务决定")
     rig.add_argument("--format", choices=RIGGED_FORMATS, help="输出格式，默认 glb")
     _add_model_task_options(rig, operation="骨骼绑定")
 
     animate = model_commands_3d.add_parser("animate", help="为已绑定骨骼的 3D 模型套用一个动画并下载结果")
-    animate.add_argument("--from-task", required=True, help=source_help.format("骨骼绑定"))
+    animate.add_argument("--from-task", help=source_help.format("骨骼绑定"))
+    animate.add_argument(
+        "--file", help="不支持：本地模型须先通过 model rig --file 绑定骨骼，再用该任务 ID 套用动画",
+    )
     animate.add_argument("--animation", required=True, help="动画标识，例如 preset:walk；每个任务只套用一个动画")
     animate.add_argument("--format", choices=RIGGED_FORMATS, help="输出格式，默认 glb")
     _add_model_task_options(animate, operation="动画")
 
     convert = model_commands_3d.add_parser("convert", help="将 3D 模型转换为其他文件格式并下载结果")
-    convert.add_argument("--from-task", required=True, help=source_help.format(" 3D 模型生成、骨骼绑定或动画"))
+    convert.add_argument(
+        "--from-task", help=source_help.format(" 3D 模型生成、骨骼绑定或动画") + "；与 --file 二选一",
+    )
+    convert.add_argument("--file", help=file_help)
     convert.add_argument("--format", required=True, choices=CONVERT_FORMATS, help="目标格式")
     _add_model_task_options(convert, operation="格式转换")
 

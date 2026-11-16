@@ -21,6 +21,7 @@ from .constants import (
     MAX_ASSET_RESPONSE_BYTES,
     MAX_HTTP_ATTEMPTS,
     MAX_REDIRECTS,
+    MIN_UPLOAD_BYTES_PER_SECOND,
     REQUEST_TIMEOUT_SECONDS,
     TRANSIENT_HTTP_STATUSES,
     VERSION,
@@ -344,17 +345,19 @@ class AsynxClient:
         return {field: data[field] for field in fields}, request_id
 
     def upload_file(
-        self, data: bytes, content_type: str, filename: str
+        self, data: bytes, content_type: str, filename: str, *, purpose: str = "vision"
     ) -> tuple[dict[str, Any], str | None]:
-        """Upload one still image and return the file the service created for it.
+        """Upload one still image (``vision``) or 3D model (``model``) and return the file created for it.
 
-        Repeating an upload only leaves a spare file behind, so it is retried freely.
+        The service types a model by its filename's extension. Repeating an upload
+        only leaves a spare file behind, so it is retried freely.
         """
+        label = "3D 模型文件" if purpose == "model" else "参考图"
         boundary = f"asx-{secrets.token_hex(16)}"
         safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", filename) or "image"
         encoded = b"".join((
             f"--{boundary}\r\n".encode("ascii"),
-            b'Content-Disposition: form-data; name="purpose"\r\n\r\nvision\r\n',
+            f'Content-Disposition: form-data; name="purpose"\r\n\r\n{purpose}\r\n'.encode("ascii"),
             f"--{boundary}\r\n".encode("ascii"),
             f'Content-Disposition: form-data; name="file"; filename="{safe_name}"\r\n'.encode("ascii"),
             f"Content-Type: {content_type}\r\n\r\n".encode("ascii"),
@@ -368,12 +371,14 @@ class AsynxClient:
                 encoded,
                 {"Content-Type": f"multipart/form-data; boundary={boundary}"},
                 retry_safe=True,
+                # The whole body is sent within one timeout: give a large model time to travel.
+                timeout=max(REQUEST_TIMEOUT_SECONDS, len(encoded) / MIN_UPLOAD_BYTES_PER_SECOND),
             )
         except AsxError as exc:
             if exc.code != "network_error":
                 raise
             raise AsxError(
-                "暂时无法连接 Asynx，参考图未能上传，任务尚未提交。请检查网络和服务地址后重试。",
+                f"暂时无法连接 Asynx，{label}未能上传，任务尚未提交。请检查网络和服务地址后重试。",
                 code="network_error",
                 exit_code=3,
             ) from exc
@@ -385,7 +390,7 @@ class AsynxClient:
             or type(expires_at) is not int
         ):
             raise AsxError(
-                "图片上传后服务返回的内容不完整，请稍后重试；若持续出现，请联系服务支持。",
+                f"{label}上传后服务返回的内容不完整，请稍后重试；若持续出现，请联系服务支持。",
                 code="invalid_upload_response",
             )
         request_id = response_headers.get("X-Request-ID")

@@ -86,6 +86,16 @@ def _model_file(task: dict[str, Any]) -> tuple[bytes, str]:
 
 _FILE_ID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _IMAGE_SIGNATURES = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"RIFF")
+# Model uploads are typed by extension and otherwise left for the provider to judge.
+_MODEL_EXTENSIONS = (".glb", ".fbx", ".obj", ".stl")
+MAX_MODEL_UPLOAD_BYTES = 150_000_000
+
+
+def _model_source_file_id(body: dict[str, Any]) -> str | None:
+    task_input = body.get("input") if isinstance(body.get("input"), dict) else {}
+    source = task_input.get("source")
+    file_id = source.get("file_id") if isinstance(source, dict) else None
+    return file_id if isinstance(file_id, str) else None
 
 
 def _file_ids(body: dict[str, Any]) -> list[str]:
@@ -99,14 +109,18 @@ def _file_ids(body: dict[str, Any]) -> list[str]:
     return [source for source in sources if isinstance(source, str) and source.startswith("file_")]
 
 
-def _uploaded_part(raw: bytes, content_type: str) -> bytes | None:
-    """The content of the multipart part named ``file``."""
+def _uploaded_parts(raw: bytes, content_type: str) -> dict[str, tuple[bytes, str | None]]:
+    """Each multipart part by name: its content and its filename, if any."""
     boundary = content_type.partition("boundary=")[2].strip('"').encode("ascii")
+    parts: dict[str, tuple[bytes, str | None]] = {}
     for part in raw.split(b"--" + boundary):
         headers, separator, content = part.partition(b"\r\n\r\n")
-        if separator and b'name="file"' in headers:
-            return content.removesuffix(b"\r\n")
-    return None
+        disposition = headers.decode("latin-1")
+        name = disposition.partition('name="')[2].partition('"')[0]
+        filename = disposition.partition('filename="')[2].partition('"')[0] if "filename=" in disposition else None
+        if separator and name:
+            parts[name] = (content.removesuffix(b"\r\n"), filename)
+    return parts
 
 
 def _default_model(body: dict[str, Any]) -> str:
@@ -136,6 +150,7 @@ class MockState:
         self.lock = threading.Lock()
         self.tasks: dict[str, dict[str, Any]] = {}
         self.files: dict[str, bytes] = {}
+        self.file_purposes: dict[str, str] = {}
         self.uploads = 0
         self.idempotency: dict[str, str] = {}
         self.dropped: set[str] = set()
@@ -153,6 +168,9 @@ class MockState:
         if not isinstance(source, dict):
             prompt = task_input.get("prompt") if isinstance(task_input, dict) else None
             return prompt if isinstance(prompt, str) else ""
+        if "file_id" in source:
+            # An uploaded model carries no markers; the submission checked the file exists.
+            return ""
         with self.lock:
             task = self.tasks.get(str(source.get("task_id")))
         return None if task is None else str(task["markers"])
@@ -490,25 +508,46 @@ class MockHandler(BaseHTTPRequestHandler):
             return
         self._error(404, "not_found", "Mock 路由不存在")
 
+    def _file_error(
+        self, status: int, code: str, message: str, details: dict[str, Any] | None = None
+    ) -> None:
+        # File routes answer without the envelope, errors nested under "error".
+        self._send(status, {"error": {
+            "code": code, "message": f"developer text for {code}", "request_id": "req_mock",
+            "details": details, "next_step": "change_request", "user_message": message,
+        }})
+
     def _upload(self) -> None:
         raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        content = _uploaded_part(raw, self.headers.get("Content-Type", ""))
-        if content is None or not content.startswith(_IMAGE_SIGNATURES):
-            # File routes answer without the envelope, errors nested under "error".
-            self._send(422, {"error": {
-                "code": "unsupported_asset_type", "message": "developer text for unsupported_asset_type",
-                "request_id": "req_mock", "details": None, "next_step": "change_request",
-                "user_message": "Mock 仅接受 PNG、JPEG 或 WebP 图片",
-            }})
+        parts = _uploaded_parts(raw, self.headers.get("Content-Type", ""))
+        purpose = parts.get("purpose", (b"vision", None))[0].decode("utf-8", "replace")
+        content, filename = parts.get("file", (None, None))
+        if purpose == "model":
+            # Typed by extension (only an unknown one would make the service look at the content).
+            if content is None or not str(filename or "").lower().endswith(_MODEL_EXTENSIONS):
+                self._file_error(422, "unsupported_model_file", "Mock 仅接受 GLB、FBX、OBJ 或 STL 模型文件")
+                return
+            if not content:
+                self._file_error(422, "empty_model_file", "Mock 模型文件为空")
+                return
+            if len(content) > MAX_MODEL_UPLOAD_BYTES:
+                self._file_error(
+                    413, "model_file_too_large", "Mock 模型文件超过 150 MB",
+                    {"max_bytes": MAX_MODEL_UPLOAD_BYTES},
+                )
+                return
+        elif content is None or not content.startswith(_IMAGE_SIGNATURES):
+            self._file_error(422, "unsupported_asset_type", "Mock 仅接受 PNG、JPEG 或 WebP 图片")
             return
         file_id = "file_" + "".join(secrets.choice(_FILE_ID_ALPHABET) for _ in range(26))
         now = int(time.time())
         with self.server.state.lock:
             self.server.state.files[file_id] = content
+            self.server.state.file_purposes[file_id] = purpose
             self.server.state.uploads += 1
         self._send(200, {
             "id": file_id, "object": "file", "bytes": len(content), "created_at": now,
-            "filename": "reference", "purpose": "vision", "expires_at": now + 24 * 60 * 60,
+            "filename": filename or "reference", "purpose": purpose, "expires_at": now + 24 * 60 * 60,
         })
 
     def do_POST(self) -> None:
@@ -532,11 +571,27 @@ class MockHandler(BaseHTTPRequestHandler):
             if not key:
                 self._error(400, "invalid_idempotency_key", "缺少 Idempotency-Key")
                 return
+            task_input = body.get("input") if isinstance(body.get("input"), dict) else {}
+            source = task_input.get("source")
+            model_file = _model_source_file_id(body)
+            if isinstance(source, dict) and (
+                ("task_id" in source) == ("file_id" in source)
+                or (model_file is not None and body.get("task_type") == "model.retarget")
+            ):
+                # Exactly one of task_id or file_id; an animation needs a rig task, never a file.
+                self._error(422, "validation_error", "Mock 来源须为一个任务或一个模型文件")
+                return
             with self.server.state.lock:
+                state = self.server.state
                 missing = [
                     file_id for file_id in _file_ids(body)
-                    if file_id not in self.server.state.files and key not in self.server.state.idempotency
+                    if file_id not in state.files and key not in state.idempotency
                 ]
+                if (
+                    model_file is not None and key not in state.idempotency
+                    and (model_file not in state.files or state.file_purposes.get(model_file) != "model")
+                ):
+                    missing.append(model_file)
             if missing:
                 self._error(404, "file_not_found", "Mock 文件不存在或已过期", details={"file_id": missing[0]})
                 return

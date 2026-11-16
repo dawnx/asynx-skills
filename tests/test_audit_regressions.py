@@ -40,11 +40,11 @@ class FakeClient:
     def models(self):
         return self.catalog, "catalog"
 
-    def upload_file(self, data, content_type, filename):
+    def upload_file(self, data, content_type, filename, *, purpose="vision"):
         self.uploaded.append(data)
         return {
             "id": f"file_{len(self.uploaded):026d}", "object": "file", "bytes": len(data),
-            "created_at": int(time.time()), "filename": filename, "purpose": "vision",
+            "created_at": int(time.time()), "filename": filename, "purpose": purpose,
             "expires_at": int(time.time()) + 24 * 60 * 60,
         }, "upload"
 

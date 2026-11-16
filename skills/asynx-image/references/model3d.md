@@ -1,6 +1,6 @@
 # 3D 模型操作
 
-通过文字描述或一张参考图生成 3D 模型，结果为 GLB 文件，有预览图时一并下载。已生成的模型可继续做绑定检查、骨骼绑定、套用动画与格式转换，见[绑定、动画与格式转换](#绑定动画与格式转换)。单任务默认等待完成并下载结果；需要后台提交时加 `--detach`，之后使用原任务 ID 查询或等待。
+通过文字描述或一张参考图生成 3D 模型，结果为 GLB 文件，有预览图时一并下载。已生成的模型或用户提供的本地模型文件可继续做绑定检查、骨骼绑定、套用动画与格式转换，见[绑定、动画与格式转换](#绑定动画与格式转换)。单任务默认等待完成并下载结果；需要后台提交时加 `--detach`，之后使用原任务 ID 查询或等待。
 
 命令中的 `<skill-dir>` 替换为当前 Skill 的绝对路径。Windows 可使用 `py` 替代 `python3`。
 
@@ -52,21 +52,22 @@ python3 "<skill-dir>/scripts/asynx.py" model generate --from-task "<image-task-i
 
 ## 绑定、动画与格式转换
 
-四个后续操作均以一个**已成功完成的任务**的模型为来源，通过 `--from-task` 传入该任务的本地或服务端任务 ID，不接受本地文件或链接。
+四个后续操作以一个**已成功完成的任务**的模型为来源，通过 `--from-task` 传入该任务的本地或服务端任务 ID；`rig-check`、`rig` 与 `convert` 也可改用 `--file` 传入一个本地模型文件，见[本地模型文件](#本地模型文件)。`--from-task` 与 `--file` 二选一，不接受链接。
 
 ```bash
 python3 "<skill-dir>/scripts/asynx.py" model rig-check --from-task "<generate-task-id>"
 python3 "<skill-dir>/scripts/asynx.py" model rig --from-task "<generate-task-id>" --rig-type biped --skeleton mixamo --format glb
 python3 "<skill-dir>/scripts/asynx.py" model animate --from-task "<rig-task-id>" --animation preset:walk --format glb
 python3 "<skill-dir>/scripts/asynx.py" model convert --from-task "<task-id>" --format fbx
+python3 "<skill-dir>/scripts/asynx.py" model rig --file "/absolute/path/robot.glb" --rig-type biped
 ```
 
 | 命令 | 可用来源 | 参数 | 结果 |
 | --- | --- | --- | --- |
-| `model rig-check` | 生成任务 | 无 | 只返回结论 `rig_check`，不交付文件 |
-| `model rig` | 生成任务 | `--rig-type`、`--skeleton`、`--format` | 带骨骼的模型文件，有预览图时一并下载 |
+| `model rig-check` | 生成任务或本地模型文件 | 无 | 只返回结论 `rig_check`，不交付文件 |
+| `model rig` | 生成任务或本地模型文件 | `--rig-type`、`--skeleton`、`--format` | 带骨骼的模型文件，有预览图时一并下载 |
 | `model animate` | 骨骼绑定任务 | `--animation`（必填）、`--format` | 带动画的模型文件，无预览图 |
-| `model convert` | 生成、骨骼绑定或动画任务 | `--format`（必填） | 目标格式的模型文件，有预览图时一并下载 |
+| `model convert` | 生成、骨骼绑定或动画任务，或本地模型文件 | `--format`（必填） | 目标格式的模型文件，有预览图时一并下载 |
 
 - `--rig-type`：`biped`、`quadruped`、`hexapod`、`octopod`、`avian`、`serpentine`、`aquatic`、`others`。`--skeleton`（骨骼命名规范）：`tripo`、`mixamo`、`actorcore`、`unity`、`unreal`、`vrm`，仅在 `--rig-type` 为 `biped` 或省略时可用。两者均可省略，省略时不发送，由服务决定。
 - `rig` 与 `animate` 的 `--format`：`glb`（默认）或 `fbx`。`convert` 的 `--format`：`gltf`、`fbx`、`usdz`、`obj`、`stl`、`3mf`，必须指定；转换结果不能再作为来源，需要多种格式时分别对同一来源转换。
@@ -78,6 +79,28 @@ python3 "<skill-dir>/scripts/asynx.py" model convert --from-task "<task-id>" --f
 - 本机有来源任务的记录时，脚本在提交前核对：类型不符返回 `model_source_incompatible`，尚未成功返回 `model_source_not_ready`（来源仍在进行时按 `next_action_args` 先 `wait`），均不提交、不扣费。本机没有记录的服务端任务 ID 原样提交，由服务判断。
 - 服务拒绝时同样不创建任务（`task_created: false`）：`model_source_not_found` 表示任务不存在或不属于当前账户；`model_source_not_ready` 表示来源未成功或其模型文件已不可用；`model_source_incompatible` 表示来源类型不符，或当前没有渠道能处理该来源。
 - 动画必须由完成骨骼绑定的同一上游渠道执行，脚本无法指定渠道。该渠道不可用时服务以 `model_source_incompatible` 拒绝：稍后原样再试，持续出现时请用户联系服务支持。重新绑定或重新生成都会再次计费，由用户决定。
+
+### 本地模型文件
+
+`--file` 接受一个本地 3D 模型文件：GLB、FBX、OBJ 或 STL，按文件扩展名（`.glb`、`.fbx`、`.obj`、`.stl`，不区分大小写）判断格式，单个文件不超过 150 MB（150,000,000 字节）。不接受 GLTF：GLTF 通常引用外部的 `.bin` 与贴图文件，请先导出为单文件的 GLB。
+
+- 脚本只在本机检查扩展名与大小，不解析模型内容：扩展名不符返回 `unsupported_model_file`，超限返回 `model_file_too_large`，空文件返回 `empty_model_file`，路径不存在返回 `model_file_not_found`，均在上传前停止，不上传、不提交、不扣费。文件内容是否可用由上游判断，内容无效时任务失败且不计费。
+- 通过检查后，脚本在提交前把文件上传到 Asynx，再以上传得到的文件提交任务；同一文件在上传有效期内重复使用时不再重复上传。上传在提交时进行（加 `--quote` 报价时也会先上传），大文件需要相应的上传时间。
+- 服务拒绝时同样不创建任务：`file_not_found` 表示上传的文件已过期或不可用，脚本会自动重新上传一次并以同一请求再提交；仍被拒绝时重新运行原命令。任务受理后，服务会为排队中的任务保留该文件；若执行时文件仍已不可用，任务以 `input_asset_unavailable` 失败且不计费，重新运行原命令即可。
+- 计费与使用任务来源时相同：骨骼绑定与格式转换每提交一次计费一次。
+
+**本地模型不能直接套用动画**：动画只能套用在 Asynx 骨骼绑定任务的结果上，`model animate --file` 会返回 `model_file_needs_rig`，不上传、不提交。为本地模型做动画时先绑定骨骼，再用绑定任务的 ID 套用动画：
+
+```bash
+# 1. 可选：检查本地模型能否绑定骨骼（返回 rig_check，不交付文件）
+python3 "<skill-dir>/scripts/asynx.py" model rig-check --file "/absolute/path/robot.glb"
+# 2. 绑定骨骼（付费）。记下返回的 local_id 或 task_id
+python3 "<skill-dir>/scripts/asynx.py" model rig --file "/absolute/path/robot.glb" --rig-type biped
+# 3. 对骨骼绑定任务套用动画（付费，每个动画一个任务）
+python3 "<skill-dir>/scripts/asynx.py" model animate --from-task "<rig-task-id>" --animation preset:walk
+```
+
+只需要换格式时直接转换本地文件，例如 `model convert --file "/absolute/path/robot.stl" --format obj`。
 
 ### 完整流程示例
 
@@ -96,7 +119,7 @@ python3 "<skill-dir>/scripts/asynx.py" model animate --from-task "<rig-task-id>"
 python3 "<skill-dir>/scripts/asynx.py" model convert --from-task "<animate-task-id>" --format fbx
 ```
 
-每一步都是独立任务，各有自己的任务 ID；下一步的 `--from-task` 使用上一步返回的 `local_id` 或 `task_id`，不使用文件路径。只需要 FBX 的绑定或动画结果时，也可在第 3、4 步直接加 `--format fbx`，省去转换。
+每一步都是独立任务，各有自己的任务 ID；下一步的 `--from-task` 使用上一步返回的 `local_id` 或 `task_id`，不要把上一步下载的结果文件再用 `--file` 传入：那样会重新上传，且动画只接受骨骼绑定任务本身作为来源。只需要 FBX 的绑定或动画结果时，也可在第 3、4 步直接加 `--format fbx`，省去转换。
 
 绑定检查的结果在 `rig_check` 中：
 
