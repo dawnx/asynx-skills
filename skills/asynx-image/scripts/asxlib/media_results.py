@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from pathlib import Path
 from typing import Any
 
@@ -23,8 +22,6 @@ MODEL_FILE_EXTENSIONS = {
     "model/3mf": "3mf",
     "application/zip": "zip",
 }
-# A ZIP end record is 22 bytes plus a comment of at most 65535.
-_ZIP_TAIL_BYTES = 65_535 + 22
 
 
 def image_mime(data: bytes) -> str:
@@ -56,21 +53,27 @@ def incomplete_model_file(detail: str) -> AsxError:
 
 
 def media_file_info(path: Path, *, model_content_type_hint: str | None = None) -> dict[str, Any]:
-    """Identify supported containers by bytes, not by extension or HTTP MIME.
+    """Identify images and videos by bytes; take a 3D file's type from the service.
 
-    3D formats other than GLB have weak signatures or none (OBJ and STL are plain
-    data, USDZ and 3MF are both ZIP), so those are checked against the type the
-    service declared for the asset, or against the extension a saved file got from it.
+    A 3D file is delivered as the service stored it. Its shape is not checked
+    here: 3D formats have weak signatures or none, and a file this script could
+    not read (a 3MF archive, say) is still the paid result. Its type is the one
+    the service declared, or the one the saved file's extension records, and
+    that answer comes first: bytes that happen to look like an image do not
+    turn a 3D result into something else.
     """
+    declared = model_content_type(model_content_type_hint) or next(
+        (name for name, suffix in MODEL_FILE_EXTENSIONS.items() if path.suffix.lower() == f".{suffix}"), None
+    )
     with path.open("rb") as source:
         header = source.read(64 * 1024)
         size = path.stat().st_size
         digest = hashlib.sha256(header)
         while chunk := source.read(64 * 1024):
             digest.update(chunk)
-        source.seek(max(0, size - _ZIP_TAIL_BYTES))
-        tail = source.read()
-    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+    if declared is not None:
+        kind, content_type, extension = "model", declared, MODEL_FILE_EXTENSIONS[declared]
+    elif header.startswith(b"\x89PNG\r\n\x1a\n"):
         kind, content_type, extension = "image", "image/png", "png"
     elif header.startswith(b"\xff\xd8\xff"):
         kind, content_type, extension = "image", "image/jpeg", "jpg"
@@ -84,73 +87,16 @@ def media_file_info(path: Path, *, model_content_type_hint: str | None = None) -
     elif _is_mp4(header, size):
         kind, content_type, extension = "video", "video/mp4", "mp4"
     elif header[:4] == b"glTF":
-        # Binary glTF declares its total length at bytes 8..12; anything else is a partial file.
-        if len(header) < 12 or int.from_bytes(header[8:12], "little") != size:
-            raise incomplete_model_file("GLB 文件头声明的长度与实际大小不符。")
         kind, content_type, extension = "model", "model/gltf-binary", "glb"
     else:
-        declared = model_content_type(model_content_type_hint) or next(
-            (name for name, suffix in MODEL_FILE_EXTENSIONS.items() if path.suffix.lower() == f".{suffix}"), None
+        raise AsxError(
+            "无法识别结果文件格式，目前支持 PNG、JPEG、WebP、GIF、SVG 图片、MP4 视频，以及 GLB、FBX 等 3D 模型文件。",
+            code="unsupported_media_format",
         )
-        if declared is None or not _is_model_container(declared, header, tail, size):
-            raise AsxError(
-                "无法识别结果文件格式，目前支持 PNG、JPEG、WebP、GIF、SVG 图片、MP4 视频，以及 GLB、FBX 等 3D 模型文件。",
-                code="unsupported_media_format",
-            )
-        kind, content_type, extension = "model", declared, MODEL_FILE_EXTENSIONS[declared]
     return {
         "kind": kind, "content_type": content_type, "extension": extension,
         "size_bytes": size, "sha256": digest.hexdigest(),
     }
-
-
-def _is_model_container(content_type: str, header: bytes, tail: bytes, size: int) -> bool:
-    """A cheap signature check per declared 3D type.
-
-    Enough to refuse an error page, another format or a cut download; the
-    service validated the file it stored, and scenes are never parsed here.
-    """
-    extension = MODEL_FILE_EXTENSIONS[content_type]
-    if extension == "fbx":
-        return header.startswith((b"Kaydara FBX Binary  \x00", b"; FBX"))
-    if extension in {"usdz", "3mf", "zip"}:
-        if not header.startswith(b"PK\x03\x04"):
-            return False
-        if not _zip_is_complete(tail, size):
-            raise incomplete_model_file("压缩包缺少完整的结尾记录。")
-        return True
-    if extension == "stl":
-        # Binary: 80-byte header, triangle count, 50 bytes per triangle. Otherwise ASCII.
-        if size >= 84 and 84 + 50 * int.from_bytes(header[80:84], "little") == size:
-            return True
-        return header.lstrip().startswith(b"solid")
-    if b"\x00" in header:
-        return False
-    text = header.decode("utf-8", errors="ignore").lstrip("\ufeff").lstrip()
-    if extension == "gltf":
-        if not text.startswith("{") or '"asset"' not in text:
-            return False
-        if not tail.rstrip().endswith(b"}"):
-            raise incomplete_model_file("glTF 文本没有完整结束。")
-        return True
-    if extension == "obj":
-        return re.search(r"(?m)^[ \t]*(?:v|f)[ \t]", text) is not None
-    return False
-
-
-def _zip_is_complete(tail: bytes, size: int) -> bool:
-    """Whether the archive ends with a whole end-of-central-directory record."""
-    record = tail.rfind(b"PK\x05\x06")
-    if record < 0 or record + 22 > len(tail):
-        return False
-    directory_size = int.from_bytes(tail[record + 12:record + 16], "little")
-    directory_offset = int.from_bytes(tail[record + 16:record + 20], "little")
-    comment_size = int.from_bytes(tail[record + 20:record + 22], "little")
-    # The record states its own comment length and where the directory lies.
-    return (
-        record + 22 + comment_size == len(tail)
-        and directory_offset + directory_size <= size - len(tail) + record
-    )
 
 
 def _is_mp4(header: bytes, file_size: int) -> bool:

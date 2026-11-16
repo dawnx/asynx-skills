@@ -235,9 +235,8 @@ def _invalid_model_asset(task_id: str) -> AsxError:
 
 
 def _verify_model_download(task_id: str, asset: dict[str, Any], info: dict[str, Any]) -> None:
-    """The service validated the file it stored; this catches a wrong or cut download of it."""
-    declared = model_content_type(asset.get("content_type"))
-    if info["kind"] != "model" or (declared is not None and info["content_type"] != declared):
+    """Whether the download is the file the service stored: its type and its size, never its shape."""
+    if info["kind"] != "model":
         raise _invalid_model_asset(task_id)
     declared_size = asset.get("size_bytes")
     if type(declared_size) is int and declared_size != info["size_bytes"]:

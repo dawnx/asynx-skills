@@ -64,13 +64,13 @@ python3 "<skill-dir>/scripts/asynx.py" model convert --from-task "<task-id>" --f
 | 命令 | 可用来源 | 参数 | 结果 |
 | --- | --- | --- | --- |
 | `model rig-check` | 生成任务 | 无 | 只返回结论 `rig_check`，不交付文件 |
-| `model rig` | 生成任务 | `--rig-type`、`--skeleton`、`--format` | 带骨骼的模型文件，无预览图 |
+| `model rig` | 生成任务 | `--rig-type`、`--skeleton`、`--format` | 带骨骼的模型文件，有预览图时一并下载 |
 | `model animate` | 骨骼绑定任务 | `--animation`（必填）、`--format` | 带动画的模型文件，无预览图 |
 | `model convert` | 生成、骨骼绑定或动画任务 | `--format`（必填） | 目标格式的模型文件，有预览图时一并下载 |
 
 - `--rig-type`：`biped`、`quadruped`、`hexapod`、`octopod`、`avian`、`serpentine`、`aquatic`、`others`。`--skeleton`（骨骼命名规范）：`tripo`、`mixamo`、`actorcore`、`unity`、`unreal`、`vrm`，仅在 `--rig-type` 为 `biped` 或省略时可用。两者均可省略，省略时不发送，由服务决定。
 - `rig` 与 `animate` 的 `--format`：`glb`（默认）或 `fbx`。`convert` 的 `--format`：`gltf`、`fbx`、`usdz`、`obj`、`stl`、`3mf`，必须指定；转换结果不能再作为来源，需要多种格式时分别对同一来源转换。
-- `--animation` 为动画标识，例如 `preset:idle`、`preset:walk`、`preset:run`、`preset:quadruped:walk`。**每个任务只套用一个动画**，需要多个动画时对同一骨骼绑定任务分别提交。可用标识取决于骨骼类型，脚本不校验标识是否存在：标识不被支持时提交会被受理，随后任务失败，按失败原因更换标识；每次尝试都是一次付费任务。
+- `--animation` 为动画标识，例如 `preset:idle`、`preset:walk`、`preset:run`、`preset:quadruped:walk`。**每个任务只套用一个动画**，需要多个动画时对同一骨骼绑定任务分别提交。可用标识取决于骨骼类型，脚本不校验标识是否存在：标识不被支持时提交会被受理，随后任务失败；失败的任务不计费，按失败原因更换标识后重新提交。
 - 四条命令同样支持 `--model`、`--output-dir`、`--idempotency-key`、`--detach`、`--max-wait` 与 `--quote`。绑定检查通常免费或费用很低；骨骼绑定、动画与格式转换均为付费任务，每提交一次计费一次。费用不明确或用户想先了解时加 `--quote`。
 
 来源规则由脚本与服务共同检查：
@@ -121,11 +121,11 @@ python3 "<skill-dir>/scripts/asynx.py" recent --modality model
 
 生成时间通常超过宿主单条命令的时长上限：可加 `--max-wait <秒>`（略小于上限），到时返回 `wait_timeout: true` 与仍在运行的任务，任务不会被取消，再按返回的 `next_action_args` 执行 `wait`。用户想先了解费用时加 `--quote`，只返回服务报价，不提交、不扣费。
 
-直接交付返回的 `files`（绝对路径）：`models` 为模型文件，其 `format` 为实际保存的格式（`glb`、`fbx`、`gltf`、`obj`、`stl`、`usdz`、`3mf` 或 `zip`），`images` 为预览图，`media` 标明每个文件的类型。预览图为可选附件，仅生成与格式转换可能附带：缺失或下载失败时仅附带 `preview_unavailable` 提示，模型仍正常交付，需要时可再次 `wait` 补下载。`images` 中的预览图不是模型。
+直接交付返回的 `files`（绝对路径）：`models` 为模型文件，其 `format` 为实际保存的格式（`glb`、`fbx`、`gltf`、`obj`、`stl`、`usdz`、`3mf` 或 `zip`），`images` 为预览图，`media` 标明每个文件的类型。预览图为可选附件，生成与骨骼绑定通常附带，动画与格式转换通常没有：缺失或下载失败时仅附带 `preview_unavailable` 提示，模型仍正常交付，需要时可再次 `wait` 补下载。`images` 中的预览图不是模型。
 
-格式转换的结果可能是包含模型的 ZIP 压缩包（`format` 为 `zip`）。脚本按服务交付的原样保存，不解压；交付该压缩包并说明其中包含所需格式的模型，用户要求时再解压。
+格式转换的结果以服务实际交付的文件为准，不一定与请求的格式同名：请求 `gltf` 时通常交付单文件的 GLB（`format` 为 `glb`），请求 `obj` 时通常交付包含 `.obj`、`.mtl` 与贴图的 ZIP 压缩包（`format` 为 `zip`）。脚本按服务交付的原样保存，不解压；交付该压缩包并说明其中包含所需格式的模型，用户要求时再解压。
 
-脚本下载后按服务声明的类型核对文件：GLB 核对文件头与声明长度，其他格式核对文件特征（ZIP 类还核对结尾记录），并与服务记录的文件大小比对；单个文件上限 512 MiB，与视频一致。文件不完整（`incomplete_model_file`）或不是所声明的模型格式（`invalid_model_asset`）时报告下载失败且不保存为模型，此时任务已完成，使用 `wait` 重新下载原任务即可。脚本不解析模型内容，面数、贴图、材质、骨骼与动画只说明结果中返回的内容；宿主无法预览模型时提供文件路径与预览图。
+模型文件按服务交付的原样保存，脚本不检查文件内部结构，只把下载到的大小与服务记录的文件大小比对；单个文件上限 512 MiB，与视频一致。大小不符（`incomplete_model_file`）时报告下载失败且不保存为模型，此时任务已完成，使用 `wait` 重新下载原任务即可。脚本不解析模型内容，面数、贴图、材质、骨骼与动画只说明结果中返回的内容；宿主无法预览模型时提供文件路径与预览图。
 
 等待中断不等于取消。发出取消请求后，上游任务仍可能继续执行并计费。`delayed` 表示任务仍在进行，继续等待原任务。失败与下载错误须如实说明。
 

@@ -74,6 +74,12 @@ def _model_file(task: dict[str, Any]) -> tuple[bytes, str]:
         return GLB, "model/gltf-binary"
     if requested == "fbx":
         return FBX, "application/vnd.autodesk.fbx"
+    if "[未知形态]" in task["markers"]:
+        # A whole file as the service stored it, in a shape this script cannot read.
+        return MODEL_ZIP[:-8], "model/3mf"
+    if "[图片形态]" in task["markers"]:
+        # A whole file as the service stored it, whose bytes look like an image.
+        return PNG, "model/3mf"
     # Any other conversion arrives as an archive holding the model.
     return MODEL_ZIP, "application/zip"
 
@@ -470,7 +476,7 @@ class MockHandler(BaseHTTPRequestHandler):
                     content, content_type = _model_file(task)
                     markers = task["markers"]
                     follow_up = isinstance(task["input"].get("source"), dict)
-                    # Both bodies arrive whole, so only content checks can tell they are not a model.
+                    # Both bodies arrive whole but differ in size from the file the task records.
                     if "[截断模型]" in markers or (follow_up and "[截断后续]" in markers):
                         content = content[:-4]
                     elif "[非模型文件]" in markers:

@@ -19,7 +19,7 @@ import test_cli_e2e as image_e2e
 from asxlib import cli, models3d, state, uploads
 from asxlib.errors import AsxError
 from asxlib.media_results import image_mime
-from mock_asynx_server import FBX, GLB, MODEL_3D, MODEL_ZIP, MODELS_3D
+from mock_asynx_server import FBX, GLB, MODEL_3D, MODEL_ZIP, MODELS_3D, PNG
 from test_audit_regressions import FakeClient
 
 GLB_OUTPUT = {"formats": ["glb"]}
@@ -217,10 +217,10 @@ class ModelCLITests(unittest.TestCase):
         assets = self.run_cli("asset", "list", local["task_id"], with_credentials=False)["assets"]
         self.assertEqual([item["remote_index"] for item in assets], [0, 1])
 
-    def test_truncated_or_non_glb_download_is_a_download_failure_not_a_model(self):
-        for marker, code in (("[截断模型]", "incomplete_model_file"), ("[非模型文件]", "invalid_model_asset")):
+    def test_a_download_that_is_not_the_file_the_service_stored_is_a_download_failure_not_a_model(self):
+        for marker in ("[截断模型]", "[非模型文件]"):
             with self.subTest(marker=marker):
-                output_dir = self.temp_path / code
+                code, output_dir = "incomplete_model_file", self.temp_path / marker
                 submitted = self.run_cli(
                     "model", "generate", "--prompt", f"一只陶瓷茶壶 {marker}", "--detach",
                     "--output-dir", str(output_dir),
@@ -268,6 +268,28 @@ class ModelCLITests(unittest.TestCase):
         recent = self.run_cli("recent", "--query", submitted["task_id"], with_credentials=False)
         self.assertEqual(recent["artifacts"], [])
         self.assertEqual(self.submissions(), 2)
+
+    def test_a_conversion_is_delivered_in_whatever_shape_the_service_stored(self):
+        # A 3MF archive this script's own check could not read was refused although it was
+        # the complete, paid result. Only a download that differs from the stored file fails.
+        for marker, content in (("[未知形态]", MODEL_ZIP[:-8]), ("[图片形态]", PNG)):
+            with self.subTest(marker=marker):
+                source = self.finished_model(f"一只陶瓷茶壶 {marker}")
+                submitted = self.run_cli(
+                    "model", "convert", "--from-task", source, "--format", "3mf", "--detach",
+                    "--output-dir", str(self.temp_path / marker),
+                )
+                self.run_cli("task", "status", submitted["local_id"], "--refresh")
+                task = self.run_cli("task", "status", submitted["local_id"], "--refresh")["task"]
+                self.assertTrue(task["ok"])
+                model_path = Path(task["models"][0]["path"])
+                self.assertEqual((model_path.suffix, model_path.read_bytes()), (".3mf", content))
+                self.assertEqual(task["models"][0]["format"], "3mf")
+                self.assertNotIn(str(model_path), [item["path"] for item in task["images"]])
+                # The saved file stays a model for a later run, so it is not downloaded again.
+                again = self.run_cli("wait", submitted["local_id"])
+                self.assertEqual([item["path"] for item in again["models"]], [str(model_path)])
+                self.assertEqual(again["timings"]["asset_downloads"][0]["source"], "local_cache")
 
     def test_truncated_fbx_or_archive_conversion_is_a_download_failure_not_a_model(self):
         def converted(source, output_format, expected_returncode=0):
