@@ -41,6 +41,8 @@ MODEL_SOURCE_FORMATS = tuple(uploads.MODEL_UPLOAD_TYPES)
 MAX_MODEL_PROMPT_CHARACTERS = 1024
 MAX_MODEL_NEGATIVE_PROMPT_CHARACTERS = 255
 MAX_MODEL_FACES = 2_000_000
+# Motions one animation task can carry; each is charged.
+MAX_MODEL_ANIMATIONS = 5
 MAX_MODEL_SEED = 2**31 - 1
 _ANIMATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_-]{0,127}")
 _LIST_MODELS_ARGS = ["models", "--modality", "model"]
@@ -233,9 +235,28 @@ def _check_model_file_size(path: Path, size: int) -> None:
         raise AsxError(f"3D 模型文件为空，请检查文件：{path}", code="empty_model_file")
 
 
+def _animations(values: list[str]) -> list[str]:
+    """One to five distinct motions, in the order given; each one is charged."""
+    for value in values:
+        if _ANIMATION_ID.fullmatch(value) is None:
+            raise AsxError(
+                "动画标识须为 1–128 个英文、数字、冒号、下划线或连字符，并以英文或数字开头，例如 preset:walk。",
+                code="invalid_animation",
+            )
+    if not values or len(values) > MAX_MODEL_ANIMATIONS:
+        raise AsxError(
+            f"一个动画任务可套用 1–{MAX_MODEL_ANIMATIONS} 个动画，每个用一次 --animation 指定；"
+            f"超过 {MAX_MODEL_ANIMATIONS} 个时请分成多个任务提交。",
+            code="invalid_animation",
+        )
+    if len(set(values)) != len(values):
+        raise AsxError("同一个动画不能重复指定：重复的动画会多计费一次，结果却只有一份。", code="invalid_animation")
+    return list(values)
+
+
 def build_model_followup_task(
     client: Any, task_type: str, *, source: dict[str, str], model_selector: str | None = None,
-    rig_type: str | None = None, skeleton: str | None = None, animation: str | None = None,
+    rig_type: str | None = None, skeleton: str | None = None, animations: list[str] | None = None,
     output_format: str | None = None,
 ) -> tuple[dict[str, Any], str, str | None]:
     """Rig check, rig, retarget or convert an earlier task's model or a local model file.
@@ -256,13 +277,7 @@ def build_model_followup_task(
         if rig:
             task_input["rig"] = rig
     if task_type == "model.retarget":
-        if animation is None or _ANIMATION_ID.fullmatch(animation) is None:
-            raise AsxError(
-                "动画标识须为 1–128 个英文、数字、冒号、下划线或连字符，并以英文或数字开头，例如 preset:walk；"
-                "每个任务只套用一个动画。",
-                code="invalid_animation",
-            )
-        task_input["animations"] = [animation]
+        task_input["animations"] = _animations(animations or [])
     if task_type in {"model.rig", "model.retarget"}:
         task_input["output"] = {"formats": [output_format or "glb"]}
     elif task_type == "model.convert":
@@ -277,7 +292,7 @@ def body_from_model_followup_args(
     return build_model_followup_task(
         client, task_type, source=source, model_selector=getattr(args, "model", None),
         rig_type=getattr(args, "rig_type", None), skeleton=getattr(args, "skeleton", None),
-        animation=getattr(args, "animation", None), output_format=getattr(args, "format", None),
+        animations=getattr(args, "animation", None), output_format=getattr(args, "format", None),
     )
 
 

@@ -57,7 +57,7 @@ python3 "<skill-dir>/scripts/asynx.py" model generate --from-task "<image-task-i
 ```bash
 python3 "<skill-dir>/scripts/asynx.py" model rig-check --from-task "<generate-task-id>"
 python3 "<skill-dir>/scripts/asynx.py" model rig --from-task "<generate-task-id>" --rig-type biped --skeleton mixamo --format glb
-python3 "<skill-dir>/scripts/asynx.py" model animate --from-task "<rig-task-id>" --animation preset:walk --format glb
+python3 "<skill-dir>/scripts/asynx.py" model animate --from-task "<rig-task-id>" --animation preset:walk --animation preset:slash --format glb
 python3 "<skill-dir>/scripts/asynx.py" model convert --from-task "<task-id>" --format fbx
 python3 "<skill-dir>/scripts/asynx.py" model rig --file "/absolute/path/robot.glb" --rig-type biped
 ```
@@ -66,12 +66,12 @@ python3 "<skill-dir>/scripts/asynx.py" model rig --file "/absolute/path/robot.gl
 | --- | --- | --- | --- |
 | `model rig-check` | 生成任务或本地模型文件 | 无 | 只返回结论 `rig_check`，不交付文件 |
 | `model rig` | 生成任务或本地模型文件 | `--rig-type`、`--skeleton`、`--format` | 带骨骼的模型文件，有预览图时一并下载 |
-| `model animate` | 骨骼绑定任务 | `--animation`（必填）、`--format` | 带动画的模型文件，无预览图 |
+| `model animate` | 骨骼绑定任务 | `--animation`（必填，可重复，最多 5 个）、`--format` | 包含所选动画的一个模型文件，无预览图 |
 | `model convert` | 生成、骨骼绑定或动画任务，或本地模型文件 | `--format`（必填） | 目标格式的模型文件，有预览图时一并下载 |
 
 - `--rig-type`：`biped`、`quadruped`、`hexapod`、`octopod`、`avian`、`serpentine`、`aquatic`、`others`。`--skeleton`（骨骼命名规范）：`tripo`、`mixamo`、`actorcore`、`unity`、`unreal`、`vrm`，仅在 `--rig-type` 为 `biped` 或省略时可用。两者均可省略，省略时不发送，由服务决定。
 - `rig` 与 `animate` 的 `--format`：`glb`（默认）或 `fbx`。`convert` 的 `--format`：`gltf`、`fbx`、`usdz`、`obj`、`stl`、`3mf`，必须指定；转换结果不能再作为来源，需要多种格式时分别对同一来源转换。
-- `--animation` 为动画标识，例如 `preset:idle`、`preset:walk`、`preset:run`、`preset:quadruped:walk`。**每个任务只套用一个动画**，需要多个动画时对同一骨骼绑定任务分别提交。可用标识取决于骨骼类型，脚本不校验标识是否存在：标识不被支持时提交会被受理，随后任务失败；失败的任务不计费，按失败原因更换标识后重新提交。
+- `--animation` 为动画标识，例如 `preset:idle`、`preset:walk`、`preset:run`、`preset:quadruped:walk`。一个任务可套用 1–5 个不重复的动画，每个用一次 `--animation` 指定，例如走路、受击、攻击三个动作：`--animation preset:walk --animation preset:hurt --animation preset:slash`。多个动画合在同一个任务里交付一个模型文件，**按动画个数计费**（三个动画即三倍单价）；超过 5 个时分成多个任务提交。可用标识取决于骨骼类型，脚本不校验标识是否存在：标识不被支持时提交会被受理，随后任务失败；失败的任务不计费，按失败原因更换标识后重新提交。
 - 四条命令同样支持 `--model`、`--output-dir`、`--idempotency-key`、`--detach`、`--max-wait` 与 `--quote`。绑定检查通常免费或费用很低；骨骼绑定、动画与格式转换均为付费任务，每提交一次计费一次。费用不明确或用户想先了解时加 `--quote`。
 
 来源规则由脚本与服务共同检查：
@@ -96,7 +96,7 @@ python3 "<skill-dir>/scripts/asynx.py" model rig --file "/absolute/path/robot.gl
 python3 "<skill-dir>/scripts/asynx.py" model rig-check --file "/absolute/path/robot.glb"
 # 2. 绑定骨骼（付费）。记下返回的 local_id 或 task_id
 python3 "<skill-dir>/scripts/asynx.py" model rig --file "/absolute/path/robot.glb" --rig-type biped
-# 3. 对骨骼绑定任务套用动画（付费，每个动画一个任务）
+# 3. 对骨骼绑定任务套用动画（付费，按动画个数计费）
 python3 "<skill-dir>/scripts/asynx.py" model animate --from-task "<rig-task-id>" --animation preset:walk
 ```
 
@@ -113,7 +113,7 @@ python3 "<skill-dir>/scripts/asynx.py" model generate --prompt "一个卡通宇�
 python3 "<skill-dir>/scripts/asynx.py" model rig-check --from-task "<generate-task-id>"
 # 3. riggable 为 true 时绑定骨骼（付费），可采用返回的 recommended_rig_type
 python3 "<skill-dir>/scripts/asynx.py" model rig --from-task "<generate-task-id>" --rig-type biped
-# 4. 对骨骼绑定任务套用动画（付费，每个动画一个任务）
+# 4. 对骨骼绑定任务套用动画（付费，按动画个数计费）
 python3 "<skill-dir>/scripts/asynx.py" model animate --from-task "<rig-task-id>" --animation preset:walk
 # 5. 将动画结果转换为 FBX（付费）
 python3 "<skill-dir>/scripts/asynx.py" model convert --from-task "<animate-task-id>" --format fbx
@@ -154,4 +154,4 @@ python3 "<skill-dir>/scripts/asynx.py" recent --modality model
 
 ## 批次
 
-3D 模型不支持 `batch`。需要多个模型、多个动画或多种格式时，在用户确认的数量与费用范围内逐个提交对应命令（可加 `--detach`），分别用各自的任务 ID 查询与下载。
+3D 模型不支持 `batch`。需要多个模型、超过 5 个动画或多种格式时，在用户确认的数量与费用范围内逐个提交对应命令（可加 `--detach`），分别用各自的任务 ID 查询与下载。

@@ -158,6 +158,14 @@ class ModelFollowUpBodyTests(unittest.TestCase):
                 "source": rigged, "animations": ["preset:walk"], "output": {"formats": ["glb"]},
             },
         })
+        # Several motions go out as one task, in the order given.
+        self.assertEqual(
+            self.sent(
+                "animate", "--from-task", "local_rig",
+                "--animation", "preset:walk", "--animation", "preset:hurt", "--animation", "preset:slash",
+            )["input"]["animations"],
+            ["preset:walk", "preset:hurt", "preset:slash"],
+        )
         self.assertEqual(self.sent("convert", "--from-task", "local_rig", "--format", "fbx"), {
             "task_type": "model.convert", "model": "tripo-convert", "input": {
                 "source": rigged, "output": {"formats": ["fbx"]},
@@ -187,6 +195,15 @@ class ModelFollowUpBodyTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, code)
         self.assertEqual(caught.exception.details["max_bytes"], 150_000_000)
         self.assertEqual((self.client.uploaded, self.client.submitted), ([], []))
+
+    def test_motions_beyond_one_task_or_repeated_are_refused_before_any_charge(self):
+        # Six motions would be refused by the service; a repeat would be paid twice for one clip.
+        six = [flag for index in range(6) for flag in ("--animation", f"preset:m{index}")]
+        for flags in (six, ["--animation", "preset:walk", "--animation", "preset:walk"]):
+            with self.subTest(flags=flags), self.assertRaises(AsxError) as caught:
+                self.sent("animate", "--from-task", "task_elsewhere", *flags)
+            self.assertEqual(caught.exception.code, "invalid_animation")
+        self.assertEqual(self.client.submitted, [])
 
 
 class ModelCLITests(unittest.TestCase):

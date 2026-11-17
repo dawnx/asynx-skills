@@ -334,12 +334,15 @@ def parser() -> argparse.ArgumentParser:
     rig.add_argument("--format", choices=RIGGED_FORMATS, help="输出格式，默认 glb")
     _add_model_task_options(rig, operation="骨骼绑定")
 
-    animate = model_commands_3d.add_parser("animate", help="为已绑定骨骼的 3D 模型套用一个动画并下载结果")
+    animate = model_commands_3d.add_parser("animate", help="为已绑定骨骼的 3D 模型套用 1–5 个动画并下载结果")
     animate.add_argument("--from-task", help=source_help.format("骨骼绑定"))
     animate.add_argument(
         "--file", help="不支持：本地模型须先通过 model rig --file 绑定骨骼，再用该任务 ID 套用动画",
     )
-    animate.add_argument("--animation", required=True, help="动画标识，例如 preset:walk；每个任务只套用一个动画")
+    animate.add_argument(
+        "--animation", action="append", required=True,
+        help="动画标识，例如 preset:walk；可重复指定，一个任务最多 5 个，合在同一个结果文件里、按个数计费",
+    )
     animate.add_argument("--format", choices=RIGGED_FORMATS, help="输出格式，默认 glb")
     _add_model_task_options(animate, operation="动画")
 
