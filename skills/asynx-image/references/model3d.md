@@ -39,7 +39,7 @@ python3 "<skill-dir>/scripts/asynx.py" models --modality model
 
 ## 参考图
 
-- 本地参考图支持 PNG、JPEG、WebP 静态图，源文件不超过 25 MiB。脚本校正方向、按需缩小并编码后上传，Agent 无需预处理；HTTP(S) 链接原样交给 Asynx 读取。
+- 本地参考图支持 PNG、JPEG、WebP 静态图，源文件不超过 25 MiB。在上传限制内原样上传，超出时由脚本校正方向、缩小并编码，Agent 无需预处理；HTTP(S) 链接原样交给 Asynx 读取。
 - 主体完整、背景干净的单物体图片效果更稳定。图片超限或格式不符时命令会说明原因，由用户决定是否更换素材。
 
 复用已有图片任务的结果：

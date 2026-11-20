@@ -26,13 +26,20 @@ MAX_HTTP_ATTEMPTS = 4
 MAX_REDIRECTS = 5
 MAX_REFERENCE_IMAGES = 16
 MAX_REFERENCE_SOURCE_BYTES = 25 * 1024 * 1024
-MAX_REFERENCE_BYTES = 5 * 1024 * 1024
+# The service's limits for one image input and for all of a task's inputs.
+MAX_REFERENCE_BYTES = 10 * 1024 * 1024
 MAX_REFERENCE_TOTAL_BYTES = 20 * 1024 * 1024
-MAX_REFERENCE_DIMENSION = 1600
-MAX_REFERENCE_PIXELS = 2_560_000
+# Large enough for a 4K result, so editing one does not shrink it first.
+MAX_REFERENCE_DIMENSION = 3840
+MAX_REFERENCE_PIXELS = 8_294_400
 MAX_SAFE_IMAGE_PIXELS = 40 * 1024 * 1024
 MAX_MASK_BYTES = 10 * 1024 * 1024
-REFERENCE_WEBP_QUALITY = 82
+# Lossy encoding only when a lossless image would not fit the byte budget.
+REFERENCE_WEBP_QUALITY = 90
+# The last resort keeps the earlier small, lossy form, which always fits.
+COMPACT_REFERENCE_DIMENSION = 1600
+COMPACT_REFERENCE_PIXELS = 2_560_000
+COMPACT_REFERENCE_WEBP_QUALITY = 82
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "timeout", "canceled"})
 KNOWN_STATUSES = TERMINAL_STATUSES | frozenset({"queued", "running", "delayed", "canceling"})
 TRANSIENT_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})

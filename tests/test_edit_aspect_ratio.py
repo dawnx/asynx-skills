@@ -12,7 +12,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "skills/asynx-image/scripts"))
 
-from asxlib import images, reference_media
+from asxlib import images, reference_media, uploads
 from asxlib.errors import AsxError
 from test_audit_regressions import FakeClient, catalog_model
 
@@ -47,15 +47,41 @@ class EditAspectRatioTests(unittest.TestCase):
         options.update(overrides)
         return images.build_task(self.client, **options)[0]
 
-    def test_edit_preserves_original_ratio_before_resize_without_catalog_request(self):
+    def default_model(self, sizes):
+        model = catalog_model(SAMPLE_MODEL)
+        model["image_parameters"] = {"image_sizes": sizes}
+        model["default_for"] = [{"task_types": ["image.edit"], "output_formats": []}]
+        self.client.catalog = [model]
+
+    def test_edit_uploads_large_original_unchanged_and_keeps_its_ratio(self):
         path = self.image("large.png", (3000, 2000))
-        with (
-            patch.object(self.client, "models", side_effect=AssertionError("unexpected catalog request")),
-            patch.object(reference_media, "_webp", wraps=reference_media._webp) as encode,
-        ):
+        with patch.object(reference_media, "_webp", wraps=reference_media._webp) as encode:
             body = self.build([path])
         self.assertEqual(body["input"]["aspect_ratio"], "3:2")
-        self.assertEqual(encode.call_count, 1)
+        self.assertEqual(encode.call_count, 0)
+        self.assertEqual(uploads.read(body["input"]["images"][0]), Path(path).read_bytes())
+
+    # Without a tier the service used the model default, so a 2K image came back at 1K.
+    def test_edit_keeps_the_source_resolution_tier_the_model_offers(self):
+        self.default_model(["1K", "2K", "4K"])
+        cases = {(1024, 1024): "1K", (1536, 1024): "1K", (2048, 1152): "2K", (2048, 2048): "2K",
+                 (3840, 2160): "4K"}
+        for size, tier in cases.items():
+            with self.subTest(size=size):
+                path = self.image(f"{size[0]}x{size[1]}.png", size)
+                self.assertEqual(self.build([path])["input"]["image_size"], tier)
+        self.default_model(["2K", "3K", "4K"])
+        (self.root / "models.json").unlink(missing_ok=True)
+        path = self.image("small.png", (1024, 1024))
+        self.assertEqual(self.build([path])["input"]["image_size"], "2K")
+
+    def test_named_size_wins_and_unknown_model_leaves_the_tier_to_the_service(self):
+        self.default_model(["1K", "2K"])
+        path = self.image("large.png", (2048, 2048))
+        self.assertEqual(self.build([path], image_size="1K")["input"]["image_size"], "1K")
+        self.client.catalog = [catalog_model(SAMPLE_MODEL)]
+        (self.root / "models.json").unlink(missing_ok=True)
+        self.assertNotIn("image_size", self.build([path])["input"])
 
     def test_exif_display_orientation_is_used(self):
         path = self.image("rotated.jpg", (180, 120), orientation=6)

@@ -491,7 +491,9 @@ class CLIE2ETestCase(unittest.TestCase):
             stats = json.load(response)["data"]
         self.assertEqual(stats["tasks"], 9)
         self.assertGreaterEqual(stats["idempotent_replays"], 1)
-        self.assertEqual(stats["model_requests"], 0)
+        # Only an edit reads the catalog, for the size tier of the model it runs on;
+        # the cached catalog serves every later one.
+        self.assertEqual(stats["model_requests"], 1)
 
 
 if __name__ == "__main__":

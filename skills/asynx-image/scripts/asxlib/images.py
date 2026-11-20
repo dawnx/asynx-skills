@@ -129,6 +129,64 @@ def _looks_canonical(selector: str) -> bool:
     return bool(_CANONICAL_MODEL.fullmatch(selector.strip()))
 
 
+# The pixels each size tier stands for, by its longest edge on a square.
+_TIER_EDGES = {"1K": 1024, "1.5K": 1536, "2K": 2048, "3K": 3072, "4K": 3840}
+
+
+def _edited_model(
+    client: ModelCatalogClient,
+    model: dict[str, Any] | None,
+    requested_model: str | None,
+    output_format: str,
+) -> dict[str, Any] | None:
+    """The catalog entry an edit will run on: the named one or the service default."""
+    if model is not None:
+        return model
+    scope = getattr(client, "cache_scope", None)
+    models = _cached_models(client.base_url, scope=scope)
+    if models is None:
+        try:
+            models, _request_id = client.models()
+        except AsxError:
+            return None
+        cache_models(client.base_url, models, scope=scope)
+    if requested_model is not None:
+        try:
+            return resolve_model(models, requested_model, "image.edit")
+        except AsxError:
+            return None
+    defaults = [
+        item
+        for item in models
+        if any(
+            "image.edit" in use.get("task_types", [])
+            and (not use.get("output_formats") or output_format in use["output_formats"])
+            for use in item.get("default_for") or []
+            if isinstance(use, dict)
+        )
+    ]
+    return defaults[0] if len(defaults) == 1 else None
+
+
+def _matching_size_tier(model: dict[str, Any] | None, width: int, height: int) -> str | None:
+    """The model's size tier closest to the source, so an edit keeps its resolution."""
+    if model is None:
+        return None
+    parameters = model.get("image_parameters") or {}
+    capabilities = model.get("capabilities") or {}
+    sizes = parameters.get("image_sizes") or capabilities.get("image_sizes") or []
+    tiers = [size for size in sizes if size in _TIER_EDGES]
+    if not tiers:
+        return None
+    # Compare areas on a log scale: tiers double in edge, and a 16:9 2K result
+    # has fewer pixels than a square one.
+    pixels = width * height
+    return min(
+        tiers,
+        key=lambda tier: (abs(math.log(pixels / _TIER_EDGES[tier] ** 2)), _TIER_EDGES[tier]),
+    )
+
+
 def validate_idempotency_key(value: str) -> str:
     try:
         raw = value.encode("ascii")
@@ -245,6 +303,20 @@ def build_task(
                 details={"input_aspect_ratios": sorted(ratios)},
             )
         canonical_ratio = ratios.pop()
+    if (
+        task_type == "image.edit"
+        and canonical_size is None
+        and not options.get("size")
+        and canonical_format not in {"svg", "gif"}
+        and source_sizes
+        and source_sizes[0] is not None
+    ):
+        # Left to the service, an edit takes the model's default tier, so a 2K
+        # image comes back at 1K and every further edit starts from less.
+        width, height = source_sizes[0]
+        canonical_size = _matching_size_tier(
+            _edited_model(client, model, requested_model, canonical_format), width, height
+        )
     task_input: dict[str, Any] = {
         "prompt": prompt,
         "count": count,

@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "skills/asynx-image/scripts")
 import test_cli_e2e as image_e2e
 from asxlib import cli, models3d, state, uploads
 from asxlib.errors import AsxError
-from asxlib.media_results import image_mime
 from mock_asynx_server import FBX, GLB, MODEL_3D, MODEL_ZIP, MODELS_3D, PNG
 from test_audit_regressions import FakeClient
 
@@ -79,7 +78,7 @@ class ModelRequestBodyTests(unittest.TestCase):
         Image.new("RGB", (8, 6), "white").save(source)
         local = self.body("--image", str(source), "--max-faces", "20000")["input"]
         self.assertEqual(set(local), {"mode", "image", "geometry", "output"})
-        self.assertEqual(image_mime(uploads.read(local["image"])), "image/webp")
+        self.assertEqual(uploads.read(local["image"]), source.read_bytes())
         requests_before = self.client.catalog_requests
         for flags in (
             ["--image", url, "--prompt", "茶壶"], ["--image", url, "--negative-prompt", "裂纹"],

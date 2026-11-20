@@ -93,12 +93,12 @@ class ReferenceMediaTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             original = Path(directory) / "source.png"
             markup = Path(directory) / "markup.png"
-            Image.new("RGB", (2000, 1000), "white").save(original)
-            Image.new("RGBA", (2000, 1000), (0, 0, 0, 0)).save(markup)
+            Image.new("RGB", (4000, 1000), "white").save(original)
+            Image.new("RGBA", (4000, 1000), (0, 0, 0, 0)).save(markup)
             result = reference_media.prepare_markup(str(markup), str(original), keep_original=False)
             data = uploads.read(result.source)
             with Image.open(io.BytesIO(data)) as layer:
-                self.assertEqual(layer.size, (1600, 800))
+                self.assertEqual(layer.size, (3840, 960))
             Image.new("RGBA", (1000, 1000)).save(markup)
             with self.assertRaises(AsxError):
                 reference_media.prepare_markup(str(markup), str(original), keep_original=False)
@@ -106,13 +106,14 @@ class ReferenceMediaTestCase(unittest.TestCase):
     def test_fixed_reference_limits(self) -> None:
         self.assertEqual(MAX_REFERENCE_IMAGES, 16)
         self.assertEqual(MAX_REFERENCE_SOURCE_BYTES, 25 * 1024 * 1024)
-        self.assertEqual(MAX_REFERENCE_BYTES, 5 * 1024 * 1024)
+        self.assertEqual(MAX_REFERENCE_BYTES, 10 * 1024 * 1024)
         self.assertEqual(MAX_REFERENCE_TOTAL_BYTES, 20 * 1024 * 1024)
-        self.assertEqual(MAX_REFERENCE_DIMENSION, 1600)
-        self.assertEqual(MAX_REFERENCE_PIXELS, 2_560_000)
+        self.assertEqual(MAX_REFERENCE_DIMENSION, 3840)
+        self.assertEqual(MAX_REFERENCE_PIXELS, 8_294_400)
         self.assertEqual(MAX_MASK_BYTES, 10 * 1024 * 1024)
 
-    def test_local_and_data_url_images_are_normalized_to_webp(self) -> None:
+    # Re-encoding every round is what blurred an image edited again and again.
+    def test_images_within_limits_are_uploaded_unchanged(self) -> None:
         path, png = self._write_image("reference.png")
         sources = (str(path), self._data_url(png))
 
@@ -120,17 +121,31 @@ class ReferenceMediaTestCase(unittest.TestCase):
             with self.subTest(source="local" if source == str(path) else "data_url"):
                 prepared = reference_media.prepare_image(source)
                 content_type, data = self._staged(prepared.source)
-                self.assertEqual(content_type, "image/webp")
-                self.assertEqual(prepared.content_type, "image/webp")
-                self.assertEqual(prepared.size_bytes, len(data))
+                self.assertEqual(data, png)
+                self.assertEqual(content_type, "image/png")
                 self.assertEqual((prepared.width, prepared.height), (64, 32))
-                self.assertTrue(prepared.normalized)
-                with Image.open(io.BytesIO(data)) as decoded:
-                    self.assertEqual(decoded.format, "WEBP")
-                    self.assertEqual(decoded.size, (64, 32))
+                self.assertFalse(prepared.normalized)
+
+    def test_metadata_rotation_is_applied_without_loss(self) -> None:
+        source = Image.new("RGB", (64, 32))
+        source.putpixel((0, 0), (255, 0, 0))
+        exif = Image.Exif()
+        exif[274] = 6
+        path = self.directory / "rotated.jpg"
+        source.save(path, format="JPEG", exif=exif, quality=100)
+        with Image.open(path) as stored:
+            upright = stored.transpose(Image.Transpose.ROTATE_270).convert("RGB")
+
+        prepared = reference_media.prepare_image(str(path))
+
+        content_type, data = self._staged(prepared.source)
+        self.assertEqual(content_type, "image/webp")
+        with Image.open(io.BytesIO(data)) as decoded:
+            self.assertEqual(decoded.size, (32, 64))
+            self.assertEqual(list(decoded.convert("RGB").getdata()), list(upright.getdata()))
 
     def test_normalization_scales_to_dimension_and_pixel_limits(self) -> None:
-        path, _data = self._write_image("large.png", size=(3000, 2400))
+        path, _data = self._write_image("large.png", size=(4000, 2400))
 
         prepared = reference_media.prepare_image(str(path))
 
@@ -142,31 +157,28 @@ class ReferenceMediaTestCase(unittest.TestCase):
         self.assertLessEqual(prepared.width * prepared.height, MAX_REFERENCE_PIXELS)
         self.assertLessEqual(prepared.size_bytes or 0, MAX_REFERENCE_BYTES)
 
-    def test_normalization_encodes_webp_once_and_rejects_an_oversized_result(self) -> None:
-        class OversizedWebpImage:
-            size = (1, 1)
-            mode = "RGB"
+    # Lossy encoding is a fallback for images that cannot fit losslessly.
+    def test_lossy_encoding_only_when_lossless_does_not_fit(self) -> None:
+        noise = Image.effect_noise((512, 512), 64).convert("RGB")
+        path = self.directory / "noise.png"
+        noise.save(path)
+        lossless_size = len(reference_media._webp(
+            noise, max_dimension=MAX_REFERENCE_DIMENSION, max_pixels=MAX_REFERENCE_PIXELS, quality=None
+        )[0])
+        with patch.object(reference_media, "_webp", wraps=reference_media._webp) as encode:
+            prepared = reference_media.prepare_image(str(path), max_bytes=lossless_size - 1)
+        self.assertEqual([call.kwargs["quality"] for call in encode.call_args_list], [None, 90])
+        self.assertEqual((prepared.width, prepared.height), (512, 512))
+        self.assertLess(prepared.size_bytes or 0, lossless_size)
 
-            def __init__(self) -> None:
-                self.save_calls = 0
-                self.info: dict[str, object] = {}
-
-            def copy(self) -> OversizedWebpImage:
-                return self
-
-            def getbands(self) -> tuple[str, str, str]:
-                return ("R", "G", "B")
-
-            def save(self, output: io.BytesIO, **_kwargs: object) -> None:
-                self.save_calls += 1
-                output.write(b"x" * 11)
-
-        image = OversizedWebpImage()
-        with patch.object(reference_media, "MAX_REFERENCE_BYTES", 10):
+        with patch.object(reference_media, "_webp", return_value=(b"x" * 11, 1, 1)) as encode:
             self._assert_error(
-                "reference_image_normalization_failed", reference_media._webp, image
+                "reference_image_normalization_failed",
+                reference_media.prepare_image,
+                str(path),
+                max_bytes=10,
             )
-        self.assertEqual(image.save_calls, 1)
+        self.assertEqual(encode.call_count, 3)
 
     def test_keep_original_preserves_bytes_and_still_enforces_delivery_limits(self) -> None:
         path, jpeg = self._write_image("reference.jpg", image_format="JPEG")
@@ -237,18 +249,22 @@ class ReferenceMediaTestCase(unittest.TestCase):
             PreparedImage("second", "image/webp", 9, 1, 1, True),
         ]
         mask = PreparedImage("mask", "image/png", 3, 1, 1, False)
+        mask_path = self.directory / "mask.png"
+        mask_path.write_bytes(b"abc")
         with (
             patch.object(reference_media, "MAX_REFERENCE_TOTAL_BYTES", 20),
-            patch.object(reference_media, "prepare_image", side_effect=prepared),
+            patch.object(reference_media, "prepare_image", side_effect=prepared) as prepare,
             patch.object(reference_media, "prepare_mask", return_value=mask),
         ):
             self._assert_error(
                 "reference_images_total_too_large",
                 reference_media.prepare_inputs,
                 references,
-                mask="mask.png",
+                mask=str(mask_path),
                 keep_original=False,
             )
+        # Originals that fit alone but not together get re-encoded, not refused.
+        self.assertEqual({call.kwargs["max_bytes"] for call in prepare.call_args_list}, {8})
 
     def test_valid_mask_is_preserved_as_png(self) -> None:
         mask_image = Image.new("RGBA", (2, 1), (0, 0, 0, 0))

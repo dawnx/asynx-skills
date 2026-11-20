@@ -14,6 +14,9 @@ from urllib.parse import urlsplit
 
 from . import uploads
 from .constants import (
+    COMPACT_REFERENCE_DIMENSION,
+    COMPACT_REFERENCE_PIXELS,
+    COMPACT_REFERENCE_WEBP_QUALITY,
     MAX_MASK_BYTES,
     MAX_REFERENCE_BYTES,
     MAX_REFERENCE_DIMENSION,
@@ -33,6 +36,7 @@ _DATA_URL = re.compile(
 )
 _SUPPORTED_FORMATS = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}
 _MAX_BASE64_SOURCE_CHARACTERS = ((MAX_REFERENCE_SOURCE_BYTES + 2) // 3) * 4
+_EXIF_ORIENTATION = 0x0112
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,16 +149,20 @@ def _decoded_image(data: bytes) -> tuple[Any, str, int]:
     return image, content_type, frame_count
 
 
-def _webp(image: Any) -> tuple[bytes, int, int]:
+def _webp(
+    image: Any, *, max_dimension: int, max_pixels: int, quality: int | None
+) -> tuple[bytes, int, int]:
+    """Fit the image within the bounds; ``quality`` None encodes losslessly."""
     image_module, _image_ops, _unidentified = _pillow()
     width, height = image.size
     scale = min(
         1.0,
-        MAX_REFERENCE_DIMENSION / max(width, height),
-        math.sqrt(MAX_REFERENCE_PIXELS / (width * height)),
+        max_dimension / max(width, height),
+        math.sqrt(max_pixels / (width * height)),
     )
-    target_width = max(1, round(width * scale))
-    target_height = max(1, round(height * scale))
+    # Round down: rounding to nearest can land a few pixels over the limit.
+    target_width = max(1, math.floor(width * scale))
+    target_height = max(1, math.floor(height * scale))
     prepared = (
         image.resize((target_width, target_height), image_module.Resampling.LANCZOS)
         if (target_width, target_height) != (width, height)
@@ -164,43 +172,69 @@ def _webp(image: Any) -> tuple[bytes, int, int]:
     if prepared.mode not in {"RGB", "RGBA"}:
         prepared = prepared.convert("RGBA" if has_alpha else "RGB")
     output = io.BytesIO()
-    prepared.save(output, format="WEBP", quality=REFERENCE_WEBP_QUALITY, method=4)
-    data = output.getvalue()
-    if len(data) > MAX_REFERENCE_BYTES:
-        raise AsxError(
-            "参考图压缩后仍超过 5 MiB，请降低原图分辨率或使用较小的图片。",
-            code="reference_image_normalization_failed",
-        )
-    return data, target_width, target_height
+    if quality is None:
+        prepared.save(output, format="WEBP", lossless=True, quality=50, method=2)
+    else:
+        prepared.save(output, format="WEBP", quality=quality, method=4)
+    return output.getvalue(), target_width, target_height
 
 
-def prepare_image(value: str, *, keep_original: bool = False) -> PreparedImage:
+def _rotated_by_metadata(data: bytes) -> bool:
+    """Whether the file only shows upright after applying its EXIF orientation."""
+    image_module, _image_ops, _unidentified = _pillow()
+    with image_module.open(io.BytesIO(data)) as source:
+        return source.getexif().get(_EXIF_ORIENTATION, 1) != 1
+
+
+def prepare_image(
+    value: str, *, keep_original: bool = False, max_bytes: int = MAX_REFERENCE_BYTES
+) -> PreparedImage:
+    """Upload a local image unchanged whenever the service can take it as it is.
+
+    A model re-reads every pixel it is given, so each lossy pass or downscale of
+    an image that is edited again and again compounds into a visible blur. Only
+    an image beyond the limits, or one whose orientation lives in metadata, is
+    re-encoded: losslessly at full size if that fits ``max_bytes``, and lossy
+    only when nothing lossless fits.
+    """
     if value.casefold().startswith(("http://", "https://")):
         return PreparedImage(_validated_remote_url(value), None, None, None, None, False)
     data, _declared_type = _read_source(value, max_bytes=MAX_REFERENCE_SOURCE_BYTES)
     image, content_type, _frame_count = _decoded_image(data)
     width, height = image.size
+    fits = max(width, height) <= MAX_REFERENCE_DIMENSION and width * height <= MAX_REFERENCE_PIXELS
     if keep_original:
-        if (
-            len(data) > MAX_REFERENCE_BYTES
-            or max(width, height) > MAX_REFERENCE_DIMENSION
-            or width * height > MAX_REFERENCE_PIXELS
-        ):
+        if len(data) > max_bytes or not fits:
             raise AsxError(
                 "原图大小或分辨率超出上传限制；请允许脚本自动处理（移除 --keep-reference-original），或使用较小的图片。",
                 code="reference_image_requires_normalization",
             )
         return PreparedImage(uploads.stage(data), content_type, len(data), width, height, False)
-    original_size = (width, height)
-    normalized, width, height = _webp(image)
-    return PreparedImage(
-        uploads.stage(normalized),
-        "image/webp",
-        len(normalized),
-        width,
-        height,
-        True,
-        original_size,
+    if fits and len(data) <= max_bytes and not _rotated_by_metadata(data):
+        return PreparedImage(
+            uploads.stage(data), content_type, len(data), width, height, False, (width, height)
+        )
+    for max_dimension, max_pixels, quality in (
+        (MAX_REFERENCE_DIMENSION, MAX_REFERENCE_PIXELS, None),
+        (MAX_REFERENCE_DIMENSION, MAX_REFERENCE_PIXELS, REFERENCE_WEBP_QUALITY),
+        (COMPACT_REFERENCE_DIMENSION, COMPACT_REFERENCE_PIXELS, COMPACT_REFERENCE_WEBP_QUALITY),
+    ):
+        normalized, target_width, target_height = _webp(
+            image, max_dimension=max_dimension, max_pixels=max_pixels, quality=quality
+        )
+        if len(normalized) <= max_bytes:
+            return PreparedImage(
+                uploads.stage(normalized),
+                "image/webp",
+                len(normalized),
+                target_width,
+                target_height,
+                True,
+                (width, height),
+            )
+    raise AsxError(
+        "参考图压缩后仍超出上传限制，请降低原图分辨率、减少图片数量或使用较小的图片。",
+        code="reference_image_normalization_failed",
     )
 
 
@@ -236,6 +270,10 @@ def prepare_mask(value: str, *, source: PreparedImage | None) -> PreparedImage:
     return PreparedImage(uploads.stage(data), "image/png", len(data), width, height, False)
 
 
+def _is_remote(value: str) -> bool:
+    return value.casefold().startswith(("http://", "https://"))
+
+
 def prepare_inputs(
     references: list[str],
     *,
@@ -250,7 +288,17 @@ def prepare_inputs(
             f"最多可传入 {MAX_REFERENCE_IMAGES} 张图片，请减少输入图片。",
             code="too_many_images",
         )
-    prepared = [prepare_image(value, keep_original=keep_original) for value in references]
+    # Share the task's byte limit among the local images, so originals that fit
+    # alone but not together are re-encoded rather than refused.
+    mask_bytes = len(_read_source(mask, max_bytes=MAX_MASK_BYTES)[0]) if mask and not _is_remote(mask) else 0
+    local_count = sum(1 for value in references if not _is_remote(value))
+    budget = min(
+        MAX_REFERENCE_BYTES,
+        max(1, (MAX_REFERENCE_TOTAL_BYTES - mask_bytes) // max(1, local_count)),
+    )
+    prepared = [
+        prepare_image(value, keep_original=keep_original, max_bytes=budget) for value in references
+    ]
     if source_sizes is not None:
         source_sizes.extend(
             item.original_size or ((item.width, item.height) if item.width and item.height else None)
